@@ -1,76 +1,76 @@
-import { BrowserRouter, Routes, Route } from 'react-router-dom';
-import BaoVeTuyenDuong from './BaoVeTuyenDuong';
+import { Routes, Route } from 'react-router-dom';
 
-// Import tất cả các trang
+// Import các trang Khách Hàng mới
+import TrangChu from '../Trang/KhachHang/TrangChu';
+
 import DangNhap from '../Trang/Chung/DangNhap';
-import TraCuuHanhTrinh from '../Trang/KhachHang/TraCuuHanhTrinh';
-import BanGiamDoc from '../Trang/Admin/BanGiamDoc';
-import TrungTamDieuPhoi from '../Trang/DieuHanh/TrungTamDieuPhoi';
 import QuanLyDonHang from '../Trang/CuaHang/QuanLyDonHang';
+import AppTaiXe from '../Trang/TaiXe/AppTaiXe';
 import QuetMaVach from '../Trang/Kho/QuetMaVach';
-import BanDoGiaoHang from '../Trang/TaiXe/BanDoGiaoHang';
+import TrungTamDieuPhoi from '../Trang/DieuHanh/TrungTamDieuPhoi';
 import DoiSoatCOD from '../Trang/KeToan/DoiSoatCOD';
+import BanGiamDoc from '../Trang/Admin/BanGiamDoc';
 import HoSoNhanVien from '../Trang/NhanSu/HoSoNhanVien';
 
+// Import Component Bảo Vệ
+import BaoVeTuyenDuong from './BaoVeTuyenDuong';
+
+function UocTinhCuocPhi() {
+  return (
+    <div className="p-6">
+      <h1 className="text-2xl font-bold mb-4">Ước tính cước</h1>
+      <p>Trang này đang được phát triển.</p>
+    </div>
+  );
+}
+
+function TimKiemBuuCuc() {
+  return (
+    <div className="p-6">
+      <h1 className="text-2xl font-bold mb-4">Tìm bưu cục</h1>
+      <p>Trang này đang được phát triển.</p>
+    </div>
+  );
+}
+
 export default function DieuHuongChinh() {
-    return (
-        <BrowserRouter>
-            <Routes>
-                {/* 🟢 KHU VỰC CÔNG KHAI (Ai cũng vào được) */}
-                <Route path="/" element={<TraCuuHanhTrinh />} />
-                <Route path="/dang-nhap" element={<DangNhap />} />
+  return (
+    <Routes>
+      {/* KHU VỰC PUBLIC (Trang chủ tra cứu và các dịch vụ công khai cho khách hàng) */}
+      <Route path="/" element={<TrangChu />} />
+      <Route path="/uoc-tinh-cuoc" element={<UocTinhCuocPhi />} />
+      <Route path="/tim-buu-cuc" element={<TimKiemBuuCuc />} />
+      
+      <Route path="/dang-nhap" element={<DangNhap />} />
 
-                {/* 🔴 KHU VỰC BẢO MẬT (Kiểm tra Role khắt khe) */}
-                
-                {/* Ban Giám Đốc (Chỉ Admin) */}
-                <Route path="/ban-giam-doc" element={
-                    <BaoVeTuyenDuong quyenChoPhep={['admin']}>
-                        <BanGiamDoc />
-                    </BaoVeTuyenDuong>
-                } />
-
-                {/* Điều Hành (Admin & Dispatcher) */}
-                <Route path="/dieu-hanh" element={
-                    <BaoVeTuyenDuong quyenChoPhep={['admin', 'dispatcher']}>
-                        <TrungTamDieuPhoi />
-                    </BaoVeTuyenDuong>
-                } />
-
-                {/* Cửa Hàng / Đối Tác (Chỉ Shop) */}
-                <Route path="/cua-hang" element={
-                    <BaoVeTuyenDuong quyenChoPhep={['shop']}>
-                        <QuanLyDonHang />
-                    </BaoVeTuyenDuong>
-                } />
-
-                {/* Quản Lý Kho Bãi (Admin & Warehouse) */}
-                <Route path="/kho" element={
-                    <BaoVeTuyenDuong quyenChoPhep={['admin', 'warehouse']}>
-                        <QuetMaVach />
-                    </BaoVeTuyenDuong>
-                } />
-
-                {/* Ứng dụng Tài Xế (Chỉ Shipper) */}
-                <Route path="/tai-xe" element={
-                    <BaoVeTuyenDuong quyenChoPhep={['shipper']}>
-                        <BanDoGiaoHang />
-                    </BaoVeTuyenDuong>
-                } />
-
-                {/* Phòng Kế Toán (Admin & Accountant) */}
-                <Route path="/ke-toan" element={
-                    <BaoVeTuyenDuong quyenChoPhep={['admin', 'accountant']}>
-                        <DoiSoatCOD />
-                    </BaoVeTuyenDuong>
-                } />
-
-                {/* Phòng Nhân Sự (Admin & HR) */}
-                <Route path="/nhan-su" element={
-                    <BaoVeTuyenDuong quyenChoPhep={['admin', 'hr']}>
-                        <HoSoNhanVien />
-                    </BaoVeTuyenDuong>
-                } />
-            </Routes>
-        </BrowserRouter>
-    );
+      {/* KHU VỰC PRIVATE (Phải đăng nhập đúng Role mới được vào) */}
+      <Route path="/cua-hang" element={
+        <BaoVeTuyenDuong allowedRoles={['shop']}><QuanLyDonHang /></BaoVeTuyenDuong>
+      } />
+      
+      <Route path="/tai-xe" element={
+        <BaoVeTuyenDuong allowedRoles={['driver']}><AppTaiXe /></BaoVeTuyenDuong>
+      } />
+      
+      <Route path="/kho" element={
+        <BaoVeTuyenDuong allowedRoles={['warehouse_manager']}><QuetMaVach /></BaoVeTuyenDuong>
+      } />
+      
+      <Route path="/dieu-hanh" element={
+        <BaoVeTuyenDuong allowedRoles={['fleet_manager']}><TrungTamDieuPhoi /></BaoVeTuyenDuong>
+      } />
+      
+      <Route path="/ke-toan" element={
+        <BaoVeTuyenDuong allowedRoles={['accountant']}><DoiSoatCOD /></BaoVeTuyenDuong>
+      } />
+      
+      <Route path="/nhan-su" element={
+        <BaoVeTuyenDuong allowedRoles={['hr_manager']}><HoSoNhanVien /></BaoVeTuyenDuong>
+      } />
+      
+      <Route path="/admin" element={
+        <BaoVeTuyenDuong allowedRoles={['director']}><BanGiamDoc /></BaoVeTuyenDuong>
+      } />
+    </Routes>
+  );
 }

@@ -1,9 +1,7 @@
 import DieuHuongChinh from './DieuHuong/DieuHuongChinh';
 
 function App() {
-  return (
-    <DieuHuongChinh />
-  )
+  return <DieuHuongChinh />;
 }
 
 export default App;

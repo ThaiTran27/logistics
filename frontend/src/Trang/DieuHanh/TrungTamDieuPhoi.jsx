@@ -1,266 +1,498 @@
 import { useState, useEffect } from 'react';
-import { Map, Truck, PackageOpen, Send, LayoutDashboard, UserCheck, AlertTriangle, LogOut } from 'lucide-react';
+import { io } from 'socket.io-client';
+import { MapContainer, TileLayer, Marker, Popup, useMap } from 'react-leaflet';
+import 'leaflet/dist/leaflet.css';
+import L from 'leaflet';
+import { Truck, MapPin, Navigation, Search, PackageSearch, CheckCircle, Clock, Map, FileText, Send, Zap, Star, Users, Package, ShieldCheck, ToggleLeft, ToggleRight } from 'lucide-react';
+
+// Fix lỗi mất icon mặc định của Leaflet trong React
+import iconMarkerUrl from 'leaflet/dist/images/marker-icon.png';
+import iconShadowUrl from 'leaflet/dist/images/marker-shadow.png';
+const shipperIcon = new L.Icon({
+  iconUrl: iconMarkerUrl,
+  shadowUrl: iconShadowUrl,
+  iconSize: [25, 41],
+  iconAnchor: [12, 41]
+});
+
+// Khởi tạo kết nối Socket.io tới Backend
+const socket = io('http://localhost:5000');
+
+// HÀM FIX LỖI BẢN ĐỒ BỊ XÁM KHI CHUYỂN TAB
+const UpdateMapSize = () => {
+  const map = useMap();
+  useEffect(() => {
+    // Đợi giao diện render xong (200ms) rồi ép bản đồ tính toán lại kích thước
+    const timer = setTimeout(() => {
+      map.invalidateSize();
+    }, 200);
+    return () => clearTimeout(timer);
+  }, [map]);
+  return null;
+};
 
 export default function TrungTamDieuPhoi() {
   const [donHang, setDonHang] = useState([]);
-  const [taiXe, setTaiXe] = useState([]);
-  const [tabHienTai, setTabHienTai] = useState('phancong');
+  const [taiXeList, setTaiXeList] = useState([]);
+  const [tuKhoa, setTuKhoa] = useState('');
+  const [modalMo, setModalMo] = useState(false);
+  const [donDangChon, setDonDangChon] = useState(null);
+  const [taiXeDuocChon, setTaiXeDuocChon] = useState('');
+  
+  // State quản lý giới hạn khu vực phân quyền
+  const [gioiHanKhuVuc, setGioiHanKhuVuc] = useState(true);
+  const [khuVucDonHang, setKhuVucDonHang] = useState('');
 
-  const [tieuDeBaoCao, setTieuDeBaoCao] = useState('');
-  const [noiDungBaoCao, setNoiDungBaoCao] = useState('');
+  const [viTriTaiXeMap, setViTriTaiXeMap] = useState({});
+  const [tabHienTai, setTabHienTai] = useState('dieuphoan'); 
+
+  const [formBaoCao, setFormBaoCao] = useState({ title: '', content: '' });
+  const [dangGuiBaoCao, setDangGuiBaoCao] = useState(false);
+
   const userId = localStorage.getItem('user_id');
+  const userName = localStorage.getItem('full_name') || 'Điều Phối Viên';
 
-  const taiDuLieu = async () => {
-    const resDon = await fetch('http://localhost:5000/api/orders');
-    const dataDon = await resDon.json();
-    if (dataDon.success) setDonHang(dataDon.data);
-
-    const resTaiXe = await fetch('http://localhost:5000/api/shippers');
-    const dataTaiXe = await resTaiXe.json();
-    if (dataTaiXe.success) setTaiXe(dataTaiXe.data);
+  // [THUẬT TOÁN HAVERSINE] Tính khoảng cách đường chim bay
+  const tinhKhoangCachHaversine = (lat1, lon1, lat2, lon2) => {
+    const R = 6371; 
+    const dLat = (lat2 - lat1) * (Math.PI / 180);
+    const dLon = (lon2 - lon1) * (Math.PI / 180);
+    const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+              Math.cos(lat1 * (Math.PI / 180)) * Math.cos(lat2 * (Math.PI / 180)) *
+              Math.sin(dLon / 2) * Math.sin(dLon / 2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    return (R * c).toFixed(1); 
   };
 
-  useEffect(() => { taiDuLieu(); }, []);
+  const taiDuLieu = async () => {
+    try {
+      const res = await fetch('http://localhost:5000/api/orders');
+      const data = await res.json();
+      if (data.success && Array.isArray(data.data)) {
+        const donCanDieuPhoi = data.data.filter(d => 
+          d?.status === 'pending' || d?.status === 'in_warehouse'
+        );
+        setDonHang(donCanDieuPhoi);
+      }
+    } catch (error) {
+      console.error("Lỗi tải đơn hàng:", error);
+    }
+  };
 
-  const phanCongTaiXe = async (orderId, shipperId) => {
-    if (!shipperId) return alert("Vui lòng chọn một tài xế!");
-    
-    await fetch(`http://localhost:5000/api/orders/${orderId}/assign`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ shipper_id: shipperId })
+  const taiDanhSachTaiXe = async () => {
+    try {
+      const res = await fetch('http://localhost:5000/api/shippers');
+      const data = await res.json();
+      if (data.success && Array.isArray(data.data)) {
+        const zones = ['Nội thành TP.HCM', 'Ngoại thành TP.HCM'];
+        const taiXeGps = data.data.map((tx, i) => ({
+          ...tx,
+          lat: 10.762622 + (Math.random() - 0.5) * 0.1,
+          lng: 106.660172 + (Math.random() - 0.5) * 0.1,
+          zone: zones[i % 2] 
+        }));
+        setTaiXeList(taiXeGps);
+      }
+    } catch (error) {
+      console.error("Lỗi tải tài xế:", error);
+    }
+  };
+
+  useEffect(() => {
+    taiDuLieu();
+    taiDanhSachTaiXe();
+
+    socket.on('driver_location_changed', (data) => {
+      setViTriTaiXeMap(prev => ({
+        ...prev,
+        [data.order_id]: {
+          lat: data.lat,
+          lng: data.lng,
+          tracking_code: data.tracking_code,
+          timestamp: data.timestamp
+        }
+      }));
     });
+
+    return () => socket.off('driver_location_changed');
+  }, []);
+
+  const moModalPhanCong = (don) => {
+    const diaChi = don?.receiver_address || '';
+    const isNgoaiThanh = diaChi.toLowerCase().includes('hóc môn') || 
+                         diaChi.toLowerCase().includes('củ chi') || 
+                         diaChi.toLowerCase().includes('bình chánh') ||
+                         diaChi.toLowerCase().includes('quận 9');
+    const kv = isNgoaiThanh ? 'Ngoại thành TP.HCM' : 'Nội thành TP.HCM';
     
-    alert("✅ Phân công tài xế thành công!");
-    taiDuLieu(); 
+    setKhuVucDonHang(kv);
+    setGioiHanKhuVuc(true); 
+    setDonDangChon(don);
+    
+    const orderLat = 10.762622;
+    const orderLng = 106.660172;
+    let danhSachHienThi = [...taiXeList].map(tx => ({
+      ...tx, distance: parseFloat(tinhKhoangCachHaversine(orderLat, orderLng, tx.lat, tx.lng))
+    })).filter(tx => tx.zone === kv).sort((a, b) => a.distance - b.distance);
+
+    setTaiXeDuocChon(danhSachHienThi.length > 0 ? String(danhSachHienThi[0].id) : '');
+    setModalMo(true);
+  };
+
+  const danhSachTaiXeHienThi = (() => {
+    const orderLat = 10.762622; 
+    const orderLng = 106.660172;
+    let list = [...taiXeList].map(tx => ({
+      ...tx, distance: parseFloat(tinhKhoangCachHaversine(orderLat, orderLng, tx.lat, tx.lng))
+    }));
+    
+    if (gioiHanKhuVuc) {
+      list = list.filter(tx => tx.zone === khuVucDonHang);
+    }
+    
+    return list.sort((a, b) => a.distance - b.distance);
+  })();
+
+  const doiTrangThaiGioiHan = () => {
+    const trangThaiMoi = !gioiHanKhuVuc;
+    setGioiHanKhuVuc(trangThaiMoi);
+    const orderLat = 10.762622;
+    const orderLng = 106.660172;
+    let list = [...taiXeList].map(tx => ({
+      ...tx, distance: parseFloat(tinhKhoangCachHaversine(orderLat, orderLng, tx.lat, tx.lng))
+    }));
+    if (trangThaiMoi) list = list.filter(tx => tx.zone === khuVucDonHang);
+    list.sort((a, b) => a.distance - b.distance);
+    setTaiXeDuocChon(list.length > 0 ? String(list[0].id) : '');
+  };
+
+  const phanCongTaiXe = async (e) => {
+    e.preventDefault();
+    if (!taiXeDuocChon) {
+      alert("Vui lòng chọn một tài xế!");
+      return;
+    }
+
+    try {
+      const res = await fetch(`http://localhost:5000/api/orders/${donDangChon.id}/assign`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ shipper_id: parseInt(taiXeDuocChon) }) 
+      });
+      const data = await res.json();
+
+      if (data.success) {
+        alert("✅ Đã phân công tuyến đường tối ưu thành công!");
+        setModalMo(false);
+        setTaiXeDuocChon('');
+        taiDuLieu();
+      } else {
+        alert("Thao tác thất bại: " + (data.message || "Lỗi không xác định từ Server"));
+      }
+    } catch (error) {
+      alert("Lỗi kết nối đến máy chủ! Vui lòng kiểm tra lại mạng.");
+    }
   };
 
   const guiBaoCao = async (e) => {
     e.preventDefault();
-    if (!tieuDeBaoCao || !noiDungBaoCao) return alert("Vui lòng nhập đủ thông tin!");
-
-    await fetch('http://localhost:5000/api/reports/submit', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        department: 'Điều Phối',
-        title: tieuDeBaoCao,
-        content: noiDungBaoCao,
-        created_by: userId
-      })
-    });
-
-    alert('Đã gửi báo cáo vận hành lên Ban Giám Đốc!');
-    setTieuDeBaoCao('');
-    setNoiDungBaoCao('');
+    if (!formBaoCao.title.trim() || !formBaoCao.content.trim()) return alert("Nhập đủ thông tin!");
+    
+    setDangGuiBaoCao(true);
+    try {
+      const res = await fetch('http://localhost:5000/api/reports', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ created_by: userId, department: 'Phòng Điều Phối', title: formBaoCao.title, content: formBaoCao.content })
+      });
+      const data = await res.json();
+      
+      if (data.success) {
+        alert("✅ Đã gửi báo cáo lên Ban Giám Đốc!");
+        setFormBaoCao({ title: '', content: '' }); 
+      } else alert("Lỗi: " + data.message);
+    } catch (error) {
+      alert("Lỗi kết nối!");
+    } finally {
+      setDangGuiBaoCao(false);
+    }
   };
 
-  // Hàm xử lý Đăng xuất
   const dangXuat = () => {
-    const xacNhan = window.confirm("Bạn có chắc chắn muốn đăng xuất khỏi hệ thống?");
-    if (xacNhan) {
+    if (window.confirm("Đăng xuất khỏi hệ thống Điều phối?")) {
       localStorage.clear();
       window.location.href = '/'; 
     }
   };
 
-  const donChoXuLy = donHang.filter(d => d.status === 'pending').length;
+  const safeDonHang = Array.isArray(donHang) ? donHang : [];
+  const safeTaiXeList = Array.isArray(taiXeList) ? taiXeList : [];
+  const safeUserName = userName || 'Điều Phối Viên';
+
+  const donDaLoc = safeDonHang.filter(d => {
+    const kw = tuKhoa.toLowerCase();
+    return (d?.tracking_code || '').toLowerCase().includes(kw) || (d?.receiver_address || '').toLowerCase().includes(kw);
+  });
+
+  const donChoLay = safeDonHang.filter(d => d.status === 'pending').length;
+  const donChoGiao = safeDonHang.filter(d => d.status === 'in_warehouse').length;
 
   return (
-    <div className="flex min-h-screen bg-[#FFFBEB] font-sans text-gray-700">
+    <div className="flex min-h-screen bg-[#F8FAFC] font-sans text-slate-700">
       
-      {/* SIDEBAR - TÔNG MÀU CAM */}
-      <div className="w-72 bg-white border-r border-amber-100 shadow-[0_0_20px_rgba(0,0,0,0.02)] flex flex-col z-10 justify-between">
+      {/* SIDEBAR */}
+      <div className="w-72 bg-white border-r border-slate-200 shadow-sm flex flex-col z-10 justify-between">
         <div>
-          <div className="p-8 border-b border-gray-50 flex items-center gap-3">
-            <div className="bg-gradient-to-tr from-orange-500 to-amber-400 p-2.5 rounded-xl shadow-orange-200 shadow-lg">
-              <Map className="text-white" size={24} />
+          <div className="p-8 border-b border-slate-100 flex items-center gap-3">
+            <div className="bg-gradient-to-tr from-emerald-500 to-teal-400 p-2.5 rounded-xl shadow-lg shadow-emerald-200">
+              <Navigation className="text-white" size={24} />
             </div>
             <div>
-              <h2 className="text-xl font-black text-gray-800 tracking-tight">Điều Phối</h2>
-              <p className="text-xs font-bold text-orange-500 uppercase tracking-wider mt-0.5">Trung tâm vận hành</p>
+              <h2 className="text-xl font-black text-slate-800 tracking-tight">Điều Hành</h2>
+              <p className="text-xs font-bold text-emerald-500 uppercase tracking-wider mt-0.5">Trung tâm Điều Phối</p>
             </div>
           </div>
           
-          <div className="flex flex-col gap-3 p-5 mt-2">
-            <button 
-              onClick={() => setTabHienTai('phancong')}
-              className={`px-5 py-4 rounded-2xl font-bold text-left transition-all duration-300 flex items-center gap-4 group ${tabHienTai === 'phancong' ? 'bg-gradient-to-r from-orange-500 to-amber-500 text-white shadow-lg shadow-orange-200' : 'bg-transparent text-gray-500 hover:bg-orange-50 hover:text-orange-600'}`}
-            >
-              <PackageOpen size={20} className={tabHienTai === 'phancong' ? 'text-white' : 'text-gray-400 group-hover:text-orange-500'} />
-              Phân Công Giao Nhận
-            </button>
-            
-            <button 
-              onClick={() => setTabHienTai('baocao')}
-              className={`px-5 py-4 rounded-2xl font-bold text-left transition-all duration-300 flex items-center gap-4 group ${tabHienTai === 'baocao' ? 'bg-gradient-to-r from-orange-500 to-amber-500 text-white shadow-lg shadow-orange-200' : 'bg-transparent text-gray-500 hover:bg-orange-50 hover:text-orange-600'}`}
-            >
-              <LayoutDashboard size={20} className={tabHienTai === 'baocao' ? 'text-white' : 'text-gray-400 group-hover:text-orange-500'} />
-              Báo Cáo Vận Hành
-            </button>
+          <div className="p-5 mt-2 space-y-3">
+            <button onClick={() => setTabHienTai('dieuphoan')} className={`w-full px-5 py-4 rounded-2xl font-bold flex items-center gap-4 transition-all ${tabHienTai === 'dieuphoan' ? 'bg-emerald-50 text-emerald-600 border border-emerald-100' : 'text-slate-500 hover:bg-slate-50'}`}><MapPin size={20} /> Phân Tuyến Tài Xế</button>
+            <button onClick={() => setTabHienTai('bandogiamsat')} className={`w-full px-5 py-4 rounded-2xl font-bold flex items-center gap-4 transition-all ${tabHienTai === 'bandogiamsat' ? 'bg-emerald-50 text-emerald-600 border border-emerald-100' : 'text-slate-500 hover:bg-slate-50'}`}><Map size={20} /> Giám Sát Bản Đồ GPS</button>
+            <button onClick={() => setTabHienTai('baocao')} className={`w-full px-5 py-4 rounded-2xl font-bold flex items-center gap-4 transition-all ${tabHienTai === 'baocao' ? 'bg-emerald-50 text-emerald-600 border border-emerald-100' : 'text-slate-500 hover:bg-slate-50'}`}><FileText size={20} /> Báo Cáo Giám Đốc</button>
           </div>
         </div>
 
-        {/* Nút Đăng xuất */}
-        <div className="p-5 border-t border-gray-50">
-          <button 
-            onClick={dangXuat}
-            className="w-full px-5 py-4 rounded-2xl font-bold text-left transition-all duration-300 flex items-center gap-4 group bg-transparent text-red-500 hover:bg-red-50 hover:text-red-600"
-          >
-            <LogOut size={20} className="text-red-400 group-hover:text-red-500" />
-            Đăng Xuất
-          </button>
+        <div className="p-5 border-t border-slate-100">
+          <div className="flex items-center gap-3 px-5 py-4 mb-2 bg-slate-50 rounded-xl border border-slate-100">
+            <div className="w-10 h-10 rounded-full bg-emerald-100 flex items-center justify-center font-black text-emerald-600">{safeUserName.charAt(0)}</div>
+            <div><p className="text-sm font-bold text-slate-700">{safeUserName}</p></div>
+          </div>
+          <button onClick={dangXuat} className="w-full px-5 py-4 rounded-2xl font-bold text-left text-red-500 hover:bg-red-50 transition-colors">Đăng Xuất</button>
         </div>
       </div>
 
       {/* MAIN CONTENT */}
-      <div className="flex-1 p-10 overflow-y-auto">
+      <div className="flex-1 p-10 overflow-y-auto flex flex-col">
         
-        {/* HEADER */}
-        <div className="mb-8 flex justify-between items-end">
-          <div>
-            <h1 className="text-3xl font-black text-gray-800 tracking-tight">
-              {tabHienTai === 'phancong' ? 'Kiểm Soát Vận Đơn' : 'Báo Cáo Điều Phối'}
-            </h1>
-            <p className="text-gray-500 mt-2">
-              {tabHienTai === 'phancong' ? 'Phân bổ đơn hàng cho đội ngũ tài xế theo thời gian thực.' : 'Thống kê tình trạng kẹt đơn và yêu cầu hỗ trợ.'}
-            </p>
+        {tabHienTai === 'dieuphoan' && (
+          <div className="animate-in fade-in duration-300 flex-1 flex flex-col">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8 animate-in fade-in slide-in-from-top-4">
+              <div className="bg-white p-6 rounded-[24px] shadow-sm border border-slate-100 flex items-center gap-4">
+                <div className="bg-amber-50 p-4 rounded-2xl text-amber-600"><Clock size={28}/></div>
+                <div>
+                  <p className="text-slate-400 font-bold text-xs uppercase tracking-wider mb-1">Chờ Lấy Tại Shop</p>
+                  <p className="text-3xl font-black text-slate-800">{donChoLay} <span className="text-sm font-medium text-slate-400">đơn</span></p>
+                </div>
+              </div>
+              <div className="bg-white p-6 rounded-[24px] shadow-sm border border-slate-100 flex items-center gap-4">
+                <div className="bg-purple-50 p-4 rounded-2xl text-purple-600"><Package size={28}/></div>
+                <div>
+                  <p className="text-slate-400 font-bold text-xs uppercase tracking-wider mb-1">Chờ Giao Cho Khách</p>
+                  <p className="text-3xl font-black text-slate-800">{donChoGiao} <span className="text-sm font-medium text-slate-400">đơn</span></p>
+                </div>
+              </div>
+              <div className="bg-white p-6 rounded-[24px] shadow-sm border border-slate-100 flex items-center gap-4">
+                <div className="bg-blue-50 p-4 rounded-2xl text-blue-600"><Users size={28}/></div>
+                <div>
+                  <p className="text-slate-400 font-bold text-xs uppercase tracking-wider mb-1">Tài Xế Trực Tuyến</p>
+                  <p className="text-3xl font-black text-slate-800">{safeTaiXeList.length} <span className="text-sm font-medium text-slate-400">nhân sự</span></p>
+                </div>
+              </div>
+            </div>
+
+            <div className="mb-8 flex justify-between items-end">
+              <div>
+                <h1 className="text-3xl font-black text-slate-800 tracking-tight">AI Smart Dispatching</h1>
+                <p className="text-slate-500 mt-2 font-medium">Hệ thống áp dụng thuật toán Haversine để tự động gợi ý tài xế gần nhất.</p>
+              </div>
+              <div className="relative w-80">
+                <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
+                <input type="text" placeholder="Tìm mã đơn hoặc địa chỉ..." className="w-full pl-11 pr-4 py-3 bg-white border border-slate-200 rounded-xl outline-none focus:border-emerald-400 focus:ring-4 focus:ring-emerald-50 transition-all font-medium" value={tuKhoa} onChange={(e) => setTuKhoa(e.target.value)} />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+              {donDaLoc.length === 0 ? (
+                <div className="col-span-full py-20 flex flex-col items-center justify-center text-slate-400 bg-white rounded-[24px] border border-slate-200 border-dashed">
+                  <CheckCircle size={48} className="mb-4 text-emerald-400 opacity-50"/>
+                  <p className="text-lg font-bold text-slate-600">Tuyệt vời! Không còn đơn hàng nào tồn đọng.</p>
+                </div>
+              ) : (
+                donDaLoc.map((don) => (
+                  <div key={don.id} className="bg-white rounded-[24px] shadow-sm border border-slate-100 hover:shadow-md transition-all overflow-hidden flex flex-col">
+                    <div className="p-5 border-b border-slate-50 flex justify-between items-center bg-slate-50/50">
+                      <span className="font-black text-slate-700 tracking-wide">{don?.tracking_code}</span>
+                      <span className={`px-3 py-1.5 rounded-lg text-xs font-bold uppercase flex items-center gap-1.5 ${
+                        don.status === 'pending' ? 'bg-amber-100 text-amber-700' : 'bg-purple-100 text-purple-700'
+                      }`}>
+                        {don.status === 'pending' ? <><Clock size={14}/> Cần Lấy Hàng</> : <><PackageSearch size={14}/> Cần Giao Hàng</>}
+                      </span>
+                    </div>
+                    
+                    <div className="p-6 flex-1 space-y-4">
+                      <div className="flex items-start gap-3">
+                        <MapPin className="text-slate-400 mt-1 shrink-0" size={18} />
+                        <div>
+                          <p className="text-sm font-bold text-slate-800">{don?.receiver_name} ({don?.receiver_phone})</p>
+                          <p className="text-sm text-slate-500 mt-1 line-clamp-2">{don?.receiver_address}</p>
+                        </div>
+                      </div>
+                      
+                      <div className="flex justify-between items-center bg-[#F8FAFC] p-3 rounded-xl border border-slate-100">
+                        <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Tiền COD</span>
+                        <span className="font-black text-red-500">{Number(don?.cod_amount || 0).toLocaleString()} đ</span>
+                      </div>
+                    </div>
+
+                    <div className="p-5 pt-0 mt-auto">
+                      <button 
+                        onClick={() => moModalPhanCong(don)}
+                        className="w-full bg-emerald-50 hover:bg-emerald-500 hover:text-white text-emerald-600 font-bold py-3.5 rounded-xl transition-colors flex items-center justify-center gap-2"
+                      >
+                        <Zap size={18} /> Quét & Điều Phối Tự Động
+                      </button>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* TAB 2: BẢN ĐỒ GIÁM SÁT ĐÃ FIX LỖI XÁM */}
+        {tabHienTai === 'bandogiamsat' && (
+          <div className="animate-in fade-in duration-300 flex-1 flex flex-col h-[calc(100vh-120px)]">
+            <div className="mb-4">
+              <h1 className="text-3xl font-black text-slate-800 tracking-tight">Bản Đồ Giám Sát Tài Xế</h1>
+              <p className="text-slate-500 mt-1 font-medium">Theo dõi vị trí thời gian thực của các tài xế đang thực hiện đơn hàng.</p>
+            </div>
+            <div className="flex-1 w-full bg-white rounded-[24px] shadow-sm border border-slate-200 overflow-hidden relative z-0">
+              <MapContainer center={[10.762622, 106.660172]} zoom={13} style={{ width: '100%', height: '100%' }}>
+                {/* Thành phần bắt buộc để fix lỗi xám khung hình */}
+                <UpdateMapSize /> 
+                {/* Nâng cấp giao diện với Google Maps */}
+                <TileLayer 
+                  url="https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}" 
+                  attribution='&copy; Google Maps' 
+                />
+                {Object.entries(viTriTaiXeMap || {}).map(([orderId, pos]) => (
+                  <Marker key={orderId} position={[pos.lat, pos.lng]} icon={shipperIcon}>
+                    <Popup>
+                      <div className="font-bold text-slate-800">Mã đơn: {pos?.tracking_code}</div>
+                      <div className="text-xs text-slate-500 mt-1">Cập nhật: {new Date(pos?.timestamp).toLocaleTimeString()}</div>
+                    </Popup>
+                  </Marker>
+                ))}
+              </MapContainer>
+            </div>
+          </div>
+        )}
+
+        {tabHienTai === 'baocao' && (
+          <div className="animate-in fade-in duration-300 max-w-3xl">
+            <div className="mb-8">
+              <h1 className="text-3xl font-black text-slate-800 tracking-tight">Soạn Báo Cáo Định Kỳ</h1>
+              <p className="text-slate-500 mt-2 font-medium">Báo cáo hiệu suất điều phối, chi phí hoặc đề xuất lên Ban Giám Đốc.</p>
+            </div>
+            <form onSubmit={guiBaoCao} className="bg-white p-8 rounded-[24px] shadow-sm border border-slate-200 space-y-6">
+              <div><label className="block text-sm font-bold text-slate-700 mb-2">Tiêu đề báo cáo</label><input type="text" required placeholder="VD: Báo cáo hiệu suất tài xế tuần 3..." className="w-full px-4 py-3.5 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:bg-white focus:border-emerald-400 focus:ring-4 focus:ring-emerald-50 transition-all font-bold text-slate-800" value={formBaoCao?.title || ''} onChange={(e) => setFormBaoCao({...formBaoCao, title: e.target.value})} /></div>
+              <div><label className="block text-sm font-bold text-slate-700 mb-2">Nội dung chi tiết</label><textarea required rows="8" placeholder="Nhập chi tiết các chỉ số..." className="w-full px-4 py-3.5 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:bg-white focus:border-emerald-400 focus:ring-4 focus:ring-emerald-50 transition-all font-medium text-slate-700 resize-none leading-relaxed" value={formBaoCao?.content || ''} onChange={(e) => setFormBaoCao({...formBaoCao, content: e.target.value})}></textarea></div>
+              <div className="pt-2 flex justify-end"><button type="submit" disabled={dangGuiBaoCao} className="bg-emerald-500 hover:bg-emerald-600 text-white font-bold px-8 py-3.5 rounded-xl shadow-lg shadow-emerald-200 transition-all flex items-center gap-2 disabled:opacity-70">{dangGuiBaoCao ? 'Đang Gửi...' : <><Send size={18}/> Gửi Lên Ban Giám Đốc</>}</button></div>
+            </form>
+          </div>
+        )}
+
+      </div>
+
+      {/* MODAL PHÂN CÔNG AI CÓ KHÓA KHU VỰC */}
+      {modalMo && donDangChon && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-[28px] shadow-2xl max-w-md w-full p-8 relative animate-in fade-in zoom-in-95 duration-300">
+            
+            <div className="absolute -top-6 left-1/2 -translate-x-1/2 bg-gradient-to-r from-emerald-400 to-teal-500 text-white px-6 py-2 rounded-full font-black shadow-lg flex items-center gap-2 text-sm border-4 border-white whitespace-nowrap">
+              <ShieldCheck size={16} className="fill-white"/> PHÂN QUYỀN VÀ GIỚI HẠN KHU VỰC
+            </div>
+
+            <h3 className="text-2xl font-black text-slate-800 mb-2 mt-4 text-center">Phân Tuyến Thông Minh</h3>
+            <p className="text-slate-500 text-sm mb-4 text-center">Đơn hàng: <span className="font-bold text-slate-700">{donDangChon?.tracking_code}</span></p>
+
+            <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 mb-6 flex justify-between items-center cursor-pointer" onClick={doiTrangThaiGioiHan}>
+              <div>
+                <p className="font-bold text-sm text-slate-800">Khóa Tuyến: {khuVucDonHang}</p>
+                <p className="text-xs text-slate-500 mt-0.5">Chỉ hiển thị tài xế đăng ký ở khu vực này</p>
+              </div>
+              <div>
+                {gioiHanKhuVuc ? (
+                  <ToggleRight size={36} className="text-emerald-500" />
+                ) : (
+                  <ToggleLeft size={36} className="text-slate-300" />
+                )}
+              </div>
+            </div>
+
+            <form onSubmit={phanCongTaiXe} className="space-y-4">
+              <label className="block text-sm font-bold text-slate-700 mb-1">Tài xế trong bán kính gần nhất:</label>
+              
+              <div className="space-y-3 max-h-56 overflow-y-auto pr-2 custom-scrollbar">
+                {danhSachTaiXeHienThi.length === 0 ? (
+                  <div className="text-center p-6 bg-red-50 rounded-xl border border-red-100">
+                    <p className="text-red-500 text-sm font-bold">Không có tài xế nào thuộc khu vực này!</p>
+                    <p className="text-xs text-red-400 mt-1">Vui lòng tắt "Khóa tuyến" ở trên để huy động tài xế tuyến khác.</p>
+                  </div>
+                ) : (
+                  danhSachTaiXeHienThi.map((tx, index) => (
+                    <label key={tx.id} className={`flex items-center gap-4 p-4 rounded-xl border-2 cursor-pointer transition-all ${
+                      String(taiXeDuocChon) === String(tx.id) ? 'border-emerald-500 bg-emerald-50' : 'border-slate-100 hover:border-slate-200 bg-white'
+                    }`}>
+                      <input 
+                        type="radio" 
+                        name="shipper" 
+                        value={tx.id}
+                        className="hidden"
+                        checked={String(taiXeDuocChon) === String(tx.id)}
+                        onChange={() => setTaiXeDuocChon(String(tx.id))}
+                      />
+                      <div className="bg-slate-100 p-2.5 rounded-full text-slate-500 relative">
+                        {index === 0 && <Star size={12} className="absolute -top-1 -right-1 text-amber-400 fill-amber-400" />}
+                        <Truck size={20} />
+                      </div>
+                      <div className="flex-1">
+                        <p className="font-bold text-slate-800 flex items-center gap-2">
+                          {tx?.full_name} 
+                          {index === 0 && <span className="text-[10px] bg-emerald-500 text-white px-2 py-0.5 rounded uppercase">Gần nhất</span>}
+                        </p>
+                        <p className="text-xs text-slate-500 mt-0.5">
+                          Khu vực: <span className="font-bold text-slate-700">{tx.zone}</span> 
+                        </p>
+                        <p className="text-[11px] font-bold text-emerald-600 mt-0.5">
+                          Cách điểm giao: {tx.distance} km
+                        </p>
+                      </div>
+                      {String(taiXeDuocChon) === String(tx.id) && <CheckCircle className="ml-auto text-emerald-500" size={20} />}
+                    </label>
+                  ))
+                )}
+              </div>
+
+              <div className="flex gap-3 pt-4 border-t border-slate-100 mt-4">
+                <button 
+                  type="button"
+                  onClick={() => setModalMo(false)}
+                  className="flex-1 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold py-3.5 rounded-xl transition-colors"
+                >
+                  Hủy Bỏ
+                </button>
+                <button 
+                  type="submit"
+                  disabled={danhSachTaiXeHienThi.length === 0}
+                  className="flex-1 bg-emerald-500 hover:bg-emerald-600 disabled:opacity-50 disabled:hover:bg-emerald-500 text-white font-bold py-3.5 rounded-xl shadow-lg shadow-emerald-200 transition-all flex items-center justify-center gap-2"
+                >
+                  <Navigation size={18} /> Chốt Phân Tuyến
+                </button>
+              </div>
+            </form>
           </div>
         </div>
+      )}
 
-        {/* TAB 1: PHÂN CÔNG TÀI XẾ */}
-        {tabHienTai === 'phancong' && (
-          <div className="bg-white rounded-[24px] shadow-[0_8px_30px_rgb(0,0,0,0.04)] border border-gray-50 overflow-hidden">
-            <table className="w-full text-left border-collapse">
-              <thead className="bg-[#FFF8F1] border-b border-orange-100">
-                <tr>
-                  <th className="p-6 text-sm font-black text-orange-400 uppercase tracking-wider">Mã VĐ</th>
-                  <th className="p-6 text-sm font-black text-orange-400 uppercase tracking-wider">Khách Hàng</th>
-                  <th className="p-6 text-sm font-black text-orange-400 uppercase tracking-wider">Tuyến Giao</th>
-                  <th className="p-6 text-sm font-black text-orange-400 uppercase tracking-wider">Trạng Thái</th>
-                  <th className="p-6 text-sm font-black text-orange-400 uppercase tracking-wider text-right">Điều Phối</th>
-                </tr>
-              </thead>
-              <tbody>
-                {donHang.map((don) => (
-                  <tr key={don.id} className="border-b border-gray-50 hover:bg-[#FFF8F1] transition-colors group">
-                    <td className="p-6">
-                      <span className="bg-gray-100 text-gray-600 px-3 py-1.5 rounded-lg font-bold text-sm">
-                        {don.tracking_code}
-                      </span>
-                    </td>
-                    <td className="p-6 font-bold text-gray-800">{don.receiver_name}</td>
-                    <td className="p-6 text-sm text-gray-500 max-w-xs truncate">{don.receiver_address}</td>
-                    <td className="p-6">
-                      {don.status === 'pending' ? (
-                        <span className="bg-red-50 text-red-500 px-3 py-1.5 rounded-lg font-bold text-xs uppercase flex items-center w-fit gap-2">
-                          <AlertTriangle size={14} /> Chờ gán
-                        </span>
-                      ) : (
-                        <span className="bg-green-50 text-green-600 px-3 py-1.5 rounded-lg font-bold text-xs uppercase flex items-center w-fit gap-2">
-                          <Truck size={14} /> Đã gán xe
-                        </span>
-                      )}
-                    </td>
-                    <td className="p-6 text-right flex justify-end gap-2">
-                      {don.status === 'pending' ? (
-                        <>
-                          <select 
-                            id={`shipper-${don.id}`}
-                            className="border-2 border-orange-100 bg-orange-50 text-orange-800 p-2.5 rounded-xl text-sm font-bold outline-none focus:border-orange-400"
-                            defaultValue=""
-                          >
-                            <option value="" disabled>-- Chọn tài xế --</option>
-                            {taiXe.map(tx => (
-                              <option key={tx.id} value={tx.id}>{tx.full_name}</option>
-                            ))}
-                          </select>
-                          <button 
-                            onClick={() => phanCongTaiXe(don.id, document.getElementById(`shipper-${don.id}`).value)}
-                            className="bg-orange-500 hover:bg-orange-600 text-white px-5 py-2.5 rounded-xl font-bold transition-all duration-300 shadow-sm flex items-center gap-2"
-                          >
-                            Giao Việc
-                          </button>
-                        </>
-                      ) : (
-                        <span className="text-gray-400 italic text-sm font-medium py-2">Đang xử lý</span>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-
-        {/* TAB 2: THỐNG KÊ VÀ BÁO CÁO */}
-        {tabHienTai === 'baocao' && (
-          <div className="grid grid-cols-1 xl:grid-cols-12 gap-8">
-            <div className="xl:col-span-6 flex flex-col gap-6">
-              <div className="grid grid-cols-2 gap-6">
-                <div className="bg-white p-7 rounded-[24px] shadow-[0_8px_30px_rgb(0,0,0,0.04)] relative overflow-hidden group">
-                  <div className="absolute -right-6 -bottom-6 opacity-[0.03] text-red-500 group-hover:scale-110 transition-transform duration-500">
-                    <PackageOpen size={120} />
-                  </div>
-                  <p className="text-gray-400 font-bold mb-1 uppercase text-xs tracking-widest flex items-center gap-2">
-                    <AlertTriangle size={14} className="text-red-400"/> Đơn Ùn Tắc
-                  </p>
-                  <p className="text-4xl font-black text-gray-800 mt-2">{donChoXuLy} <span className="text-xl text-gray-400 font-bold">Đơn</span></p>
-                </div>
-                
-                <div className="bg-white p-7 rounded-[24px] shadow-[0_8px_30px_rgb(0,0,0,0.04)] relative overflow-hidden group">
-                  <div className="absolute -right-6 -bottom-6 opacity-[0.03] text-orange-500 group-hover:scale-110 transition-transform duration-500">
-                    <UserCheck size={120} />
-                  </div>
-                  <p className="text-gray-400 font-bold mb-1 uppercase text-xs tracking-widest flex items-center gap-2">
-                    Tài Xế Sẵn Sàng
-                  </p>
-                  <p className="text-4xl font-black text-gray-800 mt-2">{taiXe.length} <span className="text-xl text-gray-400 font-bold">Người</span></p>
-                </div>
-              </div>
-            </div>
-
-            <div className="xl:col-span-6 bg-white p-8 rounded-[24px] shadow-[0_8px_30px_rgb(0,0,0,0.04)] h-fit">
-              <div className="flex items-center gap-3 mb-8">
-                <div className="bg-orange-50 p-3 rounded-xl text-orange-500">
-                  <Send size={24} />
-                </div>
-                <div>
-                  <h3 className="text-xl font-bold text-gray-800">Trình Báo Cáo Vận Hành</h3>
-                  <p className="text-xs font-bold text-gray-400 uppercase mt-1">Gửi Ban Giám Đốc</p>
-                </div>
-              </div>
-              
-              <form onSubmit={guiBaoCao} className="space-y-6">
-                <div>
-                  <label className="block font-bold text-gray-600 mb-2 text-sm">Tiêu đề báo cáo</label>
-                  <input 
-                    type="text" 
-                    className="w-full bg-[#FFF8F1] border-2 border-transparent p-4 rounded-xl outline-none focus:border-orange-400 focus:bg-white transition-all font-medium text-gray-700" 
-                    placeholder="VD: Yêu cầu bổ sung tài xế tuyến A..."
-                    value={tieuDeBaoCao}
-                    onChange={(e) => setTieuDeBaoCao(e.target.value)}
-                  />
-                </div>
-                <div>
-                  <label className="block font-bold text-gray-600 mb-2 text-sm">Nội dung tình hình</label>
-                  <textarea 
-                    rows="6" 
-                    className="w-full bg-[#FFF8F1] border-2 border-transparent p-4 rounded-xl outline-none focus:border-orange-400 focus:bg-white transition-all font-medium text-gray-700 resize-none"
-                    placeholder="Nhập nội dung sự cố hoặc đề xuất..."
-                    value={noiDungBaoCao}
-                    onChange={(e) => setNoiDungBaoCao(e.target.value)}
-                  ></textarea>
-                </div>
-                <button type="submit" className="w-full bg-gradient-to-r from-orange-500 to-amber-500 hover:from-orange-600 hover:to-amber-500 text-white font-bold py-4 rounded-xl shadow-lg shadow-orange-200 transition-all flex justify-center items-center gap-2 text-lg">
-                  <Send size={20} />
-                  Gửi Khối Điều Hành
-                </button>
-              </form>
-            </div>
-          </div>
-        )}
-      </div>
     </div>
   );
 }

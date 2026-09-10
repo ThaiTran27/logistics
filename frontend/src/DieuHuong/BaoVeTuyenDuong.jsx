@@ -1,20 +1,19 @@
 import { Navigate } from 'react-router-dom';
 
-export default function BaoVeTuyenDuong({ children, quyenChoPhep }) {
-    // Lấy quyền của người dùng đang đăng nhập từ Local Storage
-    const quyenHienTai = localStorage.getItem('user_role');
+export default function BaoVeTuyenDuong({ children, allowedRoles }) {
+  const userRole = localStorage.getItem('role') || localStorage.getItem('user_role');
 
-    // 1. Chặn: Nếu chưa đăng nhập -> Đuổi về trang Đăng nhập
-    if (!quyenHienTai) {
-        return <Navigate to="/dang-nhap" replace />;
-    }
+  // 1. Nếu chưa đăng nhập (không có role trong bộ nhớ) -> Đuổi về trang đăng nhập
+  if (!userRole) {
+    return <Navigate to="/dang-nhap" replace />;
+  }
 
-    // 2. Chặn: Nếu đã đăng nhập nhưng KHÔNG nằm trong danh sách quyền cho phép
-    if (quyenChoPhep && !quyenChoPhep.includes(quyenHienTai)) {
-        alert("Cảnh báo: Bạn không có quyền truy cập vào phân khu nghiệp vụ này!");
-        return <Navigate to="/" replace />; // Đẩy về trang chủ tra cứu
-    }
+  // 2. Nếu trang này yêu cầu quyền cụ thể, mà user hiện tại không có quyền đó -> Đuổi về trang chủ
+  if (allowedRoles && !allowedRoles.includes(userRole)) {
+    alert("Bạn không có quyền truy cập vào phân hệ này!");
+    return <Navigate to="/" replace />;
+  }
 
-    // 3. Hợp lệ: Mở cổng cho phép vào xem giao diện
-    return children;
+  // 3. Hợp lệ -> Cho phép đi tiếp vào component bên trong
+  return children;
 }

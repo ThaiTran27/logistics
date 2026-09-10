@@ -1,300 +1,428 @@
 import { useState, useEffect } from 'react';
-import { Users, UserCog, CalendarCheck, Send, ShieldBan, CheckCircle, XCircle, FileText, UserMinus, LogOut } from 'lucide-react';
+import { Users, UserCheck, UserMinus, UserX, CalendarDays, CheckCircle, XCircle, LogOut, Search, ShieldAlert, Briefcase, CalendarCheck, X } from 'lucide-react';
 
 export default function HoSoNhanVien() {
-  const [nhanVien, setNhanVien] = useState([]);
-  const [donNghiPhep, setDonNghiPhep] = useState([]);
-  const [tabHienTai, setTabHienTai] = useState('danhsach'); 
+  const [nhanVienList, setNhanVienList] = useState([]);
+  const [nghiPhepList, setNghiPhepList] = useState([]);
+  const [tabHienTai, setTabHienTai] = useState('nhan-vien'); // 'nhan-vien' hoặc 'nghi-phep'
+  const [tuKhoa, setTuKhoa] = useState('');
+  
+  // State quản lý Modal quy định thời gian nghỉ phép
+  const [modalDuyet, setModalDuyet] = useState({ mo: false, don: null });
+  const [ngayBatDau, setNgayBatDau] = useState('');
+  const [ngayKetThuc, setNgayKetThuc] = useState('');
+  
+  const hrName = localStorage.getItem('full_name') || 'Phòng Nhân Sự';
 
-  const [tieuDeBaoCao, setTieuDeBaoCao] = useState('');
-  const [noiDungBaoCao, setNoiDungBaoCao] = useState('');
-  const userId = localStorage.getItem('user_id');
-
-  const taiDuLieu = async () => {
-    // Tải nhân sự
-    const resStaff = await fetch('http://localhost:5000/api/hr/staff');
-    const dataStaff = await resStaff.json();
-    if (dataStaff.success) setNhanVien(dataStaff.data);
-
-    // Tải đơn nghỉ phép
-    const resLeave = await fetch('http://localhost:5000/api/hr/leave-requests');
-    const dataLeave = await resLeave.json();
-    if (dataLeave.success) setDonNghiPhep(dataLeave.data);
+  const taiDuLieuNhanVien = async () => {
+    try {
+      const res = await fetch('http://localhost:5000/api/hr/staff');
+      const data = await res.json();
+      if (data.success && Array.isArray(data.data)) {
+        setNhanVienList(data.data);
+      }
+    } catch (error) {
+      console.error("Lỗi tải danh sách nhân viên:", error);
+    }
   };
 
-  useEffect(() => { taiDuLieu(); }, []);
-
-  const doiTrangThaiTaiKhoan = async (id, trangThaiHienTai) => {
-    const trangThaiMoi = trangThaiHienTai === 'active' ? 'inactive' : 'active';
-    await fetch(`http://localhost:5000/api/hr/staff/${id}/status`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status: trangThaiMoi })
-    });
-    taiDuLieu();
+  const taiDuLieuNghiPhep = async () => {
+    try {
+      const res = await fetch('http://localhost:5000/api/hr/leave-requests');
+      const data = await res.json();
+      if (data.success && Array.isArray(data.data)) {
+        setNghiPhepList(data.data);
+      }
+    } catch (error) {
+      console.error("Lỗi tải đơn nghỉ phép:", error);
+    }
   };
 
-  const xuLyDonPhep = async (id, trangThai) => {
-    await fetch(`http://localhost:5000/api/hr/leave/${id}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status: trangThai })
-    });
-    taiDuLieu();
+  useEffect(() => {
+    taiDuLieuNhanVien();
+    taiDuLieuNghiPhep();
+  }, []);
+
+  const capNhatTrangThaiTaiKhoan = async (id, ten, trangThaiMoi) => {
+    const hanhDong = trangThaiMoi === 'active' ? 'MỞ KHÓA' : 'ĐÌNH CHỈ';
+    if (!window.confirm(`Xác nhận ${hanhDong} tài khoản của nhân viên [${ten}]?`)) return;
+
+    try {
+      const res = await fetch(`http://localhost:5000/api/hr/staff/${id}/status`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: trangThaiMoi })
+      });
+      const data = await res.json();
+      if (data.success) {
+        taiDuLieuNhanVien();
+      }
+    } catch (error) {
+      alert("Lỗi kết nối máy chủ!");
+    }
   };
 
-  const guiBaoCao = async (e) => {
+  // Nút Từ Chối đơn (Xử lý trực tiếp)
+  const tuChoiDonNghi = async (id) => {
+    if (!window.confirm(`Xác nhận TỪ CHỐI đơn xin nghỉ phép này?`)) return;
+    try {
+      const res = await fetch(`http://localhost:5000/api/hr/leave/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'rejected' })
+      });
+      if ((await res.json()).success) taiDuLieuNghiPhep();
+    } catch (error) {
+      alert("Lỗi kết nối máy chủ!");
+    }
+  };
+
+  // Nút Xác nhận trong Modal Duyệt (Kèm quy định thời gian)
+  const xacNhanDuyetCoThoiGian = async (e) => {
     e.preventDefault();
-    if (!tieuDeBaoCao || !noiDungBaoCao) return alert("Vui lòng nhập đủ thông tin báo cáo!");
+    if (!ngayBatDau || !ngayKetThuc) {
+      return alert("Vui lòng chọn đầy đủ thời gian bắt đầu và kết thúc!");
+    }
+    
+    if (new Date(ngayBatDau) > new Date(ngayKetThuc)) {
+      return alert("Ngày kết thúc không hợp lý!");
+    }
 
-    await fetch('http://localhost:5000/api/reports/submit', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        department: 'Nhân Sự',
-        title: tieuDeBaoCao,
-        content: noiDungBaoCao,
-        created_by: userId
-      })
-    });
-
-    alert('Đã gửi báo cáo Nhân sự lên Ban Giám Đốc!');
-    setTieuDeBaoCao('');
-    setNoiDungBaoCao('');
+    try {
+      const res = await fetch(`http://localhost:5000/api/hr/leave/${modalDuyet.don.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'approved' })
+      });
+      if ((await res.json()).success) {
+        alert(`✅ Đã phê duyệt nghỉ phép từ ${ngayBatDau} đến ${ngayKetThuc} thành công!`);
+        setModalDuyet({ mo: false, don: null });
+        setNgayBatDau('');
+        setNgayKetThuc('');
+        taiDuLieuNghiPhep();
+      }
+    } catch (error) {
+      alert("Lỗi kết nối máy chủ!");
+    }
   };
 
   const dangXuat = () => {
-    const xacNhan = window.confirm("Bạn có chắc chắn muốn đăng xuất?");
-    if (xacNhan) {
+    if (window.confirm("Bạn muốn đăng xuất khỏi cổng Nhân Sự?")) {
       localStorage.clear();
       window.location.href = '/'; 
     }
   };
 
-  const soDonChoDuyet = donNghiPhep.filter(d => d.status === 'pending').length;
+  const dichTenChucVu = (role) => {
+    const roles = {
+      'shop': 'Cửa Hàng',
+      'driver': 'Tài Xế',
+      'warehouse_manager': 'Thủ Kho',
+      'fleet_manager': 'Điều Phối Viên',
+      'accountant': 'Kế Toán',
+      'hr_manager': 'Nhân Sự',
+      'director': 'Giám Đốc'
+    };
+    return roles[role?.toLowerCase()] || role;
+  };
+
+  // Áo giáp chống sập
+  const anToanNhanVien = Array.isArray(nhanVienList) ? nhanVienList : [];
+  const anToanNghiPhep = Array.isArray(nghiPhepList) ? nghiPhepList : [];
+
+  const nhanVienDaLoc = anToanNhanVien.filter(nv => {
+    const ten = nv?.full_name || '';
+    const email = nv?.email || '';
+    const kw = tuKhoa || '';
+    return ten.toLowerCase().includes(kw.toLowerCase()) || 
+           email.toLowerCase().includes(kw.toLowerCase());
+  });
 
   return (
-    <div className="flex min-h-screen bg-[#FAF5FF] font-sans text-gray-700">
+    <div className="flex min-h-screen bg-[#FFFBFB] font-sans text-slate-700">
       
-      {/* SIDEBAR - TÔNG MÀU TÍM */}
-      <div className="w-72 bg-white border-r border-purple-50 shadow-[0_0_20px_rgba(0,0,0,0.02)] flex flex-col z-10 justify-between">
+      {/* SIDEBAR */}
+      <div className="w-72 bg-white border-r border-rose-100 shadow-sm flex flex-col z-10 justify-between">
         <div>
-          <div className="p-8 border-b border-gray-50 flex items-center gap-3">
-            <div className="bg-gradient-to-tr from-purple-600 to-purple-400 p-2.5 rounded-xl shadow-purple-200 shadow-lg">
-              <Users className="text-white" size={24} />
+          <div className="p-8 border-b border-rose-50 flex items-center gap-3">
+            <div className="bg-gradient-to-tr from-rose-500 to-pink-400 p-2.5 rounded-xl shadow-lg shadow-rose-200">
+              <Briefcase className="text-white" size={24} />
             </div>
             <div>
-              <h2 className="text-xl font-black text-gray-800 tracking-tight">Nhân Sự HR</h2>
-              <p className="text-xs font-bold text-purple-500 uppercase tracking-wider mt-0.5">Quản lý nội bộ</p>
+              <h2 className="text-xl font-black text-slate-800 tracking-tight">Hành Chính</h2>
+              <p className="text-xs font-bold text-rose-500 uppercase tracking-wider mt-0.5">Quản Trị Nhân Sự</p>
             </div>
           </div>
           
-          <div className="flex flex-col gap-3 p-5 mt-2">
+          <div className="p-5 mt-2 space-y-3">
             <button 
-              onClick={() => setTabHienTai('danhsach')}
-              className={`px-5 py-4 rounded-2xl font-bold text-left transition-all duration-300 flex items-center gap-4 group ${tabHienTai === 'danhsach' ? 'bg-gradient-to-r from-purple-600 to-purple-500 text-white shadow-lg shadow-purple-200' : 'bg-transparent text-gray-500 hover:bg-purple-50 hover:text-purple-600'}`}
+              onClick={() => setTabHienTai('nhan-vien')}
+              className={`w-full px-5 py-4 rounded-2xl font-bold flex items-center gap-4 transition-all ${tabHienTai === 'nhan-vien' ? 'bg-rose-50 text-rose-600 border border-rose-200 shadow-sm' : 'text-slate-500 hover:bg-rose-50/50'}`}
             >
-              <UserCog size={20} className={tabHienTai === 'danhsach' ? 'text-white' : 'text-gray-400 group-hover:text-purple-500'} />
-              Danh Sách Nhân Sự
+              <Users size={20} /> Hồ Sơ Nhân Viên
             </button>
-            
             <button 
-              onClick={() => setTabHienTai('nghiphep')}
-              className={`px-5 py-4 rounded-2xl font-bold text-left transition-all duration-300 flex items-center gap-4 justify-between group ${tabHienTai === 'nghiphep' ? 'bg-gradient-to-r from-purple-600 to-purple-500 text-white shadow-lg shadow-purple-200' : 'bg-transparent text-gray-500 hover:bg-purple-50 hover:text-purple-600'}`}
+              onClick={() => setTabHienTai('nghi-phep')}
+              className={`w-full px-5 py-4 rounded-2xl font-bold flex items-center gap-4 transition-all ${tabHienTai === 'nghi-phep' ? 'bg-rose-50 text-rose-600 border border-rose-200 shadow-sm relative' : 'text-slate-500 hover:bg-rose-50/50 relative'}`}
             >
-              <div className="flex items-center gap-4">
-                <CalendarCheck size={20} className={tabHienTai === 'nghiphep' ? 'text-white' : 'text-gray-400 group-hover:text-purple-500'} />
-                Nghỉ Phép & Báo Cáo
-              </div>
-              {soDonChoDuyet > 0 && (
-                <span className={`px-2 py-0.5 rounded-full text-xs ${tabHienTai === 'nghiphep' ? 'bg-white text-purple-600' : 'bg-purple-100 text-purple-600'}`}>
-                  {soDonChoDuyet}
+              <CalendarDays size={20} /> Duyệt Nghỉ Phép
+              {anToanNghiPhep.filter(p => p.status === 'pending').length > 0 && (
+                <span className="absolute right-4 top-1/2 -translate-y-1/2 bg-rose-500 text-white text-[10px] px-2 py-0.5 rounded-full">
+                  {anToanNghiPhep.filter(p => p.status === 'pending').length}
                 </span>
               )}
             </button>
           </div>
         </div>
 
-        {/* Đăng xuất */}
-        <div className="p-5 border-t border-gray-50">
-          <button 
-            onClick={dangXuat}
-            className="w-full px-5 py-4 rounded-2xl font-bold text-left transition-all duration-300 flex items-center gap-4 group bg-transparent text-red-500 hover:bg-red-50 hover:text-red-600"
-          >
-            <LogOut size={20} className="text-red-400 group-hover:text-red-500" />
-            Đăng Xuất
+        <div className="p-5 border-t border-rose-50">
+          <div className="flex items-center gap-3 px-5 py-4 mb-2 bg-rose-50/50 rounded-xl border border-rose-100">
+            <div className="w-10 h-10 rounded-full bg-rose-200 flex items-center justify-center font-black text-rose-700">
+              {(hrName || 'H').charAt(0)}
+            </div>
+            <div>
+              <p className="text-sm font-bold text-slate-700 truncate w-36">{hrName}</p>
+            </div>
+          </div>
+          <button onClick={dangXuat} className="w-full px-5 py-4 rounded-2xl font-bold text-left text-red-500 hover:bg-red-50 transition-colors flex items-center gap-3">
+            <LogOut size={20}/> Đăng Xuất
           </button>
         </div>
       </div>
 
       {/* MAIN CONTENT */}
       <div className="flex-1 p-10 overflow-y-auto">
-        
-        {/* HEADER */}
         <div className="mb-8 flex justify-between items-end">
           <div>
-            <h1 className="text-3xl font-black text-gray-800 tracking-tight">
-              {tabHienTai === 'danhsach' ? 'Quản Lý Quyền Truy Cập' : 'Phê Duyệt & Trình Báo Cáo'}
+            <h1 className="text-3xl font-black text-slate-800 tracking-tight">
+              {tabHienTai === 'nhan-vien' ? 'Hồ Sơ Nhân Sự' : 'Đơn Từ Xin Nghỉ Phép'}
             </h1>
-            <p className="text-gray-500 mt-2">
-              {tabHienTai === 'danhsach' ? 'Kiểm soát tài khoản và phân quyền cho toàn bộ hệ thống.' : 'Xử lý đơn từ nhân viên và báo cáo biến động nhân sự.'}
+            <p className="text-slate-500 mt-2 font-medium">
+              {tabHienTai === 'nhan-vien' ? 'Quản lý tài khoản truy cập hệ thống của toàn bộ cán bộ nhân viên.' : 'Xem xét và phê duyệt các yêu cầu nghỉ phép, vắng mặt của nhân sự.'}
             </p>
           </div>
+          
+          {tabHienTai === 'nhan-vien' && (
+            <div className="relative w-80">
+              <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
+              <input 
+                type="text" 
+                placeholder="Tìm tên nhân viên, email..." 
+                className="w-full pl-11 pr-4 py-3 bg-white border border-rose-100 rounded-xl outline-none focus:border-rose-400 focus:ring-4 focus:ring-rose-50 transition-all font-medium"
+                value={tuKhoa}
+                onChange={(e) => setTuKhoa(e.target.value)}
+              />
+            </div>
+          )}
         </div>
 
-        {/* TAB 1: DANH SÁCH NHÂN SỰ */}
-        {tabHienTai === 'danhsach' && (
-          <div className="bg-white rounded-[24px] shadow-[0_8px_30px_rgb(0,0,0,0.04)] border border-gray-50 overflow-hidden">
+        {/* THỐNG KÊ NHANH */}
+        {tabHienTai === 'nhan-vien' && (
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+            <div className="bg-white p-6 rounded-[24px] shadow-sm border border-rose-100 flex items-center gap-5">
+              <div className="bg-blue-50 p-4 rounded-2xl text-blue-600"><Users size={28}/></div>
+              <div>
+                <p className="text-slate-400 font-bold text-xs uppercase tracking-wider mb-1">Tổng Nhân Sự</p>
+                <p className="text-3xl font-black text-slate-800">{anToanNhanVien.length}</p>
+              </div>
+            </div>
+            <div className="bg-white p-6 rounded-[24px] shadow-sm border border-rose-100 flex items-center gap-5">
+              <div className="bg-emerald-50 p-4 rounded-2xl text-emerald-600"><UserCheck size={28}/></div>
+              <div>
+                <p className="text-slate-400 font-bold text-xs uppercase tracking-wider mb-1">Đang Hoạt Động</p>
+                <p className="text-3xl font-black text-slate-800">{anToanNhanVien.filter(nv => nv.status === 'active').length}</p>
+              </div>
+            </div>
+            <div className="bg-white p-6 rounded-[24px] shadow-sm border border-rose-100 flex items-center gap-5">
+              <div className="bg-rose-50 p-4 rounded-2xl text-rose-600"><UserMinus size={28}/></div>
+              <div>
+                <p className="text-slate-400 font-bold text-xs uppercase tracking-wider mb-1">Bị Đình Chỉ</p>
+                <p className="text-3xl font-black text-rose-600">{anToanNhanVien.filter(nv => nv.status === 'inactive').length}</p>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* TAB 1: DANH SÁCH NHÂN VIÊN */}
+        {tabHienTai === 'nhan-vien' && (
+          <div className="bg-white rounded-[24px] shadow-sm border border-rose-100 overflow-hidden animate-in fade-in duration-300">
             <table className="w-full text-left border-collapse">
-              <thead className="bg-[#FAF5FF] border-b border-purple-100">
+              <thead className="bg-[#FFF5F6] border-b border-rose-100">
                 <tr>
-                  <th className="p-6 text-sm font-black text-purple-400 uppercase tracking-wider">Hồ Sơ</th>
-                  <th className="p-6 text-sm font-black text-purple-400 uppercase tracking-wider">Chức Vụ</th>
-                  <th className="p-6 text-sm font-black text-purple-400 uppercase tracking-wider">Trạng Thái</th>
-                  <th className="p-6 text-sm font-black text-purple-400 uppercase tracking-wider text-right">Phân Quyền</th>
+                  <th className="p-6 text-xs font-black text-rose-400 uppercase tracking-wider">Nhân Viên</th>
+                  <th className="p-6 text-xs font-black text-rose-400 uppercase tracking-wider">Chức Vụ</th>
+                  <th className="p-6 text-xs font-black text-rose-400 uppercase tracking-wider">Trạng Thái</th>
+                  <th className="p-6 text-xs font-black text-rose-400 uppercase tracking-wider text-right">Hành Động</th>
                 </tr>
               </thead>
-              <tbody>
-                {nhanVien.map((nv) => (
-                  <tr key={nv.id} className="border-b border-gray-50 hover:bg-[#FAF5FF] transition-colors group">
-                    <td className="p-6">
-                      <div className="flex items-center gap-4">
-                        <div className="w-10 h-10 rounded-full bg-purple-100 flex items-center justify-center text-purple-600 font-black">
-                          {nv.full_name.charAt(0)}
-                        </div>
-                        <div>
-                          <p className="font-bold text-gray-800">{nv.full_name}</p>
-                          <p className="text-sm text-gray-500">{nv.email}</p>
-                        </div>
-                      </div>
-                    </td>
-                    <td className="p-6">
-                      <span className="bg-purple-50 text-purple-600 px-3 py-1.5 rounded-lg font-bold text-xs uppercase flex items-center w-fit gap-2">
-                        <ShieldBan size={14} /> {nv.role}
-                      </span>
-                    </td>
-                    <td className="p-6">
-                      {nv.status === 'active' ? (
-                        <span className="text-green-500 font-bold text-sm flex items-center gap-2">
-                          <CheckCircle size={16} /> Hoạt động
-                        </span>
-                      ) : (
-                        <span className="text-red-500 font-bold text-sm flex items-center gap-2">
-                          <UserMinus size={16} /> Đã khóa
-                        </span>
-                      )}
-                    </td>
-                    <td className="p-6 text-right flex justify-end gap-2">
-                      <button 
-                        onClick={() => doiTrangThaiTaiKhoan(nv.id, nv.status)}
-                        className={`px-5 py-2.5 rounded-xl font-bold transition-all duration-300 shadow-sm flex items-center gap-2 ${nv.status === 'active' ? 'bg-white border-2 border-red-100 text-red-500 hover:bg-red-50' : 'bg-green-500 text-white hover:bg-green-600 border-2 border-green-500'}`}
-                      >
-                        {nv.status === 'active' ? 'Khóa Tài Khoản' : 'Kích Hoạt'}
-                      </button>
+              <tbody className="divide-y divide-rose-50">
+                {nhanVienDaLoc.length === 0 ? (
+                  <tr>
+                    <td colSpan="4" className="p-16 text-center text-slate-400 font-medium bg-white">
+                      Không tìm thấy dữ liệu nhân viên.
                     </td>
                   </tr>
-                ))}
+                ) : (
+                  nhanVienDaLoc.map((nv) => (
+                    <tr key={nv.id} className="hover:bg-rose-50/30 transition-colors">
+                      <td className="p-6">
+                        <p className="font-bold text-slate-800 text-base">{nv.full_name}</p>
+                        <p className="text-xs text-slate-500 mt-1">{nv.email}</p>
+                      </td>
+                      <td className="p-6">
+                        <span className="bg-slate-100 text-slate-600 px-3 py-1.5 rounded-lg font-bold text-xs">
+                          {dichTenChucVu(nv.role)}
+                        </span>
+                      </td>
+                      <td className="p-6">
+                        {nv.status === 'active' ? (
+                          <span className="text-emerald-600 bg-emerald-50 px-3 py-1.5 rounded-lg font-bold text-xs flex items-center gap-1.5 w-fit border border-emerald-100">
+                            <CheckCircle size={14} /> Hoạt động
+                          </span>
+                        ) : (
+                          <span className="text-rose-600 bg-rose-50 px-3 py-1.5 rounded-lg font-bold text-xs flex items-center gap-1.5 w-fit border border-rose-100">
+                            <ShieldAlert size={14} /> Tạm khóa
+                          </span>
+                        )}
+                      </td>
+                      <td className="p-6 text-right">
+                        {nv.status === 'active' ? (
+                          <button 
+                            onClick={() => capNhatTrangThaiTaiKhoan(nv.id, nv.full_name, 'inactive')}
+                            className="bg-white border border-rose-200 text-rose-600 hover:bg-rose-50 px-4 py-2 rounded-xl font-bold text-xs transition-colors flex items-center gap-2 ml-auto"
+                          >
+                            <UserX size={16} /> Đình Chỉ
+                          </button>
+                        ) : (
+                          <button 
+                            onClick={() => capNhatTrangThaiTaiKhoan(nv.id, nv.full_name, 'active')}
+                            className="bg-emerald-50 border border-emerald-200 text-emerald-600 hover:bg-emerald-500 hover:text-white px-4 py-2 rounded-xl font-bold text-xs transition-colors flex items-center gap-2 ml-auto"
+                          >
+                            <UserCheck size={16} /> Mở Khóa
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  ))
+                )}
               </tbody>
             </table>
           </div>
         )}
 
-        {/* TAB 2: NGHỈ PHÉP & BÁO CÁO */}
-        {tabHienTai === 'nghiphep' && (
-          <div className="grid grid-cols-1 xl:grid-cols-12 gap-8">
-            
-            {/* Cột Trái: Đơn xin nghỉ phép */}
-            <div className="xl:col-span-7 bg-white rounded-[24px] shadow-[0_8px_30px_rgb(0,0,0,0.04)] overflow-hidden h-fit">
-              <div className="p-6 border-b border-gray-50 bg-purple-50/50">
-                <h3 className="text-xl font-bold text-purple-900 flex items-center gap-2">
-                  <CalendarCheck size={20} className="text-purple-500" /> Đơn Xin Nghỉ Phép
-                </h3>
-              </div>
-              <div className="divide-y divide-gray-50">
-                {donNghiPhep.length === 0 ? (
-                  <div className="p-10 text-center text-gray-400 italic">Không có đơn nghỉ phép nào cần xử lý.</div>
-                ) : (
-                  donNghiPhep.map((don) => (
-                    <div key={don.id} className="p-6 hover:bg-gray-50 transition-colors">
-                      <div className="flex justify-between items-start mb-2">
-                        <div>
-                          <p className="font-bold text-gray-800 text-lg">{don.full_name}</p>
-                          <p className="text-xs font-bold text-purple-500 uppercase tracking-wider mt-1">{don.role}</p>
-                        </div>
-                        <div className="text-xs text-gray-400 bg-gray-100 px-3 py-1 rounded-full">
-                          {new Date(don.created_at).toLocaleDateString('vi-VN')}
-                        </div>
+        {/* TAB 2: ĐƠN NGHỈ PHÉP */}
+        {tabHienTai === 'nghi-phep' && (
+          <div className="bg-white rounded-[24px] shadow-sm border border-rose-100 overflow-hidden animate-in fade-in duration-300">
+            <div className="divide-y divide-rose-50">
+              {anToanNghiPhep.length === 0 ? (
+                <div className="p-16 text-center text-slate-400 font-medium">
+                  Hiện không có đơn xin nghỉ phép nào.
+                </div>
+              ) : (
+                anToanNghiPhep.map((don) => (
+                  <div key={don.id} className="p-8 hover:bg-rose-50/20 transition-colors flex flex-col md:flex-row gap-6 items-start md:items-center">
+                    
+                    <div className="flex-1">
+                      <div className="flex items-center gap-3 mb-2">
+                        <h4 className="font-black text-slate-800 text-lg">{don.full_name}</h4>
+                        <span className="bg-slate-100 text-slate-500 px-2 py-1 rounded text-xs font-bold">
+                          {dichTenChucVu(don.role)}
+                        </span>
+                        <span className="text-xs font-bold text-slate-400 bg-slate-50 px-3 py-1 rounded-lg border border-slate-100 ml-auto">
+                          Gửi ngày: {new Date(don.created_at).toLocaleDateString('vi-VN')}
+                        </span>
                       </div>
-                      <div className="bg-[#FAF5FF] p-4 rounded-xl border border-purple-50 text-gray-600 text-sm mb-4">
-                        <span className="font-bold text-purple-900">Lý do: </span>{don.reason}
+                      <div className="text-sm text-slate-700 bg-[#FFFBFB] border border-rose-50 p-4 rounded-xl">
+                        <span className="font-bold text-rose-500 mr-2">Lý do nghỉ:</span> 
+                        {don.reason}
                       </div>
-                      
+                    </div>
+
+                    <div className="shrink-0 md:w-56 flex justify-end">
                       {don.status === 'pending' ? (
-                        <div className="flex gap-3">
-                          <button onClick={() => xuLyDonPhep(don.id, 'approved')} className="flex-1 bg-green-500 hover:bg-green-600 text-white py-2.5 rounded-xl font-bold flex justify-center items-center gap-2 transition-colors">
-                            <CheckCircle size={18} /> Duyệt Đơn
+                        <div className="flex gap-2 w-full">
+                          <button 
+                            onClick={() => setModalDuyet({ mo: true, don: don })}
+                            className="flex-1 bg-emerald-50 hover:bg-emerald-500 hover:text-white text-emerald-600 font-bold py-2.5 rounded-xl text-sm transition-colors border border-emerald-100 flex items-center justify-center gap-1"
+                          >
+                            <CalendarCheck size={16}/> Duyệt & Quy Định
                           </button>
-                          <button onClick={() => xuLyDonPhep(don.id, 'rejected')} className="flex-1 bg-white border-2 border-red-100 text-red-500 hover:bg-red-50 py-2.5 rounded-xl font-bold flex justify-center items-center gap-2 transition-colors">
-                            <XCircle size={18} /> Từ Chối
+                          <button 
+                            onClick={() => tuChoiDonNghi(don.id)}
+                            className="bg-rose-50 hover:bg-rose-500 hover:text-white text-rose-600 font-bold px-4 py-2.5 rounded-xl text-sm transition-colors border border-rose-100 flex items-center justify-center"
+                          >
+                            <XCircle size={18}/>
                           </button>
                         </div>
                       ) : (
-                        <div className="flex items-center gap-2 text-sm font-bold opacity-70">
-                          {don.status === 'approved' ? (
-                            <span className="text-green-500 flex items-center gap-2"><CheckCircle size={16}/> Đã duyệt thành công</span>
-                          ) : (
-                            <span className="text-red-500 flex items-center gap-2"><XCircle size={16}/> Đã từ chối đơn</span>
-                          )}
+                        <div className={`w-full text-center px-4 py-2.5 rounded-xl font-bold text-sm border ${
+                          don.status === 'approved' ? 'bg-emerald-50 text-emerald-600 border-emerald-100' : 'bg-red-50 text-red-600 border-red-100'
+                        }`}>
+                          {don.status === 'approved' ? 'Đã Phê Duyệt' : 'Đã Bị Từ Chối'}
                         </div>
                       )}
                     </div>
-                  ))
-                )}
-              </div>
-            </div>
-
-            {/* Cột Phải: Form Báo cáo HR */}
-            <div className="xl:col-span-5 bg-white p-8 rounded-[24px] shadow-[0_8px_30px_rgb(0,0,0,0.04)] h-fit">
-              <div className="flex items-center gap-3 mb-8">
-                <div className="bg-purple-50 p-3 rounded-xl text-purple-500">
-                  <Send size={24} />
-                </div>
-                <div>
-                  <h3 className="text-xl font-bold text-gray-800">Trình Báo Cáo Nhân Sự</h3>
-                  <p className="text-xs font-bold text-gray-400 uppercase mt-1">Gửi Ban Giám Đốc</p>
-                </div>
-              </div>
-              
-              <form onSubmit={guiBaoCao} className="space-y-6">
-                <div>
-                  <label className="block font-bold text-gray-600 mb-2 text-sm">Tiêu đề báo cáo</label>
-                  <input 
-                    type="text" 
-                    className="w-full bg-[#FAF5FF] border-2 border-transparent p-4 rounded-xl outline-none focus:border-purple-400 focus:bg-white transition-all font-medium text-gray-700" 
-                    placeholder="VD: Đánh giá KPI tài xế tháng 3..."
-                    value={tieuDeBaoCao}
-                    onChange={(e) => setTieuDeBaoCao(e.target.value)}
-                  />
-                </div>
-                <div>
-                  <label className="block font-bold text-gray-600 mb-2 text-sm">Nội dung chi tiết</label>
-                  <textarea 
-                    rows="8" 
-                    className="w-full bg-[#FAF5FF] border-2 border-transparent p-4 rounded-xl outline-none focus:border-purple-400 focus:bg-white transition-all font-medium text-gray-700 resize-none"
-                    placeholder="Nhập tình hình nhân sự, biến động đội ngũ..."
-                    value={noiDungBaoCao}
-                    onChange={(e) => setNoiDungBaoCao(e.target.value)}
-                  ></textarea>
-                </div>
-                <button type="submit" className="w-full bg-gradient-to-r from-purple-600 to-purple-500 hover:from-purple-700 hover:to-purple-600 text-white font-bold py-4 rounded-xl shadow-lg shadow-purple-200 transition-all flex justify-center items-center gap-2 text-lg">
-                  <Send size={20} />
-                  Gửi Khối Điều Hành
-                </button>
-              </form>
+                  </div>
+                ))
+              )}
             </div>
           </div>
         )}
       </div>
+
+      {/* ========================================================= 
+          MODAL QUY ĐỊNH THỜI GIAN NGHỈ PHÉP KHI DUYỆT ĐƠN 
+          ========================================================= */}
+      {modalDuyet.mo && (
+        <div className="fixed inset-0 bg-slate-900/60 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-md w-full p-8 shadow-2xl animate-in zoom-in-95 duration-200">
+            <div className="flex justify-between items-center mb-6">
+              <h3 className="font-black text-xl text-slate-800 flex items-center gap-2">
+                <CalendarDays className="text-emerald-500" /> Quy định thời gian nghỉ
+              </h3>
+              <button onClick={() => setModalDuyet({ mo: false, don: null })} className="text-slate-400 hover:text-slate-600 bg-slate-100 p-2 rounded-full">
+                <X size={18} />
+              </button>
+            </div>
+            
+            <p className="text-sm text-slate-500 font-medium mb-6">
+              Phê duyệt đơn xin nghỉ phép của <span className="font-bold text-slate-800">{modalDuyet.don?.full_name}</span>. Vui lòng thiết lập thời gian:
+            </p>
+
+            <form onSubmit={xacNhanDuyetCoThoiGian} className="space-y-5">
+              <div>
+                <label className="block text-sm font-bold text-slate-700 mb-2">Từ ngày (Bắt đầu nghỉ)</label>
+                <input 
+                  type="date" 
+                  required
+                  value={ngayBatDau}
+                  onChange={(e) => setNgayBatDau(e.target.value)}
+                  className="w-full p-3.5 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:border-emerald-400 font-medium text-slate-700"
+                />
+              </div>
+              
+              <div>
+                <label className="block text-sm font-bold text-slate-700 mb-2">Đến hết ngày (Kết thúc)</label>
+                <input 
+                  type="date" 
+                  required
+                  value={ngayKetThuc}
+                  onChange={(e) => setNgayKetThuc(e.target.value)}
+                  className="w-full p-3.5 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:border-emerald-400 font-medium text-slate-700"
+                />
+              </div>
+
+              <button 
+                type="submit" 
+                className="w-full bg-emerald-500 hover:bg-emerald-600 text-white font-black py-4 rounded-xl shadow-lg shadow-emerald-200 transition-all flex justify-center items-center gap-2 mt-4"
+              >
+                <CheckCircle size={20} /> Xác Nhận Phê Duyệt
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+
     </div>
   );
-}
+}`11`
