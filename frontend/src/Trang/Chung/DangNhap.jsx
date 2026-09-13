@@ -34,11 +34,16 @@ export default function DangNhap() {
           fleet: 'fleet_manager',
           dispatcher: 'fleet_manager',
           dieu_hanh: 'fleet_manager',
-          coordinator: 'fleet_manager', // <-- Bổ sung chức vụ Điều phối
+          coordinator: 'fleet_manager',
           shipper: 'driver',
           admin: 'director',
-          warehouse: 'warehouse_manager', 
-          kho: 'warehouse_manager'
+          warehouse: 'warehouse_manager',
+          kho: 'warehouse_manager',
+          content: 'content_manager',
+          content_manager: 'content_manager',
+          content_team: 'content_manager',
+          phong_ban_noi_dung: 'content_manager',
+          marketing: 'content_manager'
         };
         const normalizedRole = roleAliases[role] || role;
 
@@ -55,6 +60,7 @@ export default function DangNhap() {
           case 'accountant': navigate('/ke-toan'); break;
           case 'director': navigate('/admin'); break;
           case 'hr_manager': navigate('/nhan-su'); break;
+          case 'content_manager': navigate('/phong-ban-noi-dung'); break;
           default: 
             setLoi(`Hệ thống không nhận diện được chức vụ: "${role}". Hãy kiểm tra lại Database.`);
         }

@@ -78,6 +78,25 @@ db.connect((err) => {
     return;
   }
   console.log('Đã kết nối Database: smart_logistics_v2 🚀');
+
+  db.query(`
+    CREATE TABLE IF NOT EXISTS news_articles (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      title VARCHAR(255) NOT NULL,
+      slug VARCHAR(255) NOT NULL UNIQUE,
+      summary TEXT,
+      content LONGTEXT,
+      image_url VARCHAR(255) DEFAULT NULL,
+      category VARCHAR(100) DEFAULT 'Tin tức',
+      status ENUM('draft','published') DEFAULT 'published',
+      created_by VARCHAR(255) DEFAULT 'content_team',
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `, (createErr) => {
+    if (createErr) console.error('Lỗi tạo bảng news_articles:', createErr);
+    else console.log('Đã đảm bảo bảng news_articles sẵn sàng');
+  });
 });
 
 // =========================================
@@ -121,6 +140,50 @@ app.get('/api/orders', (req, res) => {
   db.query(sql, (err, results) => {
     if (err) return res.status(500).json({ success: false, message: 'Lỗi tải dữ liệu: ' + err.sqlMessage });
     res.json({ success: true, data: results });
+  });
+});
+
+app.get('/api/news', (req, res) => {
+  const sql = 'SELECT * FROM news_articles WHERE status = "published" ORDER BY created_at DESC';
+  db.query(sql, (err, results) => {
+    if (err) return res.status(500).json({ success: false, message: 'Lỗi tải tin tức: ' + err.sqlMessage });
+    res.json({ success: true, data: results });
+  });
+});
+
+app.get('/api/news/:id', (req, res) => {
+  const sql = 'SELECT * FROM news_articles WHERE id = ? AND status = "published"';
+  db.query(sql, [req.params.id], (err, results) => {
+    if (err) return res.status(500).json({ success: false, message: 'Lỗi tải chi tiết tin tức: ' + err.sqlMessage });
+    if (results.length === 0) return res.status(404).json({ success: false, message: 'Không tìm thấy bài tin tức.' });
+    res.json({ success: true, data: results[0] });
+  });
+});
+
+app.post('/api/news', (req, res) => {
+  const { title, summary, content, image_url, category, created_by } = req.body;
+
+  if (!title || !summary || !content) {
+    return res.status(400).json({ success: false, message: 'Thiếu tiêu đề, mô tả hoặc nội dung.' });
+  }
+
+  const slug = title
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9\s-]/g, '')
+    .trim()
+    .replace(/\s+/g, '-')
+    .replace(/-+/g, '-');
+
+  const sql = `
+    INSERT INTO news_articles (title, slug, summary, content, image_url, category, created_by, status)
+    VALUES (?, ?, ?, ?, ?, ?, ?, 'published')
+  `;
+
+  db.query(sql, [title, slug, summary, content, image_url || null, category || 'Tin tức', created_by || 'content_team'], (err, result) => {
+    if (err) return res.status(500).json({ success: false, message: 'Lỗi lưu tin tức: ' + err.sqlMessage });
+    res.json({ success: true, message: 'Đã lưu tin tức thành công.', articleId: result.insertId });
   });
 });
 
