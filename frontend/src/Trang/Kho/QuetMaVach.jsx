@@ -7,6 +7,7 @@ export default function QuetMaVach() {
   const [tonKho, setTonKho] = useState([]);
   const [thongBao, setThongBao] = useState({ loai: '', thongDiep: '' });
   const [dangXuLy, setDangXuLy] = useState(false);
+  const [tabKho, setTabKho] = useState('scan');
   
   // State quản lý việc bật/tắt Camera
   const [moCamera, setMoCamera] = useState(false);
@@ -129,10 +130,10 @@ export default function QuetMaVach() {
           </div>
           
           <div className="p-5 mt-2 space-y-2">
-            <button className="w-full px-5 py-4 rounded-2xl font-bold flex items-center gap-4 transition-all bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">
+            <button onClick={() => setTabKho('scan')} className={`w-full px-5 py-4 rounded-2xl font-bold flex items-center gap-4 transition-all ${tabKho === 'scan' ? 'bg-indigo-500/10 text-indigo-400 border border-indigo-500/20' : 'text-slate-500 hover:bg-slate-800 hover:text-slate-300'}`}>
               <ScanLine size={20} /> Máy Quét Mã Vạch
             </button>
-            <button className="w-full px-5 py-4 rounded-2xl font-bold flex items-center gap-4 transition-all text-slate-500 hover:bg-slate-800 hover:text-slate-300 cursor-not-allowed" title="Tính năng đang cập nhật">
+            <button onClick={() => setTabKho('kiem-ke')} className={`w-full px-5 py-4 rounded-2xl font-bold flex items-center gap-4 transition-all ${tabKho === 'kiem-ke' ? 'bg-indigo-500/10 text-indigo-400 border border-indigo-500/20' : 'text-slate-500 hover:bg-slate-800 hover:text-slate-300'}`}>
               <Box size={20} /> Kiểm Kê Định Kỳ
             </button>
           </div>
@@ -155,10 +156,59 @@ export default function QuetMaVach() {
       </div>
 
       {/* MAIN CONTENT */}
-      <div className="flex-1 p-10 overflow-y-auto flex flex-col xl:flex-row gap-8">
-        
-        {/* CỘT TRÁI: MÁY QUÉT */}
-        <div className="xl:w-1/3 flex flex-col gap-6">
+      <>
+        {tabKho === 'kiem-ke' ? (
+          <div className="flex-1 p-10">
+            <div className="mb-8">
+              <p className="text-xs font-black uppercase tracking-[0.22em] text-indigo-600">Kho bãi</p>
+              <h1 className="mt-3 text-4xl font-black text-slate-800">Báo Cáo Kiểm Kê Định Kỳ</h1>
+            </div>
+
+            <div className="grid gap-6 md:grid-cols-3">
+              <div className="rounded-[28px] border border-slate-200 bg-white p-6 shadow-sm">
+                <p className="text-xs font-black uppercase tracking-[0.2em] text-slate-500">Tổng đơn đang lưu</p>
+                <h3 className="mt-4 text-4xl font-black text-slate-800">{anToanTonKho.length}</h3>
+              </div>
+              <div className="rounded-[28px] border border-slate-200 bg-white p-6 shadow-sm">
+                <p className="text-xs font-black uppercase tracking-[0.2em] text-slate-500">Số đơn đã xuất</p>
+                <h3 className="mt-4 text-4xl font-black text-emerald-600">{Math.max(0, anToanTonKho.length - 2)}</h3>
+              </div>
+              <div className="rounded-[28px] border border-slate-200 bg-white p-6 shadow-sm">
+                <p className="text-xs font-black uppercase tracking-[0.2em] text-slate-500">Đánh giá</p>
+                <h3 className="mt-4 text-2xl font-black text-indigo-600">Ổn định</h3>
+              </div>
+            </div>
+
+            <div className="mt-8 rounded-[28px] border border-slate-200 bg-white p-6 shadow-sm">
+              <div className="mb-5 flex items-center justify-between">
+                <h3 className="text-xl font-black text-slate-800">Phiếu kiểm kê nhanh</h3>
+                <button onClick={() => setTabKho('scan')} className="rounded-xl bg-slate-100 px-4 py-2 text-sm font-bold text-slate-700 hover:bg-slate-200">Quay lại quét mã</button>
+              </div>
+              <div className="space-y-3">
+                {anToanTonKho.length === 0 ? (
+                  <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 p-8 text-center text-slate-500">Chưa có dữ liệu kiểm kê trong kho.</div>
+                ) : (
+                  anToanTonKho.slice(0, 6).map((item) => (
+                    <div key={item.id} className="flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                      <div>
+                        <p className="font-black text-slate-800">{item.tracking_code}</p>
+                        <p className="text-sm text-slate-500">{item.receiver_name}</p>
+                      </div>
+                      <div className="text-right">
+                        <p className="text-sm font-bold text-slate-500">{item.status}</p>
+                        <p className="text-xs text-slate-400">{new Date(item.created_at).toLocaleDateString('vi-VN')}</p>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="flex-1 p-10 overflow-y-auto flex flex-col xl:flex-row gap-8">
+            
+            {/* CỘT TRÁI: MÁY QUÉT */}
+            <div className="xl:w-1/3 flex flex-col gap-6">
           <div className="bg-white p-8 rounded-[32px] shadow-sm border border-slate-200 text-center relative overflow-hidden">
             <div className="absolute top-0 left-0 w-full h-2 bg-gradient-to-r from-indigo-500 to-purple-500"></div>
             
@@ -292,8 +342,9 @@ export default function QuetMaVach() {
             </div>
           </div>
         </div>
-
-      </div>
+          </div>
+        )}
+      </>
     </div>
   );
 }

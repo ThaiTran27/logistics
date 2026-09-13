@@ -1,6 +1,38 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Mail, Lock, LogIn, ArrowLeft, Package, ShieldCheck, AlertCircle } from 'lucide-react';
+
+const normalizeRole = (value) => {
+  const role = String(value || '').trim().toLowerCase();
+  const aliases = {
+    hr: 'hr_manager',
+    human_resources: 'hr_manager',
+    nhan_su: 'hr_manager',
+    fleet: 'fleet_manager',
+    dispatcher: 'fleet_manager',
+    dieu_hanh: 'fleet_manager',
+    coordinator: 'fleet_manager',
+    shipper: 'driver',
+    driver: 'driver',
+    admin: 'director',
+    warehouse: 'warehouse_manager',
+    kho: 'warehouse_manager',
+    content: 'content_manager',
+    content_manager: 'content_manager',
+    content_team: 'content_manager',
+    phong_ban_noi_dung: 'content_manager',
+    marketing: 'content_manager',
+    shop: 'shop',
+    accountant: 'accountant',
+    director: 'director',
+    warehouse_manager: 'warehouse_manager',
+    fleet_manager: 'fleet_manager',
+    hr_manager: 'hr_manager',
+    customer: 'customer'
+  };
+
+  return aliases[role] || role;
+};
 
 export default function DangNhap() {
   const [email, setEmail] = useState('');
@@ -9,6 +41,25 @@ export default function DangNhap() {
   const [dangXuLy, setDangXuLy] = useState(false);
   
   const navigate = useNavigate();
+
+  useEffect(() => {
+    const rawRole = localStorage.getItem('role') || localStorage.getItem('user_role');
+    const role = normalizeRole(rawRole);
+    if (!role) return;
+
+    const roleMap = {
+      shop: '/cua-hang',
+      driver: '/tai-xe',
+      warehouse_manager: '/kho',
+      fleet_manager: '/dieu-hanh',
+      accountant: '/ke-toan',
+      director: '/admin',
+      hr_manager: '/nhan-su',
+      content_manager: '/phong-ban-noi-dung'
+    };
+
+    navigate(roleMap[role] || '/', { replace: true });
+  }, [navigate]);
 
   const xuLyDangNhap = async (e) => {
     e.preventDefault();
@@ -126,6 +177,16 @@ export default function DangNhap() {
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                 />
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-blue-100 bg-blue-50/60 p-3">
+              <p className="text-[11px] font-black uppercase tracking-[0.2em] text-blue-600 mb-2">Tài khoản demo</p>
+              <div className="flex flex-wrap gap-2 text-[11px] font-bold text-slate-600">
+                <button type="button" onClick={() => { setEmail('admin@smartlogistics.vn'); setPassword('admin123'); }} className="rounded-full bg-white px-2.5 py-1.5 border border-blue-100 hover:border-blue-300">Admin</button>
+                <button type="button" onClick={() => { setEmail('dieu_hanh@smartlogistics.vn'); setPassword('dieu_hanh123'); }} className="rounded-full bg-white px-2.5 py-1.5 border border-blue-100 hover:border-blue-300">Điều hành</button>
+                <button type="button" onClick={() => { setEmail('taixe1@smartlogistics.vn'); setPassword('driver123'); }} className="rounded-full bg-white px-2.5 py-1.5 border border-blue-100 hover:border-blue-300">Tài xế</button>
+                <button type="button" onClick={() => { setEmail('shop@smartlogistics.vn'); setPassword('shop123'); }} className="rounded-full bg-white px-2.5 py-1.5 border border-blue-100 hover:border-blue-300">Cửa hàng</button>
               </div>
             </div>
 

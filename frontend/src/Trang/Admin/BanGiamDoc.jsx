@@ -21,6 +21,12 @@ export default function DashboardGiamDoc() {
 
   const [baoCao, setBaoCao] = useState([]);
   const [tabHienTai, setTabHienTai] = useState('dashboard');
+  const [truongPhong, setTruongPhong] = useState([
+    { id: 1, ten: 'Phòng Tài Chính', nguoi: 'Nguyễn Thị Kế Toán', status: 'Đang hoạt động' },
+    { id: 2, ten: 'Phòng Điều Hành', nguoi: 'Đoàn Minh Điều Hành', status: 'Đang hoạt động' },
+    { id: 3, ten: 'Phòng Kho', nguoi: 'Trần Vũ Thủ Kho', status: 'Cần báo cáo' },
+    { id: 4, ten: 'Phòng Nhân Sự', nguoi: 'Trương Phòng Nhân Sự', status: 'Ổn định' }
+  ]);
   
   // STATE BỘ LỌC THEO YÊU CẦU CỦA CÔ
   const [locThoiGian, setLocThoiGian] = useState('month'); // today, week, month, year
@@ -185,7 +191,7 @@ export default function DashboardGiamDoc() {
                 </span>
               )}
             </button>
-            <button className="px-5 py-4 rounded-2xl font-bold text-left text-slate-400 hover:bg-white/5 hover:text-white transition-all flex items-center gap-4 opacity-50 cursor-not-allowed title='Tính năng đang phát triển'">
+            <button onClick={() => setTabHienTai('leaders')} className={`px-5 py-4 rounded-2xl font-bold text-left transition-all flex items-center gap-4 ${tabHienTai === 'leaders' ? 'bg-white/10 text-white border border-white/5 shadow-inner' : 'text-slate-400 hover:bg-white/5 hover:text-white'}`}>
               <Users size={20} /> Quản Lý Trưởng Phòng
             </button>
           </div>
@@ -383,6 +389,37 @@ export default function DashboardGiamDoc() {
         )}
 
         {/* TAB BÁO CÁO GIỮ NGUYÊN (Chỉ tinh chỉnh UI cho mượt hơn) */}
+        {tabHienTai === 'leaders' && (
+          <div className="animate-in fade-in duration-300 max-w-5xl">
+            <div className="mb-8">
+              <h1 className="text-3xl font-black text-slate-800 tracking-tight">Quản Lý Trưởng Phòng</h1>
+              <p className="text-slate-500 mt-2 font-medium">Theo dõi đội ngũ điều hành và trạng thái hoạt động của từng phòng ban.</p>
+            </div>
+
+            <div className="rounded-[32px] border border-slate-200 bg-white p-4 shadow-sm">
+              <div className="grid gap-4 md:grid-cols-2">
+                {truongPhong.map((phong) => (
+                  <div key={phong.id} className="rounded-[24px] border border-slate-200 bg-slate-50 p-5">
+                    <div className="flex items-start justify-between gap-4">
+                      <div>
+                        <p className="text-xs font-black uppercase tracking-[0.2em] text-slate-500">Phòng ban</p>
+                        <h3 className="mt-2 text-xl font-black text-slate-800">{phong.ten}</h3>
+                      </div>
+                      <span className={`rounded-full px-3 py-1 text-xs font-black ${phong.status === 'Cần báo cáo' ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700'}`}>
+                        {phong.status}
+                      </span>
+                    </div>
+                    <div className="mt-5 rounded-2xl bg-white p-4 border border-slate-200">
+                      <p className="text-sm text-slate-500">Trưởng phòng</p>
+                      <p className="mt-2 text-lg font-black text-slate-800">{phong.nguoi}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
         {tabHienTai === 'reports' && (
           <div className="animate-in fade-in duration-300 max-w-5xl">
             <div className="mb-8">

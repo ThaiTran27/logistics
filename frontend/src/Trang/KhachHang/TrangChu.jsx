@@ -65,6 +65,10 @@ export default function TraCuuHanhTrinh() {
     { id: 'completed', ten: 'Giao Thành Công', desc: 'Đơn hàng đã được giao tận tay người nhận.', icon: CheckCircle }
   ];
 
+  const mapTarget = thongTinDon?.driver_location || thongTinDon?.warehouse || { lat: 10.762622, lng: 106.660172 };
+  const mapQuery = `${mapTarget.lat},${mapTarget.lng}`;
+  const mapUrl = `https://www.google.com/maps?q=${mapQuery}&z=12&output=embed`;
+
   const layTrangThaiBuoc = (trangThaiHienTai, idBuoc) => {
     const thuTu = ['pending', 'picking', 'in_warehouse', 'delivering', 'completed'];
     if (trangThaiHienTai === 'cancelled' || trangThaiHienTai === 'returning') return 'that-bai';
@@ -230,6 +234,13 @@ export default function TraCuuHanhTrinh() {
         {thongTinDon && (
           <div className="w-full bg-white rounded-xl shadow-lg border border-slate-200 overflow-hidden animate-in fade-in slide-in-from-bottom-8 duration-700">
             <div className="p-6 md:p-8 border-b border-slate-200 bg-slate-50/50">
+              <div className="mb-8 h-72 rounded-2xl overflow-hidden border border-slate-200 bg-slate-100">
+                <iframe
+                  title="Customer tracking map"
+                  className="h-full w-full border-0"
+                  src={mapUrl}
+                />
+              </div>
               <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-8">
                 <div>
                   <p className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-1">Mã Phiếu Gửi</p>
@@ -279,6 +290,14 @@ export default function TraCuuHanhTrinh() {
                   <span className="text-[11px] font-bold text-slate-500 uppercase">Phí Vận Chuyển</span>
                   <span className="font-black text-slate-800 text-lg">{Number(thongTinDon.shipping_fee).toLocaleString()}đ</span>
                 </div>
+                {thongTinDon.driver_location && (
+                  <div className="bg-emerald-50 px-5 py-2.5 rounded-lg border border-emerald-200 shadow-sm flex items-center gap-3">
+                    <span className="text-[11px] font-bold text-emerald-700 uppercase">Tài xế hiện tại</span>
+                    <span className="font-black text-emerald-700 text-sm">
+                      {Number(thongTinDon.driver_location.lat).toFixed(4)}, {Number(thongTinDon.driver_location.lng).toFixed(4)}
+                    </span>
+                  </div>
+                )}
               </div>
             </div>
 

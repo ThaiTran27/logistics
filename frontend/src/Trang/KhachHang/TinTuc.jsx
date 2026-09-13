@@ -1,10 +1,42 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 
+const normalizeRole = (value) => {
+  const role = String(value || '').trim().toLowerCase();
+  const aliases = {
+    hr: 'hr_manager',
+    human_resources: 'hr_manager',
+    nhan_su: 'hr_manager',
+    fleet: 'fleet_manager',
+    dispatcher: 'fleet_manager',
+    dieu_hanh: 'fleet_manager',
+    coordinator: 'fleet_manager',
+    shipper: 'driver',
+    driver: 'driver',
+    admin: 'director',
+    warehouse: 'warehouse_manager',
+    kho: 'warehouse_manager',
+    content: 'content_manager',
+    content_manager: 'content_manager',
+    content_team: 'content_manager',
+    phong_ban_noi_dung: 'content_manager',
+    marketing: 'content_manager',
+    shop: 'shop',
+    accountant: 'accountant',
+    director: 'director',
+    warehouse_manager: 'warehouse_manager',
+    fleet_manager: 'fleet_manager',
+    hr_manager: 'hr_manager',
+    customer: 'customer'
+  };
+
+  return aliases[role] || role;
+};
+
 export default function TinTuc() {
   const [articles, setArticles] = useState([]);
   const [loading, setLoading] = useState(true);
-  const role = localStorage.getItem('role') || localStorage.getItem('user_role');
+  const role = normalizeRole(localStorage.getItem('role') || localStorage.getItem('user_role'));
 
   useEffect(() => {
     const fetchNews = async () => {

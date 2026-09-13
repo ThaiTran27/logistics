@@ -13,7 +13,59 @@ const navItems = [
   { label: 'Tuyển dụng', to: '/tuyen-dung' },
 ];
 
+const normalizeRole = (value) => {
+  const role = String(value || '').trim().toLowerCase();
+  const aliases = {
+    hr: 'hr_manager',
+    human_resources: 'hr_manager',
+    nhan_su: 'hr_manager',
+    fleet: 'fleet_manager',
+    dispatcher: 'fleet_manager',
+    dieu_hanh: 'fleet_manager',
+    coordinator: 'fleet_manager',
+    shipper: 'driver',
+    driver: 'driver',
+    admin: 'director',
+    warehouse: 'warehouse_manager',
+    kho: 'warehouse_manager',
+    content: 'content_manager',
+    content_manager: 'content_manager',
+    content_team: 'content_manager',
+    phong_ban_noi_dung: 'content_manager',
+    marketing: 'content_manager',
+    shop: 'shop',
+    accountant: 'accountant',
+    director: 'director',
+    warehouse_manager: 'warehouse_manager',
+    fleet_manager: 'fleet_manager',
+    hr_manager: 'hr_manager',
+    customer: 'customer'
+  };
+
+  return aliases[role] || role;
+};
+
 export default function PublicLayout() {
+  const rawRole = localStorage.getItem('role') || localStorage.getItem('user_role');
+  const role = normalizeRole(rawRole);
+  const roleMap = {
+    shop: '/cua-hang',
+    driver: '/tai-xe',
+    warehouse_manager: '/kho',
+    fleet_manager: '/dieu-hanh',
+    accountant: '/ke-toan',
+    director: '/admin',
+    hr_manager: '/nhan-su',
+    content_manager: '/phong-ban-noi-dung'
+  };
+
+  const dashboardLink = role ? roleMap[role] || '/' : '/dang-nhap';
+
+  const logout = () => {
+    localStorage.clear();
+    window.location.href = '/';
+  };
+
   return (
     <div className="min-h-screen bg-[#F2F4F7] font-sans text-slate-800 flex flex-col overflow-x-hidden relative">
       <div className="fixed right-0 top-1/2 -translate-y-1/2 z-50 flex flex-col gap-1 hidden xl:flex">
@@ -75,12 +127,30 @@ export default function PublicLayout() {
             ))}
           </nav>
 
-          <NavLink
-            to="/dang-nhap"
-            className="text-xs md:text-sm font-bold text-slate-700 border-2 border-slate-200 bg-slate-50 hover:border-blue-600 hover:text-blue-600 transition-all px-5 py-2 rounded-full flex items-center gap-2"
-          >
-            <User size={16} /> ĐĂNG KÝ / ĐĂNG NHẬP
-          </NavLink>
+          {role ? (
+            <div className="flex items-center gap-2">
+              <NavLink
+                to={dashboardLink}
+                className="text-xs md:text-sm font-bold text-white bg-blue-600 hover:bg-blue-700 transition-all px-5 py-2 rounded-full flex items-center gap-2"
+              >
+                <User size={16} /> VÀO BẢNG ĐIỀU KHIỂN
+              </NavLink>
+              <button
+                type="button"
+                onClick={logout}
+                className="text-xs md:text-sm font-bold text-slate-700 border-2 border-slate-200 bg-slate-50 hover:border-red-400 hover:text-red-600 transition-all px-4 py-2 rounded-full"
+              >
+                ĐĂNG XUẤT
+              </button>
+            </div>
+          ) : (
+            <NavLink
+              to="/dang-nhap"
+              className="text-xs md:text-sm font-bold text-slate-700 border-2 border-slate-200 bg-slate-50 hover:border-blue-600 hover:text-blue-600 transition-all px-5 py-2 rounded-full flex items-center gap-2"
+            >
+              <User size={16} /> ĐĂNG KÝ / ĐĂNG NHẬP
+            </NavLink>
+          )}
         </div>
       </header>
 

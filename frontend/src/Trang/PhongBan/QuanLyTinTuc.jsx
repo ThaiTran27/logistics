@@ -17,12 +17,13 @@ export default function QuanLyTinTuc() {
   const [loadingList, setLoadingList] = useState(true);
   const [message, setMessage] = useState('');
   const [activeTab, setActiveTab] = useState('bai-viet');
+  const [editingId, setEditingId] = useState(null);
 
   const contentName = localStorage.getItem('full_name') || 'Phòng Nội Dung';
 
   const fetchArticles = async () => {
     try {
-      const res = await fetch('http://localhost:5000/api/news');
+      const res = await fetch('http://localhost:5000/api/news/admin');
       const data = await res.json();
       if (data.success) {
         setArticles(data.data || []);
@@ -48,16 +49,20 @@ export default function QuanLyTinTuc() {
     setMessage('');
 
     try {
-      const res = await fetch('http://localhost:5000/api/news', {
-        method: 'POST',
+      const endpoint = editingId ? `http://localhost:5000/api/news/${editingId}` : 'http://localhost:5000/api/news';
+      const method = editingId ? 'PUT' : 'POST';
+
+      const res = await fetch(endpoint, {
+        method,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(form),
       });
 
       const data = await res.json();
       if (data.success) {
-        setMessage('Đã lưu bài tin tức thành công.');
+        setMessage(editingId ? 'Đã cập nhật bài tin tức thành công.' : 'Đã lưu bài tin tức thành công.');
         setForm(initialForm);
+        setEditingId(null);
         await fetchArticles();
       } else {
         setMessage(data.message || 'Có lỗi khi lưu bài tin tức.');
@@ -66,6 +71,39 @@ export default function QuanLyTinTuc() {
       setMessage('Lỗi kết nối server.');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleEdit = (article) => {
+    setEditingId(article.id);
+    setForm({
+      title: article.title,
+      summary: article.summary,
+      content: article.content,
+      category: article.category || 'Tin tức',
+      image_url: article.image_url || '',
+      created_by: article.created_by || 'content_team',
+    });
+    setActiveTab('tao-moi');
+    setMessage('Đang chỉnh sửa bài viết hiện tại.');
+  };
+
+  const handleDelete = async (id) => {
+    if (!window.confirm('Bạn có chắc chắn muốn xóa bài viết này?')) return;
+
+    try {
+      const res = await fetch(`http://localhost:5000/api/news/${id}`, { method: 'DELETE' });
+      const data = await res.json();
+      if (data.success) {
+        setMessage('Đã xóa bài tin tức thành công.');
+        setForm(initialForm);
+        setEditingId(null);
+        await fetchArticles();
+      } else {
+        setMessage(data.message || 'Xóa bài viết thất bại.');
+      }
+    } catch (error) {
+      setMessage('Lỗi khi xóa bài viết.');
     }
   };
 
@@ -238,8 +276,22 @@ export default function QuanLyTinTuc() {
                 disabled={loading}
                 className="rounded-xl bg-blue-600 px-6 py-3 font-bold text-white shadow-[0_10px_20px_rgba(59,130,246,0.25)] transition hover:bg-blue-700 disabled:opacity-60"
               >
-                {loading ? 'Đang lưu...' : 'Lưu tin tức'}
+                {loading ? 'Đang lưu...' : editingId ? 'Cập nhật bài viết' : 'Lưu tin tức'}
               </button>
+
+              {editingId && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditingId(null);
+                    setForm(initialForm);
+                    setMessage('Đã hủy chỉnh sửa bài viết.');
+                  }}
+                  className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 font-bold text-slate-600"
+                >
+                  Hủy
+                </button>
+              )}
 
               {message && <p className="text-sm font-semibold text-emerald-600">{message}</p>}
             </div>
@@ -305,6 +357,20 @@ export default function QuanLyTinTuc() {
                   </div>
 
                   <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => handleEdit(item)}
+                      className="rounded-lg bg-sky-100 px-3 py-2 text-xs font-bold text-sky-700"
+                    >
+                      Sửa
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleDelete(item.id)}
+                      className="rounded-lg bg-red-100 px-3 py-2 text-xs font-bold text-red-700"
+                    >
+                      Xóa
+                    </button>
                     <span className="rounded-full bg-emerald-100 px-3 py-1 text-xs font-bold text-emerald-700">
                       {item.status || 'published'}
                     </span>

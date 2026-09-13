@@ -21,6 +21,7 @@ export default function AppTaiXe() {
   const [tabHienTai, setTabHienTai] = useState('donhang'); 
   const [viTien, setViTien] = useState(5000000); 
   const [viTriHienTai, setViTriHienTai] = useState({ lat: 10.762622, lng: 106.660172 }); 
+  const [routeInfo, setRouteInfo] = useState(null);
   
   // State cho form nghỉ phép
   const [lyDoNghi, setLyDoNghi] = useState('');
@@ -42,7 +43,15 @@ export default function AppTaiXe() {
     try {
       const res = await fetch(`http://localhost:5000/api/orders/shipper/${driverId}`);
       const data = await res.json();
-      if (data.success) setDonHang(data.data);
+      if (data.success) {
+        setDonHang(data.data);
+        const firstActiveOrder = data.data.find(item => ['picking', 'delivering', 'in_warehouse'].includes(item.status));
+        if (firstActiveOrder) {
+          const routeRes = await fetch(`http://localhost:5000/api/orders/${firstActiveOrder.id}/route`);
+          const routeData = await routeRes.json();
+          if (routeData.success) setRouteInfo(routeData.data);
+        }
+      }
     } catch (error) {
       console.error("Lỗi tải dữ liệu:", error);
     }
@@ -73,10 +82,12 @@ export default function AppTaiXe() {
         setViTriHienTai({ lat, lng });
 
         socket.emit('driver_update_location', {
+          shipper_id: Number(driverId),
           order_id: orderId,
           tracking_code: trackingCode,
           lat: lat,
           lng: lng,
+          route_status: 'moving',
           timestamp: new Date()
         });
       }, (error) => console.error("Lỗi GPS:", error), { enableHighAccuracy: true });
@@ -93,6 +104,9 @@ export default function AppTaiXe() {
       });
       if ((await res.json()).success) {
         batDauPhatToaDo(orderId, trackingCode);
+        const routeRes = await fetch(`http://localhost:5000/api/orders/${orderId}/route`);
+        const routeData = await routeRes.json();
+        if (routeData.success) setRouteInfo(routeData.data);
         alert("🚀 Đã bật GPS đồng bộ lộ trình!");
         taiDuLieu();
       }
@@ -242,6 +256,26 @@ export default function AppTaiXe() {
 
         {/* CONTENT */}
         <div className="flex-1 overflow-y-auto pb-28">
+          {routeInfo && (
+            <div className="p-4 border-b border-slate-100 bg-slate-50">
+              <div className="mb-2 flex items-center justify-between">
+                <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Lộ trình hiện tại</p>
+                <span className="rounded-full bg-emerald-100 px-2 py-1 text-[10px] font-bold text-emerald-700">Đang theo dõi</span>
+              </div>
+              <div className="h-36 overflow-hidden rounded-2xl border border-slate-200">
+                <iframe
+                  title="Driver route map"
+                  className="h-full w-full border-0"
+                  src={`https://www.google.com/maps?q=${routeInfo.warehouse.lat},${routeInfo.warehouse.lng}&z=12&output=embed`}
+                />
+              </div>
+              <div className="mt-3 grid grid-cols-3 gap-2 text-[10px] font-bold uppercase tracking-wider text-slate-500">
+                <div className="rounded-xl bg-white p-2 text-center">Kho<br />{routeInfo.warehouse.lat.toFixed(4)}</div>
+                <div className="rounded-xl bg-white p-2 text-center">Lấy hàng<br />{routeInfo.pickup.lat.toFixed(4)}</div>
+                <div className="rounded-xl bg-white p-2 text-center">Giao hàng<br />{routeInfo.delivery.lat.toFixed(4)}</div>
+              </div>
+            </div>
+          )}
           
           {tabHienTai === 'donhang' && (
             <div className="p-5 space-y-4">
