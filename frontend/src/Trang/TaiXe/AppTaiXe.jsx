@@ -14,6 +14,8 @@ const truckIcon = new L.Icon({
   iconAnchor: [12, 41]
 });
 
+const tinhTongTienCanThu = (order) => Number(order?.cod_amount || 0) + Number(order?.shipping_fee || 0);
+
 const socket = io('http://localhost:5000');
 
 export default function AppTaiXe() {
@@ -33,10 +35,19 @@ export default function AppTaiXe() {
   const [anhPreview, setAnhPreview] = useState(null);
   const [lyDoHuy, setLyDoHuy] = useState('');
   const [xacNhanTien, setXacNhanTien] = useState(false);
+  const [phuongThucCOD, setPhuongThucCOD] = useState('');
   const [dangCapNhat, setDangCapNhat] = useState(false);
 
   const driverId = localStorage.getItem('user_id');
   const driverName = localStorage.getItem('full_name') || 'Tài Xế Giao Nhận';
+  const diemDi = routeInfo?.warehouse
+    ? `${routeInfo.warehouse.lat},${routeInfo.warehouse.lng}`
+    : '10.762622,106.660172';
+  const tenKho = routeInfo?.warehouse?.address || 'Kho trung tâm Smart Logistics, TP. Hồ Chí Minh';
+  const diemDen = routeInfo?.delivery?.address || `${routeInfo?.delivery?.lat},${routeInfo?.delivery?.lng}`;
+  const urlChiDuong = routeInfo
+    ? `https://www.google.com/maps/dir/?api=1&${new URLSearchParams({ origin: diemDi, destination: diemDen, travelmode: 'driving' })}`
+    : '';
 
   const taiDuLieu = async () => {
     if (!driverId) return;
@@ -137,7 +148,10 @@ export default function AppTaiXe() {
 
     // Validate bắt buộc đối với Giao thành công
     if (loai === 'completed') {
-      if (!xacNhanTien) return alert("Vui lòng xác nhận đã thu đủ tiền mặt (COD)!");
+      if (!xacNhanTien) return alert('Vui lòng xác nhận đã thu đủ COD và phí vận chuyển.');
+      if (tinhTongTienCanThu(don) > 0 && !['cash', 'bank_transfer'].includes(phuongThucCOD)) {
+        return alert('Vui lòng chọn tiền mặt hoặc chuyển khoản.');
+      }
       if (!anhMinhChung) return alert("BẮT BUỘC: Vui lòng chụp ảnh minh chứng đã giao hàng!");
     }
 
@@ -152,6 +166,7 @@ export default function AppTaiXe() {
 
       if (loai === 'completed') {
         formData.append('cod_collected', String(xacNhanTien));
+        if (tinhTongTienCanThu(don) > 0) formData.append('cod_payment_method', phuongThucCOD);
       }
       
       if (loai === 'returning') {
@@ -167,9 +182,9 @@ export default function AppTaiXe() {
       
       if (data.success) {
         if (loai === 'completed') {
-          setViTien(prev => prev - Number(don.cod_amount));
+          setViTien(prev => prev - tinhTongTienCanThu(don));
         }
-        alert(loai === 'completed' ? "🎉 Xác nhận giao thành công!" : "⚠️ Đã ghi nhận chuyển hoàn hàng!");
+        alert(loai === 'completed' ? 'Đã xác nhận giao hàng và thu đủ COD + cước.' : 'Đã ghi nhận chuyển hoàn hàng!');
         dongModal();
         taiDuLieu();
       } else {
@@ -188,6 +203,7 @@ export default function AppTaiXe() {
     setAnhPreview(null);
     setLyDoHuy('');
     setXacNhanTien(false);
+    setPhuongThucCOD('');
   };
 
   const guiDonNghiPhep = async (e) => {
@@ -221,7 +237,7 @@ export default function AppTaiXe() {
   };
 
   const donThanhCong = donHang.filter(d => d.status === 'completed');
-  const tongTienThuHo = donThanhCong.reduce((sum, item) => sum + Number(item.cod_amount), 0);
+  const tongTienThuHo = donThanhCong.reduce((sum, item) => sum + tinhTongTienCanThu(item), 0);
   const donDangChay = donHang.filter(d => ['picking', 'delivering'].includes(d.status));
 
   return (
@@ -260,23 +276,32 @@ export default function AppTaiXe() {
 
         {/* CONTENT */}
         <div className="flex-1 overflow-y-auto pb-28">
-          {routeInfo && (
+          {routeInfo?.status === 'delivering' && (
             <div className="p-4 border-b border-slate-100 bg-slate-50">
               <div className="mb-2 flex items-center justify-between">
-                <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Lộ trình hiện tại</p>
-                <span className="rounded-full bg-emerald-100 px-2 py-1 text-[10px] font-bold text-emerald-700">Đang theo dõi</span>
+                <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Lộ trình giao hàng</p>
+                <span className="rounded-full bg-emerald-100 px-2 py-1 text-[10px] font-bold text-emerald-700">Đã lấy hàng</span>
               </div>
               <div className="h-36 overflow-hidden rounded-2xl border border-slate-200">
                 <iframe
                   title="Driver route map"
                   className="h-full w-full border-0"
-                  src={`https://www.google.com/maps?q=${routeInfo.warehouse.lat},${routeInfo.warehouse.lng}&z=12&output=embed`}
+                  src={`https://www.google.com/maps?q=${encodeURIComponent(diemDen)}&z=14&output=embed`}
                 />
               </div>
-              <div className="mt-3 grid grid-cols-3 gap-2 text-[10px] font-bold uppercase tracking-wider text-slate-500">
-                <div className="rounded-xl bg-white p-2 text-center">Kho<br />{routeInfo.warehouse.lat.toFixed(4)}</div>
-                <div className="rounded-xl bg-white p-2 text-center">Lấy hàng<br />{routeInfo.pickup.lat.toFixed(4)}</div>
-                <div className="rounded-xl bg-white p-2 text-center">Giao hàng<br />{routeInfo.delivery.lat.toFixed(4)}</div>
+              <div className="mt-3 space-y-2">
+                <div className="rounded-xl bg-white p-3">
+                  <p className="text-[10px] font-black uppercase tracking-wider text-emerald-700">Điểm đi · Kho trung tâm</p>
+                  <p className="mt-1 text-xs font-medium text-slate-700">{tenKho}</p>
+                  <p className="mt-1 text-[10px] text-slate-400">{diemDi}</p>
+                </div>
+                <div className="rounded-xl bg-white p-3">
+                  <p className="text-[10px] font-black uppercase tracking-wider text-blue-700">Điểm đến</p>
+                  <p className="mt-1 text-xs font-medium text-slate-700">{diemDen}</p>
+                </div>
+                <a href={urlChiDuong} target="_blank" rel="noreferrer" className="flex w-full items-center justify-center gap-2 rounded-xl bg-blue-600 px-4 py-3 text-sm font-bold text-white hover:bg-blue-700">
+                  <Navigation size={16} /> Mở chỉ đường
+                </a>
               </div>
             </div>
           )}
@@ -316,9 +341,10 @@ export default function AppTaiXe() {
                           <MapPin size={16} className="text-orange-400 mt-0.5 shrink-0" />
                           <p className="text-slate-600 text-xs leading-relaxed">{don.receiver_address}</p>
                         </div>
-                        <div className="bg-slate-50 p-2.5 rounded-xl flex justify-between items-center text-xs">
-                          <span className="font-bold text-slate-500">Tiền COD:</span>
-                          <span className="font-black text-red-500 text-sm">{Number(don.cod_amount).toLocaleString()} đ</span>
+                        <div className="bg-slate-50 p-2.5 rounded-xl space-y-1.5 text-xs">
+                          <div className="flex justify-between"><span className="font-bold text-slate-500">COD hàng:</span><span>{Number(don.cod_amount || 0).toLocaleString()} đ</span></div>
+                          <div className="flex justify-between"><span className="font-bold text-slate-500">Cước vận chuyển:</span><span>{Number(don.shipping_fee || 0).toLocaleString()} đ</span></div>
+                          <div className="flex justify-between border-t border-slate-200 pt-1.5"><span className="font-black text-slate-700">Tổng cần thu:</span><span className="font-black text-red-500 text-sm">{tinhTongTienCanThu(don).toLocaleString()} đ</span></div>
                         </div>
                       </div>
                       <div className="grid grid-cols-2 gap-2">
@@ -369,7 +395,7 @@ export default function AppTaiXe() {
                   <span className="font-black text-emerald-500">{donThanhCong.length} đơn</span>
                 </div>
                 <div className="flex justify-between py-2 text-sm">
-                  <span className="text-slate-500">Tổng COD đã thu</span>
+                  <span className="text-slate-500">Tổng đã thu (COD + cước)</span>
                   <span className="font-black text-red-500">{tongTienThuHo.toLocaleString()} đ</span>
                 </div>
               </div>
@@ -448,20 +474,50 @@ export default function AppTaiXe() {
                   </div>
                 )}
 
-                {/* 2. MỤC DÀNH CHO THÀNH CÔNG: XÁC NHẬN TIỀN COD */}
+                {/* 2. MỤC DÀNH CHO THÀNH CÔNG: XÁC NHẬN VÀ CHỌN HÌNH THỨC COD */}
                 {modalXuLy.loai === 'completed' && (
-                  <div className="bg-emerald-50 border border-emerald-100 p-4 rounded-xl flex items-start gap-3">
-                    <input 
-                      type="checkbox" 
-                      id="checkTien"
-                      className="w-6 h-6 mt-0.5 accent-emerald-500 rounded"
-                      checked={xacNhanTien}
-                      onChange={(e) => setXacNhanTien(e.target.checked)}
-                    />
-                    <label htmlFor="checkTien" className="text-sm">
-                      <p className="font-bold text-emerald-800">Xác nhận thu đủ tiền COD</p>
-                      <p className="font-black text-red-600 text-lg">{Number(modalXuLy.don?.cod_amount || 0).toLocaleString()} VNĐ</p>
-                    </label>
+                  <div className="bg-emerald-50 border border-emerald-100 p-4 rounded-xl">
+                    <div className="flex items-start gap-3">
+                      <input
+                        type="checkbox"
+                        id="checkTien"
+                        className="w-6 h-6 mt-0.5 accent-emerald-500 rounded"
+                        checked={xacNhanTien}
+                        onChange={(e) => setXacNhanTien(e.target.checked)}
+                      />
+                      <label htmlFor="checkTien" className="text-sm">
+                        <p className="font-bold text-emerald-800">Xác nhận đã thu đủ COD</p>
+                        <p className="font-black text-red-600 text-lg">{Number(modalXuLy.don?.cod_amount || 0).toLocaleString()} VNĐ</p>
+                      </label>
+                    </div>
+                    <div className="ml-9 mt-2 space-y-1 text-xs text-emerald-800">
+                      <div className="flex justify-between"><span>COD hàng</span><span>{Number(modalXuLy.don?.cod_amount || 0).toLocaleString()} VNĐ</span></div>
+                      <div className="flex justify-between"><span>Phí vận chuyển</span><span>{Number(modalXuLy.don?.shipping_fee || 0).toLocaleString()} VNĐ</span></div>
+                      <div className="flex justify-between border-t border-emerald-200 pt-1 font-black"><span>Tổng cần thu</span><span>{tinhTongTienCanThu(modalXuLy.don).toLocaleString()} VNĐ</span></div>
+                    </div>
+                    {tinhTongTienCanThu(modalXuLy.don) > 0 && (
+                      <fieldset className="mt-4 border-t border-emerald-200 pt-3">
+                        <legend className="mb-2 text-xs font-black uppercase text-emerald-800">Hình thức thanh toán</legend>
+                        <div className="grid grid-cols-2 gap-2">
+                          {[
+                            { value: 'cash', label: 'Tiền mặt' },
+                            { value: 'bank_transfer', label: 'Chuyển khoản' }
+                          ].map((method) => (
+                            <label key={method.value} className={`flex cursor-pointer items-center gap-2 rounded-lg border p-3 text-sm font-bold ${phuongThucCOD === method.value ? 'border-emerald-500 bg-white text-emerald-800' : 'border-emerald-100 bg-emerald-50/50 text-slate-600'}`}>
+                              <input
+                                type="radio"
+                                name="cod_payment_method"
+                                value={method.value}
+                                checked={phuongThucCOD === method.value}
+                                onChange={(event) => setPhuongThucCOD(event.target.value)}
+                                className="accent-emerald-600"
+                              />
+                              {method.label}
+                            </label>
+                          ))}
+                        </div>
+                      </fieldset>
+                    )}
                   </div>
                 )}
 

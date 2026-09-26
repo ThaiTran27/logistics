@@ -1,6 +1,22 @@
 import { useState, useEffect, useRef } from 'react';
-import { ScanLine, Barcode, LogOut, Box, ArrowRightLeft, CheckCircle, AlertCircle, PackageSearch, Camera, X } from 'lucide-react';
-import { Html5QrcodeScanner, Html5QrcodeSupportedFormats } from 'html5-qrcode';
+import { ScanLine, Barcode, LogOut, Box, ArrowRightLeft, CheckCircle, AlertCircle, PackageSearch, Camera, ImagePlus, X } from 'lucide-react';
+import { Html5Qrcode, Html5QrcodeScanner, Html5QrcodeSupportedFormats } from 'html5-qrcode';
+
+const supportedBarcodeFormats = [
+  Html5QrcodeSupportedFormats.QR_CODE,
+  Html5QrcodeSupportedFormats.AZTEC,
+  Html5QrcodeSupportedFormats.CODABAR,
+  Html5QrcodeSupportedFormats.CODE_128,
+  Html5QrcodeSupportedFormats.CODE_39,
+  Html5QrcodeSupportedFormats.CODE_93,
+  Html5QrcodeSupportedFormats.DATA_MATRIX,
+  Html5QrcodeSupportedFormats.EAN_13,
+  Html5QrcodeSupportedFormats.EAN_8,
+  Html5QrcodeSupportedFormats.ITF,
+  Html5QrcodeSupportedFormats.UPC_A,
+  Html5QrcodeSupportedFormats.UPC_E,
+  Html5QrcodeSupportedFormats.PDF_417
+];
 
 export default function QuetMaVach() {
   const [maVanDon, setMaVanDon] = useState('');
@@ -15,6 +31,7 @@ export default function QuetMaVach() {
   const [moCamera, setMoCamera] = useState(false);
   
   const inputRef = useRef(null);
+  const imageInputRef = useRef(null);
   const warehouseName = localStorage.getItem('full_name') || 'Thủ Kho';
 
   const taiTonKho = async () => {
@@ -40,8 +57,8 @@ export default function QuetMaVach() {
     if (e) e.preventDefault();
     
     // Lấy mã từ Camera hoặc từ ô Input
-    const maCanXuly = maTuCamera || maVanDon;
-    if (!maCanXuly.trim()) return;
+    const maCanXuly = String(maTuCamera || maVanDon).trim().replace(/\s+/g, '').toUpperCase();
+    if (!maCanXuly) return;
 
     setDangXuLy(true);
     setThongBao({ loai: '', thongDiep: '' });
@@ -50,7 +67,7 @@ export default function QuetMaVach() {
       const res = await fetch('http://localhost:5000/api/warehouse/scan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tracking_code: maCanXuly.trim().toUpperCase() })
+        body: JSON.stringify({ tracking_code: maCanXuly })
       });
       const data = await res.json();
 
@@ -72,6 +89,33 @@ export default function QuetMaVach() {
     }
   };
 
+  const xuLyQuetAnh = async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    setDangXuLy(true);
+    setThongBao({ loai: '', thongDiep: '' });
+    const imageScanner = new Html5Qrcode('barcode-image-reader', {
+      formatsToSupport: supportedBarcodeFormats,
+      verbose: false
+    });
+
+    try {
+      const decodedText = await imageScanner.scanFile(file, false);
+      const trackingCode = decodedText.trim().replace(/\s+/g, '').toUpperCase();
+      setMaVuaDoc(trackingCode);
+      setThongBao({ loai: 'thanhcong', thongDiep: `Đã đọc mã ${trackingCode}. Đang kiểm tra đơn hàng...` });
+      await xuLyQuetMa(null, trackingCode);
+    } catch (error) {
+      console.error('Không đọc được mã từ ảnh:', error);
+      setThongBao({ loai: 'loi', thongDiep: 'Ảnh chưa đọc được mã. Hãy chụp thẳng, đủ sáng và để toàn bộ mã vạch rõ nét trong ảnh.' });
+    } finally {
+      imageScanner.clear().catch(() => {});
+      setDangXuLy(false);
+      if (imageInputRef.current) imageInputRef.current.value = '';
+    }
+  };
+
   // HOOK QUẢN LÝ THƯ VIỆN CAMERA (HTML5-QRCODE)
   useEffect(() => {
     if (moCamera) {
@@ -88,16 +132,13 @@ export default function QuetMaVach() {
 
       const scanner = new Html5QrcodeScanner('camera-reader', {
         fps: 5,
-        qrbox: { width: 320, height: 120 },
+        qrbox: (viewfinderWidth, viewfinderHeight) => {
+          const width = Math.max(120, Math.min(viewfinderWidth - 20, 420));
+          const height = Math.min(viewfinderHeight - 20, Math.max(80, Math.round(width / 3)));
+          return { width, height };
+        },
         aspectRatio: 1.777778,
-        formatsToSupport: [
-          Html5QrcodeSupportedFormats.CODE_128,
-          Html5QrcodeSupportedFormats.CODE_39,
-          Html5QrcodeSupportedFormats.EAN_13,
-          Html5QrcodeSupportedFormats.EAN_8,
-          Html5QrcodeSupportedFormats.UPC_A,
-          Html5QrcodeSupportedFormats.UPC_E
-        ],
+        formatsToSupport: supportedBarcodeFormats,
         disableFlip: false,
         rememberLastUsedCamera: false
       });
@@ -150,6 +191,7 @@ export default function QuetMaVach() {
 
   return (
     <div className="flex min-h-screen bg-[#F1F5F9] font-sans text-slate-800">
+      <div id="barcode-image-reader" className="fixed left-[-10000px] top-0 h-px w-px overflow-hidden" aria-hidden="true" />
       
       {/* SIDEBAR */}
       <div className="w-72 bg-slate-900 border-r border-slate-800 shadow-xl flex flex-col z-10 justify-between text-slate-300">
@@ -251,7 +293,7 @@ export default function QuetMaVach() {
               <ScanLine size={36} />
             </div>
             <h2 className="text-2xl font-black text-slate-800 mb-2">Quét Mã Vận Đơn</h2>
-            <p className="text-slate-500 text-sm mb-6 font-medium">Sử dụng súng quét, nhập tay, hoặc mở Camera thiết bị.</p>
+            <p className="text-slate-500 text-sm mb-6 font-medium">Đưa trọn mã vạch vào khung quét. Có thể dùng ảnh mã rõ nét, súng quét hoặc nhập mã tay.</p>
 
             {/* VÙNG CHỨA CAMERA / NÚT BẬT CAMERA */}
             {!moCamera ? (
@@ -275,6 +317,23 @@ export default function QuetMaVach() {
                 {trangThaiCamera && <p className="border-t border-slate-700 px-3 py-2 text-center text-sm font-bold text-amber-300">{trangThaiCamera}</p>}
               </div>
             )}
+
+            <input
+              ref={imageInputRef}
+              type="file"
+              accept="image/*"
+              capture="environment"
+              className="hidden"
+              onChange={xuLyQuetAnh}
+            />
+            <button
+              type="button"
+              disabled={dangXuLy}
+              onClick={() => imageInputRef.current?.click()}
+              className="mb-5 flex w-full items-center justify-center gap-2 rounded-2xl border border-indigo-200 bg-indigo-50 px-4 py-3 font-bold text-indigo-700 hover:bg-indigo-100 disabled:opacity-50"
+            >
+              <ImagePlus size={18} /> Chụp / chọn ảnh mã vạch
+            </button>
 
             <div className="relative flex items-center py-2 mb-6">
               <div className="flex-grow border-t border-slate-200"></div>

@@ -173,6 +173,7 @@ export default function QuanLyDonHang() {
     vehicle_type: 'motorbike',
     is_fragile: false
   });
+  const [vehicleSelectionMode, setVehicleSelectionMode] = useState('automatic');
   const [showShopMap, setShowShopMap] = useState(false);
   const [showReceiverMap, setShowReceiverMap] = useState(false);
   const [shopMapSearch, setShopMapSearch] = useState('');
@@ -316,13 +317,18 @@ export default function QuanLyDonHang() {
       height: h,
       distance_km: autoDistance
     });
+    const selectedVehicleType = vehicleSelectionMode === 'automatic' ? autoVehicleType : form.vehicle_type;
 
     setForm(prev => {
-      const nextVehicle = autoVehicleType;
       const nextDistance = String(autoDistance);
-      const shouldUpdate = Number(prev.distance_km) !== autoDistance || prev.vehicle_type !== nextVehicle || prev.is_remote_area !== isRemote;
+      const shouldUpdate = Number(prev.distance_km) !== autoDistance || (vehicleSelectionMode === 'automatic' && prev.vehicle_type !== autoVehicleType) || prev.is_remote_area !== isRemote;
       if (!shouldUpdate) return prev;
-      return { ...prev, distance_km: nextDistance, vehicle_type: nextVehicle, is_remote_area: isRemote };
+      return {
+        ...prev,
+        distance_km: nextDistance,
+        vehicle_type: vehicleSelectionMode === 'automatic' ? autoVehicleType : prev.vehicle_type,
+        is_remote_area: isRemote
+      };
     });
 
     const volumetricWeight = (l * w * h) / 5000;
@@ -346,7 +352,7 @@ export default function QuanLyDonHang() {
 
     const remoteFee = isRemote ? 20000 : 0;
     const fragileFee = isFragile ? 10000 : 0;
-    const vehicleFactor = autoVehicleType === 'truck' ? 1.35 : autoVehicleType === 'van' ? 1.2 : autoVehicleType === 'airplane' ? 2.6 : 1;
+    const vehicleFactor = selectedVehicleType === 'truck' ? 1.35 : selectedVehicleType === 'van' ? 1.2 : selectedVehicleType === 'airplane' ? 2.6 : 1;
     const total = Math.round((baseFee + distanceFee + weightFee + insuranceFee + remoteFee + fragileFee) * vehicleFactor);
     setShippingFee(total);
   }, [
@@ -361,8 +367,10 @@ export default function QuanLyDonHang() {
     form.height,
     form.item_value,
     form.service_type,
+    form.vehicle_type,
     form.is_remote_area,
     form.is_fragile,
+    vehicleSelectionMode,
   ]);
 
   const layCuocPhiChuan = (don) => {
@@ -520,6 +528,8 @@ export default function QuanLyDonHang() {
           receiver_name: form.receiver_name,
           receiver_phone: form.receiver_phone,
           receiver_address: form.receiver_address,
+          receiver_lat: form.receiver_lat,
+          receiver_lng: form.receiver_lng,
           destination_province: form.destination_province,
           cod_amount: form.cod_amount,
           customer_email: '',
@@ -729,8 +739,19 @@ export default function QuanLyDonHang() {
                   <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2 mb-4">
                     <Truck className="text-blue-500" /> Phương Tiện Giao Hàng
                   </h3>
-                  <div className="mb-3 rounded-xl border border-blue-100 bg-blue-50 px-3 py-2 text-xs font-semibold text-blue-700">
-                    Hệ thống tự động gán phương tiện theo tiêu chí hàng hóa và tuyến vận chuyển.
+                  <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-blue-100 bg-blue-50 px-3 py-2 text-xs font-semibold text-blue-700">
+                    <span>
+                      {vehicleSelectionMode === 'automatic'
+                        ? 'Gợi ý hệ thống: tự chọn theo hàng hóa và tuyến vận chuyển.'
+                        : 'Bạn đang tự chọn phương tiện cho đơn hàng.'}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setVehicleSelectionMode(vehicleSelectionMode === 'automatic' ? 'manual' : 'automatic')}
+                      className="font-black underline underline-offset-2"
+                    >
+                      {vehicleSelectionMode === 'automatic' ? 'Tự chọn xe' : 'Dùng gợi ý hệ thống'}
+                    </button>
                   </div>
                   <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
                     {[
@@ -739,10 +760,19 @@ export default function QuanLyDonHang() {
                       { value: 'truck', label: 'Xe tải', note: 'Giao hàng nặng / xa' },
                       { value: 'airplane', label: 'Máy bay', note: 'Cho tuyến quốc tế / đường dài' }
                     ].map((vehicle) => (
-                      <div key={vehicle.value} className={`p-3 rounded-xl border-2 transition-all ${form.vehicle_type === vehicle.value ? 'border-blue-500 bg-blue-50' : 'border-slate-100 bg-slate-50 opacity-80'}`}>
+                      <button
+                        key={vehicle.value}
+                        type="button"
+                        aria-pressed={form.vehicle_type === vehicle.value}
+                        onClick={() => {
+                          setVehicleSelectionMode('manual');
+                          setForm((currentForm) => ({ ...currentForm, vehicle_type: vehicle.value }));
+                        }}
+                        className={`w-full rounded-xl border-2 p-3 text-left transition-all focus:outline-none focus:ring-2 focus:ring-blue-400 ${form.vehicle_type === vehicle.value ? 'border-blue-500 bg-blue-50' : 'border-slate-100 bg-slate-50 hover:border-blue-200'}`}
+                      >
                         <p className="font-black text-slate-800 mb-1">{vehicle.label}</p>
                         <p className="text-[11px] text-slate-500">{vehicle.note}</p>
-                      </div>
+                      </button>
                     ))}
                   </div>
                 </div>

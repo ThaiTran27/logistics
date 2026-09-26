@@ -218,6 +218,30 @@ db.connect((err) => {
     }
   });
 
+  db.query('ALTER TABLE orders ADD COLUMN receiver_lat DOUBLE DEFAULT NULL', (alterErr) => {
+    if (alterErr && alterErr.code !== 'ER_DUP_FIELDNAME') {
+      console.error('Lỗi bổ sung cột receiver_lat cho orders:', alterErr);
+    }
+  });
+
+  db.query('ALTER TABLE orders ADD COLUMN receiver_lng DOUBLE DEFAULT NULL', (alterErr) => {
+    if (alterErr && alterErr.code !== 'ER_DUP_FIELDNAME') {
+      console.error('Lỗi bổ sung cột receiver_lng cho orders:', alterErr);
+    }
+  });
+
+  db.query("ALTER TABLE orders ADD COLUMN cod_payment_method ENUM('cash','bank_transfer') DEFAULT NULL", (alterErr) => {
+    if (alterErr && alterErr.code !== 'ER_DUP_FIELDNAME') {
+      console.error('Lỗi bổ sung cột cod_payment_method cho orders:', alterErr);
+    }
+  });
+
+  db.query('ALTER TABLE orders ADD COLUMN cod_collected_amount DECIMAL(12,2) NOT NULL DEFAULT 0', (alterErr) => {
+    if (alterErr && alterErr.code !== 'ER_DUP_FIELDNAME') {
+      console.error('Lỗi bổ sung cột cod_collected_amount cho orders:', alterErr);
+    }
+  });
+
   console.log('Đã đảm bảo bảng news_articles, driver_routes, driver_positions sẵn sàng');
 });
 
@@ -263,6 +287,8 @@ app.post('/api/orders', (req, res) => {
     receiver_name,
     receiver_phone,
     receiver_address,
+    receiver_lat,
+    receiver_lng,
     customer_email,
     cod_amount,
     shipping_fee,
@@ -279,8 +305,10 @@ app.post('/api/orders', (req, res) => {
     destination_province
   } = req.body;
 
-  const numericFields = { cod_amount, shipping_fee, weight_kg, length, width, height, item_value, distance_km, shop_lat, shop_lng };
+  const numericFields = { cod_amount, shipping_fee, weight_kg, length, width, height, item_value, distance_km, shop_lat, shop_lng, receiver_lat, receiver_lng };
   const hasInvalidNumber = Object.entries(numericFields).some(([, value]) => value !== undefined && (!Number.isFinite(Number(value)) || Number(value) < 0));
+  const normalizedReceiverLat = receiver_lat === undefined || receiver_lat === null || receiver_lat === '' ? null : Number(receiver_lat);
+  const normalizedReceiverLng = receiver_lng === undefined || receiver_lng === null || receiver_lng === '' ? null : Number(receiver_lng);
   const normalizedVehicle = ['motorbike', 'van', 'truck', 'airplane'].includes(vehicle_type) ? vehicle_type : 'motorbike';
   const provinceName = String(destination_province || 'Hồ Chí Minh').trim() || 'Hồ Chí Minh';
   const localProvinces = ['Hồ Chí Minh', 'Bình Dương', 'Đồng Nai', 'Long An', 'Tiền Giang', 'Vĩnh Long', 'Bến Tre', 'Cần Thơ', 'An Giang', 'Kiên Giang', 'Bà Rịa - Vũng Tàu', 'Đồng Tháp', 'Sóc Trăng', 'Trà Vinh', 'Hậu Giang', 'Bạc Liêu', 'Cà Mau', 'Bình Phước', 'Tây Ninh'];
@@ -293,6 +321,9 @@ app.post('/api/orders', (req, res) => {
   if (hasInvalidNumber || Number(weight_kg) <= 0 || Number(length) <= 0 || Number(width) <= 0 || Number(height) <= 0 || Number(distance_km) <= 0) {
     return res.status(400).json({ success: false, message: 'Thông tin cân nặng, kích thước hoặc khoảng cách không hợp lệ.' });
   }
+  if ((normalizedReceiverLat !== null && Math.abs(normalizedReceiverLat) > 90) || (normalizedReceiverLng !== null && Math.abs(normalizedReceiverLng) > 180)) {
+    return res.status(400).json({ success: false, message: 'Tọa độ điểm giao hàng không hợp lệ.' });
+  }
 
   if (!['economy', 'standard', 'express'].includes(service_type)) {
     return res.status(400).json({ success: false, message: 'Loại dịch vụ không hợp lệ.' });
@@ -300,11 +331,11 @@ app.post('/api/orders', (req, res) => {
 
   const sql = `
     INSERT INTO orders (
-      tracking_code, shop_id, shop_address, shop_province, shop_lat, shop_lng, receiver_name, receiver_phone, receiver_address, customer_email,
+      tracking_code, shop_id, shop_address, shop_province, shop_lat, shop_lng, receiver_name, receiver_phone, receiver_address, receiver_lat, receiver_lng, customer_email,
       cod_amount, shipping_fee, weight_kg, length, width, height, item_value, distance_km,
       is_remote_area, service_type, is_fragile, vehicle_type, destination_province, status
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
   `;
   db.query(sql, [
     tracking_code,
@@ -316,6 +347,8 @@ app.post('/api/orders', (req, res) => {
     receiver_name,
     receiver_phone,
     receiver_address,
+    normalizedReceiverLat,
+    normalizedReceiverLng,
     customer_email || null,
     Number(cod_amount) || 0,
     Number(shipping_fee) || 0,
@@ -561,13 +594,14 @@ app.get('/api/orders/track/:code', (req, res) => {
 app.get('/api/orders/:id/route', (req, res) => {
   const orderId = req.params.id;
   const sql = `
-    SELECT o.id, o.tracking_code, o.status, o.shipper_id,
-           COALESCE(dr.warehouse_lat, 10.762622) AS warehouse_lat,
-           COALESCE(dr.warehouse_lng, 106.660172) AS warehouse_lng,
-           COALESCE(dr.pickup_lat, 10.7605) AS pickup_lat,
-           COALESCE(dr.pickup_lng, 106.6545) AS pickup_lng,
-           COALESCE(dr.delivery_lat, 10.7745) AS delivery_lat,
-           COALESCE(dr.delivery_lng, 106.6665) AS delivery_lng,
+        SELECT o.id, o.tracking_code, o.status, o.shipper_id,
+          o.shop_address, o.shop_province, o.receiver_address, o.receiver_lat, o.receiver_lng,
+           10.762622 AS warehouse_lat,
+           106.660172 AS warehouse_lng,
+          COALESCE(o.shop_lat, dr.pickup_lat, 10.7605) AS pickup_lat,
+          COALESCE(o.shop_lng, dr.pickup_lng, 106.6545) AS pickup_lng,
+          COALESCE(o.receiver_lat, dr.delivery_lat, 10.7745) AS delivery_lat,
+          COALESCE(o.receiver_lng, dr.delivery_lng, 106.6665) AS delivery_lng,
            dr.route_status
     FROM orders o
     LEFT JOIN driver_routes dr ON dr.order_id = o.id
@@ -597,8 +631,18 @@ app.get('/api/orders/:id/route', (req, res) => {
         label: 'Kho trung tâm Smart Logistics',
         address: 'Kho trung tâm, TP. Hồ Chí Minh'
       },
-      pickup: { lat: Number(order.pickup_lat), lng: Number(order.pickup_lng), label: 'Điểm lấy hàng' },
-      delivery: { lat: Number(order.delivery_lat), lng: Number(order.delivery_lng), label: 'Điểm giao hàng' },
+      pickup: {
+        lat: Number(order.pickup_lat),
+        lng: Number(order.pickup_lng),
+        label: 'Điểm lấy hàng',
+        address: [order.shop_address, order.shop_province].filter(Boolean).join(', ')
+      },
+      delivery: {
+        lat: Number(order.delivery_lat),
+        lng: Number(order.delivery_lng),
+        label: 'Điểm giao hàng',
+        address: order.receiver_address
+      },
       route_status: order.route_status || 'assigned',
       route_points: [
         { lat: Number(order.warehouse_lat), lng: Number(order.warehouse_lng), label: 'Kho trung tâm Smart Logistics' },
@@ -668,13 +712,15 @@ app.put('/api/orders/:id/assign', (req, res) => {
       INSERT INTO driver_routes (order_id, shipper_id, warehouse_lat, warehouse_lng, pickup_lat, pickup_lng, delivery_lat, delivery_lng, route_status)
       SELECT ?, ?, 10.762622, 106.660172,
              COALESCE(shop_lat, 10.7605), COALESCE(shop_lng, 106.6545),
-             10.7745, 106.6665, 'assigned'
+              COALESCE(receiver_lat, 10.7745), COALESCE(receiver_lng, 106.6665), 'assigned'
       FROM orders
       WHERE id = ?
       ON DUPLICATE KEY UPDATE
         shipper_id = VALUES(shipper_id),
         pickup_lat = VALUES(pickup_lat),
         pickup_lng = VALUES(pickup_lng),
+        delivery_lat = VALUES(delivery_lat),
+        delivery_lng = VALUES(delivery_lng),
         route_status = VALUES(route_status)
     `;
 
@@ -734,14 +780,15 @@ app.get('/api/orders/shipper/:id', (req, res) => {
 
 app.put('/api/orders/:id/status', upload.single('proof_image'), (req, res) => {
   const { id } = req.params;
-  const { status, fail_reason, customer_email, cod_collected } = req.body;
+  const { status, fail_reason, customer_email, cod_collected, cod_payment_method } = req.body;
   const imageUrl = req.file ? `/uploads/${req.file.filename}` : null;
 
-  db.query('SELECT status, cod_amount FROM orders WHERE id = ?', [id], (selectErr, orders) => {
+  db.query('SELECT status, cod_amount, shipping_fee FROM orders WHERE id = ?', [id], (selectErr, orders) => {
     if (selectErr) return res.status(500).json({ success: false, message: 'Lỗi cập nhật: ' + selectErr.sqlMessage });
     if (!orders.length) return res.status(404).json({ success: false, message: 'Không tìm thấy đơn hàng.' });
 
     const order = orders[0];
+    const amountToCollect = Number(order.cod_amount || 0) + Number(order.shipping_fee || 0);
     const validTransition = status === 'delivering'
       ? ['picking', 'in_warehouse'].includes(order.status)
       : order.status === 'delivering' && ['completed', 'returning'].includes(status);
@@ -754,8 +801,11 @@ app.put('/api/orders/:id/status', upload.single('proof_image'), (req, res) => {
     if (status === 'returning' && !String(fail_reason || '').trim()) {
       return res.status(400).json({ success: false, message: 'Cần ghi rõ lý do giao thất bại.' });
     }
-    if (status === 'completed' && Number(order.cod_amount) > 0 && cod_collected !== 'true') {
-      return res.status(400).json({ success: false, message: 'Cần xác nhận đã thu COD trước khi hoàn tất đơn.' });
+    if (status === 'completed' && amountToCollect > 0 && cod_collected !== 'true') {
+      return res.status(400).json({ success: false, message: 'Cần xác nhận đã thu COD và phí vận chuyển trước khi hoàn tất đơn.' });
+    }
+    if (status === 'completed' && amountToCollect > 0 && !['cash', 'bank_transfer'].includes(cod_payment_method)) {
+      return res.status(400).json({ success: false, message: 'Vui lòng chọn tiền mặt hoặc chuyển khoản cho tổng tiền cần thu.' });
     }
 
     let sql = 'UPDATE orders SET status = ?';
@@ -770,7 +820,11 @@ app.put('/api/orders/:id/status', upload.single('proof_image'), (req, res) => {
     }
     if (status === 'completed') {
       sql += ', cod_collected = ?';
-      params.push(Number(order.cod_amount) > 0 ? 1 : 0);
+      params.push(amountToCollect > 0 ? 1 : 0);
+      sql += ', cod_collected_amount = ?';
+      params.push(amountToCollect);
+      sql += ', cod_payment_method = ?';
+      params.push(amountToCollect > 0 ? cod_payment_method : null);
     }
     sql += ' WHERE id = ? AND status = ?';
     params.push(id, order.status);
@@ -835,7 +889,12 @@ app.post('/api/warehouse/scan', (req, res) => {
         newStatus = 'cancelled';
         message = '↩️ Đã NHẬP KHO HÀNG HOÀN thành công. Đơn hàng kết thúc (Đã Hủy)!';
     } else {
-        return res.status(400).json({ success: false, message: `⚠️ Đơn hàng đang ở trạng thái "${order.status}".` });
+      const message = order.status === 'delivering'
+        ? 'Đơn hàng đã rời kho và đang được giao, không cần quét tại kho lần nữa.'
+        : order.status === 'completed'
+        ? 'Đơn hàng đã giao thành công, không thể quét lại tại kho.'
+        : `Đơn hàng đang ở trạng thái "${order.status}" nên chưa thể xử lý tại kho.`;
+      return res.status(409).json({ success: false, message });
     }
 
     db.query('UPDATE orders SET status = ? WHERE id = ? AND status = ?', [newStatus, order.id, order.status], (err, result) => {
