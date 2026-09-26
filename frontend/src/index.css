@@ -1,0 +1,38 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Keep the html5-qrcode controls readable on the dark camera panel. */
+#camera-reader {
+	color: #e2e8f0;
+}
+
+#camera-reader > div:not(:has(video)) {
+	color: #e2e8f0;
+}
+
+#camera-reader button,
+#camera-reader select,
+#camera-reader a {
+	color: #0f172a !important;
+	background: #ffffff !important;
+	border: 1px solid #cbd5e1 !important;
+	border-radius: 0.6rem !important;
+	font-weight: 700 !important;
+	padding: 0.55rem 0.8rem !important;
+	opacity: 1 !important;
+}
+
+#camera-reader p,
+#camera-reader span,
+#camera-reader label {
+	color: #e2e8f0 !important;
+	opacity: 1 !important;
+	font-weight: 600;
+}
+
+#camera-reader video {
+	display: block;
+	width: 100% !important;
+	border-radius: 0.75rem;
+}
