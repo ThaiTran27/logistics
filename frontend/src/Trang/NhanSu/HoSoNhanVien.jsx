@@ -25,7 +25,7 @@ const defaultForm = {
   full_name: '',
   email: '',
   password: '',
-  role: 'driver',
+  role: 'pickup_driver',
   status: 'active',
 };
 
@@ -508,7 +508,8 @@ export default function HoSoNhanVien() {
                     onChange={handleInputChange}
                     className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-50 p-3 outline-none focus:border-rose-400 focus:bg-white"
                   >
-                    <option value="driver">Tài xế</option>
+                    <option value="pickup_driver">Tài xế lấy hàng</option>
+                    <option value="delivery_driver">Tài xế giao hàng</option>
                     <option value="warehouse_manager">Thủ kho</option>
                     <option value="fleet_manager">Điều phối viên</option>
                     <option value="accountant">Kế toán</option>

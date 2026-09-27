@@ -7,13 +7,6 @@ import {
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 
 export default function DashboardGiamDoc() {
-  const [thongKeGoc, setThongKeGoc] = useState({
-    total_orders: 0,
-    total_revenue: 0,
-    pending_orders: 0,
-    delivering_orders: 0
-  });
-  
   // State hiển thị sau khi lọc
   const [thongKeHienThi, setThongKeHienThi] = useState({
     total_orders: 0, total_revenue: 0, pending_orders: 0, delivering_orders: 0
@@ -32,7 +25,8 @@ export default function DashboardGiamDoc() {
 
   const taiDuLieuThongKe = async () => {
     try {
-      const res = await fetch('http://localhost:5000/api/admin/dashboard');
+      const query = new URLSearchParams({ period: locThoiGian, region: locKhuVuc });
+      const res = await fetch(`http://localhost:5000/api/admin/dashboard?${query}`);
       const data = await res.json();
       if (data.success && data.data) {
         const stats = {
@@ -41,7 +35,7 @@ export default function DashboardGiamDoc() {
           pending_orders: data.data.pending_orders || 0,
           delivering_orders: data.data.delivering_orders || 0
         };
-        setThongKeGoc(stats);
+        setThongKeHienThi(stats);
       }
     } catch (error) {
       console.error("Lỗi tải thống kê:", error);
@@ -75,12 +69,15 @@ export default function DashboardGiamDoc() {
   };
 
   useEffect(() => {
-    taiDuLieuThongKe();
     taiBaoCao();
     taiTruongPhong();
-    const interval = setInterval(() => taiDuLieuThongKe(), 30000);
-    return () => clearInterval(interval);
   }, []);
+
+  useEffect(() => {
+    taiDuLieuThongKe();
+    const interval = setInterval(taiDuLieuThongKe, 30000);
+    return () => clearInterval(interval);
+  }, [locThoiGian, locKhuVuc]);
 
   const capNhatLuaChonTruongPhong = (department, userId) => {
     setTruongPhong((current) => current.map((item) => item.ten === department ? { ...item, userId } : item));
@@ -117,29 +114,6 @@ export default function DashboardGiamDoc() {
       alert(error.message || 'Lỗi kết nối máy chủ.');
     }
   };
-
-  // LOGIC MÔ PHỎNG LỌC DỮ LIỆU (Giúp biểu đồ tự nhảy số khi chọn Filter để Demo)
-  useEffect(() => {
-    let heSoThoiGian = 1;
-    if (locThoiGian === 'today') heSoThoiGian = 0.05;
-    else if (locThoiGian === 'week') heSoThoiGian = 0.25;
-    else if (locThoiGian === 'month') heSoThoiGian = 1;
-    else if (locThoiGian === 'year') heSoThoiGian = 12;
-
-    let heSoKhuVuc = 1;
-    if (locKhuVuc === 'mb') heSoKhuVuc = 0.35;
-    else if (locKhuVuc === 'mt') heSoKhuVuc = 0.15;
-    else if (locKhuVuc === 'mn') heSoKhuVuc = 0.5;
-
-    const heSoTong = heSoThoiGian * heSoKhuVuc;
-
-    setThongKeHienThi({
-      total_orders: Math.max(1, Math.floor(thongKeGoc.total_orders * heSoTong)),
-      total_revenue: Math.floor(thongKeGoc.total_revenue * heSoTong),
-      pending_orders: Math.floor(thongKeGoc.pending_orders * heSoTong),
-      delivering_orders: Math.floor(thongKeGoc.delivering_orders * heSoTong)
-    });
-  }, [locThoiGian, locKhuVuc, thongKeGoc]);
 
   const capNhatTrangThaiBaoCao = async (id, statusMoi) => {
     const hanhDong = statusMoi === 'approved' ? 'Phê duyệt' : 'Yêu cầu giải trình';

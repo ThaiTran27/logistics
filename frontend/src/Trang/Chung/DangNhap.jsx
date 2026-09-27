@@ -14,6 +14,8 @@ const normalizeRole = (value) => {
     coordinator: 'fleet_manager',
     shipper: 'driver',
     driver: 'driver',
+    pickup_driver: 'pickup_driver',
+    delivery_driver: 'delivery_driver',
     admin: 'director',
     warehouse: 'warehouse_manager',
     kho: 'warehouse_manager',
@@ -50,6 +52,8 @@ export default function DangNhap() {
     const roleMap = {
       shop: '/cua-hang',
       driver: '/tai-xe',
+      pickup_driver: '/tai-xe',
+      delivery_driver: '/tai-xe',
       warehouse_manager: '/kho',
       fleet_manager: '/dieu-hanh',
       accountant: '/ke-toan',
@@ -87,6 +91,8 @@ export default function DangNhap() {
           dieu_hanh: 'fleet_manager',
           coordinator: 'fleet_manager',
           shipper: 'driver',
+          pickup_driver: 'pickup_driver',
+          delivery_driver: 'delivery_driver',
           admin: 'director',
           warehouse: 'warehouse_manager',
           kho: 'warehouse_manager',
@@ -106,6 +112,8 @@ export default function DangNhap() {
         switch (normalizedRole) {
           case 'shop': navigate('/cua-hang'); break;
           case 'driver': navigate('/tai-xe'); break;
+          case 'pickup_driver': navigate('/tai-xe'); break;
+          case 'delivery_driver': navigate('/tai-xe'); break;
           case 'warehouse_manager': navigate('/kho'); break;
           case 'fleet_manager': navigate('/dieu-hanh'); break;
           case 'accountant': navigate('/ke-toan'); break;

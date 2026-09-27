@@ -190,7 +190,7 @@ export default function DieuHuongChinh() {
       } />
 
       <Route path="/tai-xe" element={
-        <BaoVeTuyenDuong allowedRoles={['driver']}><AppTaiXe /></BaoVeTuyenDuong>
+        <BaoVeTuyenDuong allowedRoles={['driver', 'pickup_driver', 'delivery_driver']}><AppTaiXe /></BaoVeTuyenDuong>
       } />
 
       <Route path="/kho" element={
@@ -210,7 +210,7 @@ export default function DieuHuongChinh() {
       } />
 
       <Route path="/cham-cong" element={
-        <BaoVeTuyenDuong allowedRoles={['driver', 'shop', 'warehouse_manager', 'fleet_manager', 'accountant', 'hr_manager', 'director', 'content_manager']}><ChamCong /></BaoVeTuyenDuong>
+        <BaoVeTuyenDuong allowedRoles={['driver', 'pickup_driver', 'delivery_driver', 'shop', 'warehouse_manager', 'fleet_manager', 'accountant', 'hr_manager', 'director', 'content_manager']}><ChamCong /></BaoVeTuyenDuong>
       } />
 
       <Route path="/admin" element={

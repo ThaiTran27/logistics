@@ -9,6 +9,7 @@ SET FOREIGN_KEY_CHECKS = 0;
 DROP TABLE IF EXISTS driver_positions;
 DROP TABLE IF EXISTS driver_routes;
 DROP TABLE IF EXISTS cod_settlements;
+DROP TABLE IF EXISTS notifications;
 DROP TABLE IF EXISTS order_status_history;
 DROP TABLE IF EXISTS service_requests;
 DROP TABLE IF EXISTS job_applications;
@@ -38,6 +39,8 @@ CREATE TABLE orders (
   tracking_code VARCHAR(100) NOT NULL UNIQUE,
   shop_id INT NULL,
   shipper_id INT NULL,
+  pickup_shipper_id INT NULL,
+  delivery_shipper_id INT NULL,
   shop_address TEXT DEFAULT NULL,
   shop_province VARCHAR(255) DEFAULT 'Hồ Chí Minh',
   shop_lat DOUBLE DEFAULT 10.762622,
@@ -73,6 +76,8 @@ CREATE TABLE orders (
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   KEY idx_shop_id (shop_id),
   KEY idx_shipper_id (shipper_id),
+  KEY idx_pickup_shipper_id (pickup_shipper_id),
+  KEY idx_delivery_shipper_id (delivery_shipper_id),
   KEY idx_status (status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
@@ -85,6 +90,17 @@ CREATE TABLE order_status_history (
   proof_image VARCHAR(255) DEFAULT NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   KEY idx_order_status_history_order (order_id, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE notifications (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  recipient_user_id INT NOT NULL,
+  order_id INT DEFAULT NULL,
+  title VARCHAR(255) NOT NULL,
+  message TEXT NOT NULL,
+  is_read TINYINT(1) NOT NULL DEFAULT 0,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_notifications_recipient (recipient_user_id, is_read, created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE cod_settlements (
@@ -213,13 +229,13 @@ INSERT INTO users (email, password, full_name, role, status) VALUES
   ('ketoan@smartlogistics.vn', 'ketoan123', 'Nguyễn Thị Kế Toán', 'accountant', 'active'),
   ('kho@smartlogistics.vn', 'kho123', 'Trần Vũ Thủ Kho', 'warehouse_manager', 'active'),
   ('shop@smartlogistics.vn', 'shop123', 'Cửa Hàng Trần Minh', 'shop', 'active'),
-  ('taixe1@smartlogistics.vn', 'driver123', 'Nguyễn Văn Bửu Tài', 'driver', 'active'),
+  ('taixe1@smartlogistics.vn', 'driver123', 'Nguyễn Văn Bửu Tài', 'pickup_driver', 'active'),
   ('content@smartlogistics.vn', 'content123', 'Phòng ban nội dung', 'content_manager', 'active');
 
 INSERT INTO users (email, password, full_name, role, status) VALUES
-  ('taixe2@smartlogistics.vn', 'driver123', 'Bùi Quang Huy', 'driver', 'active'),
-  ('taixe3@smartlogistics.vn', 'driver123', 'Lê Hoàng Nam', 'driver', 'active'),
-  ('taixe4@smartlogistics.vn', 'driver123', 'Phạm Quốc Đạt', 'driver', 'active'),
+  ('taixe2@smartlogistics.vn', 'driver123', 'Bùi Quang Huy', 'pickup_driver', 'active'),
+  ('taixe3@smartlogistics.vn', 'driver123', 'Lê Hoàng Nam', 'delivery_driver', 'active'),
+  ('taixe4@smartlogistics.vn', 'driver123', 'Phạm Quốc Đạt', 'delivery_driver', 'active'),
   ('kho2@smartlogistics.vn', 'staff123', 'Võ Khánh Linh', 'warehouse_manager', 'active'),
   ('dieu_hanh2@smartlogistics.vn', 'staff123', 'Lê Gia Bảo', 'fleet_manager', 'active'),
   ('ketoan2@smartlogistics.vn', 'staff123', 'Phạm Hải Yến', 'accountant', 'active'),
@@ -241,10 +257,13 @@ INSERT INTO orders (
 );
 
 INSERT INTO orders (
-  tracking_code, shop_id, shipper_id, receiver_name, receiver_phone, receiver_address,
+  tracking_code, shop_id, pickup_shipper_id, delivery_shipper_id, receiver_name, receiver_phone, receiver_address,
   customer_email, cod_amount, shipping_fee, weight_kg, service_type, status
 )
-SELECT seed_orders.tracking_code, shop.id, driver.id, seed_orders.receiver_name,
+SELECT seed_orders.tracking_code, shop.id,
+  CASE WHEN seed_orders.status = 'picking' THEN driver.id ELSE NULL END,
+  CASE WHEN seed_orders.status IN ('delivering', 'completed', 'returning') THEN driver.id ELSE NULL END,
+  seed_orders.receiver_name,
   seed_orders.receiver_phone, seed_orders.receiver_address, seed_orders.customer_email,
   seed_orders.cod_amount, seed_orders.shipping_fee, seed_orders.weight_kg,
   seed_orders.service_type, seed_orders.status
@@ -252,7 +271,7 @@ FROM (
   SELECT 'SLTEST260901VN' AS tracking_code, 'shop2@smartlogistics.vn' AS shop_email, 'taixe2@smartlogistics.vn' AS driver_email,
     'Nguyễn Thị Mai' AS receiver_name, '0901000001' AS receiver_phone, 'Quận 1, TP. Hồ Chí Minh' AS receiver_address,
     'khach01@example.com' AS customer_email, 850000 AS cod_amount, 28000 AS shipping_fee, 1.2 AS weight_kg, 'standard' AS service_type, 'picking' AS status
-  UNION ALL SELECT 'SLTEST260902VN', 'shop2@smartlogistics.vn', 'taixe2@smartlogistics.vn', 'Trần Quốc Bảo', '0901000002', 'Quận 3, TP. Hồ Chí Minh', 'khach02@example.com', 1250000, 32000, 2.0, 'express', 'delivering'
+  UNION ALL SELECT 'SLTEST260902VN', 'shop2@smartlogistics.vn', 'taixe3@smartlogistics.vn', 'Trần Quốc Bảo', '0901000002', 'Quận 3, TP. Hồ Chí Minh', 'khach02@example.com', 1250000, 32000, 2.0, 'express', 'delivering'
   UNION ALL SELECT 'SLTEST260903VN', 'shop@smartlogistics.vn', 'taixe3@smartlogistics.vn', 'Lê Minh Châu', '0901000003', 'Thủ Đức, TP. Hồ Chí Minh', 'khach03@example.com', 450000, 25000, 0.8, 'standard', 'completed'
   UNION ALL SELECT 'SLTEST260904VN', 'shop@smartlogistics.vn', 'taixe3@smartlogistics.vn', 'Phạm Gia Hân', '0901000004', 'Dĩ An, Bình Dương', 'khach04@example.com', 720000, 35000, 1.5, 'economy', 'returning'
   UNION ALL SELECT 'SLTEST260905VN', 'shop2@smartlogistics.vn', 'taixe4@smartlogistics.vn', 'Võ Thành Đạt', '0901000005', 'Gò Vấp, TP. Hồ Chí Minh', 'khach05@example.com', 2000000, 30000, 3.0, 'express', 'delivering'
@@ -265,10 +284,10 @@ LEFT JOIN users driver ON driver.email = seed_orders.driver_email
 WHERE NOT EXISTS (SELECT 1 FROM orders existing WHERE existing.tracking_code = seed_orders.tracking_code);
 
 INSERT INTO driver_routes (order_id, shipper_id, route_status)
-SELECT o.id, o.shipper_id, 'assigned'
+SELECT o.id, COALESCE(o.delivery_shipper_id, o.pickup_shipper_id), 'assigned'
 FROM orders o
 WHERE o.tracking_code IN ('SLTEST260901VN', 'SLTEST260902VN', 'SLTEST260905VN')
-  AND o.shipper_id IS NOT NULL
+  AND COALESCE(o.delivery_shipper_id, o.pickup_shipper_id) IS NOT NULL
   AND NOT EXISTS (SELECT 1 FROM driver_routes route WHERE route.order_id = o.id);
 
 INSERT INTO news_articles (title, slug, summary, content, image_url, category, status, created_by) VALUES
@@ -448,7 +467,8 @@ SELECT id,
     WHEN 'accountant' THEN 16000000
     WHEN 'warehouse_manager' THEN 15000000
     WHEN 'shop' THEN 12000000
-    WHEN 'driver' THEN 12000000
+    WHEN 'pickup_driver' THEN 12000000
+    WHEN 'delivery_driver' THEN 12000000
     WHEN 'content_manager' THEN 15000000
     ELSE 10000000
   END,
@@ -459,7 +479,8 @@ SELECT id,
     WHEN 'accountant' THEN 2500000
     WHEN 'warehouse_manager' THEN 2000000
     WHEN 'shop' THEN 1500000
-    WHEN 'driver' THEN 4000000
+    WHEN 'pickup_driver' THEN 4000000
+    WHEN 'delivery_driver' THEN 4000000
     WHEN 'content_manager' THEN 2000000
     ELSE 0
   END

@@ -38,6 +38,7 @@ export default function TrungTamDieuPhoi() {
   const [modalMo, setModalMo] = useState(false);
   const [donDangChon, setDonDangChon] = useState(null);
   const [taiXeDuocChon, setTaiXeDuocChon] = useState('');
+  const [loaiNhiemVu, setLoaiNhiemVu] = useState('pickup');
   
   // State quản lý giới hạn khu vực phân quyền
   const [gioiHanKhuVuc, setGioiHanKhuVuc] = useState(true);
@@ -70,8 +71,9 @@ export default function TrungTamDieuPhoi() {
       const res = await fetch('http://localhost:5000/api/orders');
       const data = await res.json();
       if (data.success && Array.isArray(data.data)) {
-        const donCanDieuPhoi = data.data.filter(d => 
-          d?.status === 'pending' || d?.status === 'in_warehouse'
+        const donCanDieuPhoi = data.data.filter(d =>
+          (d?.status === 'pending' && !d?.pickup_shipper_id) ||
+          (d?.status === 'in_warehouse' && !d?.delivery_shipper_id)
         );
         setDonHang(donCanDieuPhoi);
       }
@@ -80,9 +82,9 @@ export default function TrungTamDieuPhoi() {
     }
   };
 
-  const taiDanhSachTaiXe = async () => {
+  const taiDanhSachTaiXe = async (taskType = 'pickup') => {
     try {
-      const res = await fetch('http://localhost:5000/api/shippers');
+      const res = await fetch(`http://localhost:5000/api/shippers?type=${taskType}`);
       const data = await res.json();
       if (data.success && Array.isArray(data.data)) {
         const zones = ['Nội thành TP.HCM', 'Ngoại thành TP.HCM'];
@@ -93,10 +95,12 @@ export default function TrungTamDieuPhoi() {
           zone: zones[i % 2] 
         }));
         setTaiXeList(taiXeGps);
+        return taiXeGps;
       }
     } catch (error) {
       console.error("Lỗi tải tài xế:", error);
     }
+    return [];
   };
 
   useEffect(() => {
@@ -114,12 +118,18 @@ export default function TrungTamDieuPhoi() {
         }
       }));
     });
+    socket.on('order_status_changed', taiDuLieu);
 
-    return () => socket.off('driver_location_changed');
+    return () => {
+      socket.off('driver_location_changed');
+      socket.off('order_status_changed', taiDuLieu);
+    };
   }, []);
 
-  const moModalPhanCong = (don) => {
-    const diaChi = don?.receiver_address || '';
+  const moModalPhanCong = async (don) => {
+    const taskType = don?.status === 'pending' ? 'pickup' : 'delivery';
+    const taiXeTheoNhiemVu = await taiDanhSachTaiXe(taskType);
+    const diaChi = taskType === 'pickup' ? don?.shop_address || '' : don?.receiver_address || '';
     const isNgoaiThanh = diaChi.toLowerCase().includes('hóc môn') || 
                          diaChi.toLowerCase().includes('củ chi') || 
                          diaChi.toLowerCase().includes('bình chánh') ||
@@ -129,10 +139,11 @@ export default function TrungTamDieuPhoi() {
     setKhuVucDonHang(kv);
     setGioiHanKhuVuc(true); 
     setDonDangChon(don);
+    setLoaiNhiemVu(taskType);
     
     const orderLat = 10.762622;
     const orderLng = 106.660172;
-    let danhSachHienThi = [...taiXeList].map(tx => ({
+    let danhSachHienThi = taiXeTheoNhiemVu.map(tx => ({
       ...tx, distance: parseFloat(tinhKhoangCachHaversine(orderLat, orderLng, tx.lat, tx.lng))
     })).filter(tx => tx.zone === kv).sort((a, b) => a.distance - b.distance);
 
@@ -178,7 +189,7 @@ export default function TrungTamDieuPhoi() {
       const res = await fetch(`http://localhost:5000/api/orders/${donDangChon.id}/assign`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ shipper_id: parseInt(taiXeDuocChon) }) 
+        body: JSON.stringify({ shipper_id: parseInt(taiXeDuocChon), task_type: loaiNhiemVu })
       });
       const data = await res.json();
 
@@ -310,7 +321,7 @@ export default function TrungTamDieuPhoi() {
             <div className="mb-8 flex justify-between items-end">
               <div>
                 <h1 className="text-3xl font-black text-slate-800 tracking-tight">AI Smart Dispatching</h1>
-                <p className="text-slate-500 mt-2 font-medium">Hệ thống áp dụng thuật toán Haversine để tự động gợi ý tài xế gần nhất.</p>
+                <p className="text-slate-500 mt-2 font-medium">Đơn được phân công riêng cho nhóm tài xế lấy hàng hoặc nhóm tài xế giao hàng.</p>
               </div>
               <div className="relative w-80">
                 <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
@@ -424,7 +435,7 @@ export default function TrungTamDieuPhoi() {
               <ShieldCheck size={16} className="fill-white"/> PHÂN QUYỀN VÀ GIỚI HẠN KHU VỰC
             </div>
 
-            <h3 className="text-2xl font-black text-slate-800 mb-2 mt-4 text-center">Phân Tuyến Thông Minh</h3>
+            <h3 className="text-2xl font-black text-slate-800 mb-2 mt-4 text-center">{loaiNhiemVu === 'pickup' ? 'Phân công tài xế lấy hàng' : 'Phân công tài xế giao hàng'}</h3>
             <p className="text-slate-500 text-sm mb-4 text-center">Đơn hàng: <span className="font-bold text-slate-700">{donDangChon?.tracking_code}</span></p>
 
             <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 mb-6 flex justify-between items-center cursor-pointer" onClick={doiTrangThaiGioiHan}>
@@ -442,7 +453,7 @@ export default function TrungTamDieuPhoi() {
             </div>
 
             <form onSubmit={phanCongTaiXe} className="space-y-4">
-              <label className="block text-sm font-bold text-slate-700 mb-1">Tài xế trong bán kính gần nhất:</label>
+              <label className="block text-sm font-bold text-slate-700 mb-1">{loaiNhiemVu === 'pickup' ? 'Nhóm tài xế lấy hàng' : 'Nhóm tài xế giao hàng'}:</label>
               
               <div className="space-y-3 max-h-56 overflow-y-auto pr-2 custom-scrollbar">
                 {danhSachTaiXeHienThi.length === 0 ? (

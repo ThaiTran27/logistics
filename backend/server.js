@@ -176,6 +176,18 @@ db.connect((err) => {
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `,
     `
+      CREATE TABLE IF NOT EXISTS notifications (
+        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+        recipient_user_id INT NOT NULL,
+        order_id INT DEFAULT NULL,
+        title VARCHAR(255) NOT NULL,
+        message TEXT NOT NULL,
+        is_read TINYINT(1) NOT NULL DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        KEY idx_notifications_recipient (recipient_user_id, is_read, created_at)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `,
+    `
       CREATE TABLE IF NOT EXISTS service_requests (
         id BIGINT AUTO_INCREMENT PRIMARY KEY,
         plan_name VARCHAR(100) NOT NULL,
@@ -304,6 +316,18 @@ db.connect((err) => {
     }
   });
 
+  db.query('ALTER TABLE orders ADD COLUMN pickup_shipper_id INT NULL', (alterErr) => {
+    if (alterErr && alterErr.code !== 'ER_DUP_FIELDNAME') {
+      console.error('Lỗi bổ sung tài xế lấy hàng:', alterErr);
+    }
+  });
+
+  db.query('ALTER TABLE orders ADD COLUMN delivery_shipper_id INT NULL', (alterErr) => {
+    if (alterErr && alterErr.code !== 'ER_DUP_FIELDNAME') {
+      console.error('Lỗi bổ sung tài xế giao hàng:', alterErr);
+    }
+  });
+
   console.log('Đã đảm bảo bảng news_articles, driver_routes, driver_positions sẵn sàng');
 });
 
@@ -315,6 +339,59 @@ function recordOrderStatus(orderId, fromStatus, toStatus, note, proofImage, call
   db.query(sql, [orderId, fromStatus, toStatus, note || null, proofImage || null], (err) => {
     if (err) console.error('Lỗi ghi lịch sử trạng thái đơn:', err);
     if (callback) callback();
+  });
+}
+
+function calculateShippingFee({ weight, length, width, height, distance, serviceType, remoteArea, fragile, vehicleType, itemValue, originProvince, destinationProvince }) {
+  const volumetricWeight = (Number(length) * Number(width) * Number(height)) / 5000;
+  const chargeableWeight = Math.max(Number(weight) || 0, volumetricWeight);
+  const distanceKm = Math.max(1, Number(distance) || 1);
+  const serviceBase = { economy: 18000, standard: 28000, express: 45000 }[serviceType] || 28000;
+  const serviceFactor = { economy: 0.88, standard: 1, express: 1.5 }[serviceType] || 1;
+  const vehicleFactor = { motorbike: 1, van: 1.2, truck: 1.4, airplane: 2.6 }[vehicleType] || 1;
+  const regionOf = (province = '') => {
+    const name = province.toLowerCase();
+    if (/hà nội|bắc|phú thọ|thái nguyên|quảng ninh|hải phòng|nam định|ninh bình|tuyên quang|lào cai|sơn la|điện biên|lai châu|cao bằng|lạng sơn|bắc giang|bắc ninh|hưng yên|thái bình|vĩnh phúc/.test(name)) return 'north';
+    if (/đà nẵng|huế|thừa thiên|quảng|nghệ an|hà tĩnh|thanh hóa|bình định|gia lai|kon tum|đắk|phú yên|khánh hòa|ninh thuận|bình thuận/.test(name)) return 'central';
+    return 'south';
+  };
+  const originRegion = regionOf(originProvince);
+  const destinationRegion = regionOf(destinationProvince);
+  const regionalFactor = originRegion === destinationRegion ? 1 : 1.25;
+  const distanceFee = Math.max(0, distanceKm - 5) * 1700;
+  const weightFee = chargeableWeight > 2 ? Math.ceil((chargeableWeight - 2) / 0.5) * 4500 : 0;
+  const remoteFee = remoteArea ? 22000 : 0;
+  const fragileFee = fragile ? 12000 : 0;
+  const insuranceFee = Number(itemValue) > 1000000 ? Number(itemValue) * 0.005 : 0;
+  return Math.round((serviceBase + distanceFee + weightFee + remoteFee + fragileFee + insuranceFee) * serviceFactor * vehicleFactor * regionalFactor / 1000) * 1000;
+}
+
+function calculateDistanceKm(lat1, lng1, lat2, lng2) {
+  const toRadians = (degrees) => (degrees * Math.PI) / 180;
+  const deltaLat = toRadians(lat2 - lat1);
+  const deltaLng = toRadians(lng2 - lng1);
+  const value = Math.sin(deltaLat / 2) ** 2
+    + Math.cos(toRadians(lat1)) * Math.cos(toRadians(lat2)) * Math.sin(deltaLng / 2) ** 2;
+  return 6371 * 2 * Math.atan2(Math.sqrt(value), Math.sqrt(1 - value));
+}
+
+function notifyUser(userId, orderId, title, message) {
+  if (!userId) return;
+  db.query(
+    'INSERT INTO notifications (recipient_user_id, order_id, title, message) VALUES (?, ?, ?, ?)',
+    [userId, orderId || null, title, message],
+    (err) => {
+      if (err) return console.error('Lỗi lưu thông báo:', err);
+      io.emit(`notification_new_${userId}`, { order_id: orderId, title, message });
+    }
+  );
+}
+
+function notifyCustomerByEmail(email, orderId, title, message) {
+  if (!email) return;
+  db.query('SELECT id FROM users WHERE email = ? LIMIT 1', [email], (err, users) => {
+    if (err) return console.error('Lỗi tra cứu tài khoản người nhận:', err);
+    if (users.length) notifyUser(users[0].id, orderId, title, message);
   });
 }
 
@@ -367,14 +444,33 @@ app.post('/api/orders', (req, res) => {
     destination_province
   } = req.body;
 
-  const numericFields = { cod_amount, shipping_fee, weight_kg, length, width, height, item_value, distance_km, shop_lat, shop_lng, receiver_lat, receiver_lng };
+  const numericFields = { cod_amount, weight_kg, length, width, height, item_value, distance_km, shop_lat, shop_lng, receiver_lat, receiver_lng };
   const hasInvalidNumber = Object.entries(numericFields).some(([, value]) => value !== undefined && (!Number.isFinite(Number(value)) || Number(value) < 0));
   const normalizedReceiverLat = receiver_lat === undefined || receiver_lat === null || receiver_lat === '' ? null : Number(receiver_lat);
   const normalizedReceiverLng = receiver_lng === undefined || receiver_lng === null || receiver_lng === '' ? null : Number(receiver_lng);
+  const normalizedShopLat = Number(shop_lat) || 10.762622;
+  const normalizedShopLng = Number(shop_lng) || 106.660172;
   const normalizedVehicle = ['motorbike', 'van', 'truck', 'airplane'].includes(vehicle_type) ? vehicle_type : 'motorbike';
   const provinceName = String(destination_province || 'Hồ Chí Minh').trim() || 'Hồ Chí Minh';
-  const localProvinces = ['Hồ Chí Minh', 'Bình Dương', 'Đồng Nai', 'Long An', 'Tiền Giang', 'Vĩnh Long', 'Bến Tre', 'Cần Thơ', 'An Giang', 'Kiên Giang', 'Bà Rịa - Vũng Tàu', 'Đồng Tháp', 'Sóc Trăng', 'Trà Vinh', 'Hậu Giang', 'Bạc Liêu', 'Cà Mau', 'Bình Phước', 'Tây Ninh'];
-  const effectiveRemoteArea = Boolean(is_remote_area) || !localProvinces.includes(provinceName);
+  const effectiveRemoteArea = Boolean(is_remote_area);
+  const hasReceiverCoordinates = normalizedReceiverLat !== null && normalizedReceiverLng !== null;
+  const effectiveDistanceKm = hasReceiverCoordinates
+    ? calculateDistanceKm(normalizedShopLat, normalizedShopLng, normalizedReceiverLat, normalizedReceiverLng)
+    : Number(distance_km);
+  const effectiveShippingFee = calculateShippingFee({
+    weight: weight_kg,
+    length,
+    width,
+    height,
+    distance: effectiveDistanceKm,
+    serviceType: service_type,
+    remoteArea: effectiveRemoteArea,
+    fragile: is_fragile,
+    vehicleType: normalizedVehicle,
+    itemValue: item_value,
+    originProvince: shop_province,
+    destinationProvince: provinceName
+  });
 
   if (!tracking_code || !shop_address || !receiver_name || !receiver_phone || !receiver_address) {
     return res.status(400).json({ success: false, message: 'Thiếu mã vận đơn, địa chỉ cửa hàng hoặc thông tin người nhận.' });
@@ -385,6 +481,9 @@ app.post('/api/orders', (req, res) => {
   }
   if ((normalizedReceiverLat !== null && Math.abs(normalizedReceiverLat) > 90) || (normalizedReceiverLng !== null && Math.abs(normalizedReceiverLng) > 180)) {
     return res.status(400).json({ success: false, message: 'Tọa độ điểm giao hàng không hợp lệ.' });
+  }
+  if (Math.abs(normalizedShopLat) > 90 || Math.abs(normalizedShopLng) > 180) {
+    return res.status(400).json({ success: false, message: 'Tọa độ cửa hàng không hợp lệ.' });
   }
 
   if (!['economy', 'standard', 'express'].includes(service_type)) {
@@ -404,8 +503,8 @@ app.post('/api/orders', (req, res) => {
     shop_id || null,
     String(shop_address || '').trim(),
     String(shop_province || 'Hồ Chí Minh').trim(),
-    Number(shop_lat) || 10.762622,
-    Number(shop_lng) || 106.660172,
+    normalizedShopLat,
+    normalizedShopLng,
     receiver_name,
     receiver_phone,
     receiver_address,
@@ -413,13 +512,13 @@ app.post('/api/orders', (req, res) => {
     normalizedReceiverLng,
     customer_email || null,
     Number(cod_amount) || 0,
-    Number(shipping_fee) || 0,
+    effectiveShippingFee,
     Number(weight_kg),
     Number(length),
     Number(width),
     Number(height),
     Number(item_value) || 0,
-    Number(distance_km),
+    effectiveDistanceKm,
     effectiveRemoteArea,
     service_type,
     Boolean(is_fragile),
@@ -433,8 +532,29 @@ app.post('/api/orders', (req, res) => {
       return res.status(500).json({ success: false, message: 'Lỗi lưu đơn hàng: ' + err.sqlMessage });
     }
     recordOrderStatus(result.insertId, null, 'pending', 'Shop tạo đơn hàng', null, () => {
-      res.json({ success: true, message: 'Tạo đơn hàng thành công!', orderId: result.insertId, tracking_code });
+      notifyUser(shop_id, result.insertId, 'Đã tiếp nhận vận đơn', `Đơn ${tracking_code} đã được gửi đến Điều phối.`);
+      notifyCustomerByEmail(customer_email, result.insertId, 'Đơn hàng đang được xử lý', `Shop đã tạo đơn ${tracking_code} để giao đến bạn.`);
+      io.emit('order_status_changed', { order_id: Number(result.insertId), status: 'pending' });
+      res.json({ success: true, message: 'Tạo đơn hàng thành công!', orderId: result.insertId, tracking_code, shipping_fee: effectiveShippingFee });
     });
+  });
+});
+
+app.get('/api/notifications/:userId', (req, res) => {
+  db.query(
+    'SELECT id, order_id, title, message, is_read, created_at FROM notifications WHERE recipient_user_id = ? ORDER BY created_at DESC LIMIT 50',
+    [req.params.userId],
+    (err, results) => {
+      if (err) return res.status(500).json({ success: false, message: err.sqlMessage });
+      res.json({ success: true, data: results });
+    }
+  );
+});
+
+app.put('/api/notifications/:id/read', (req, res) => {
+  db.query('UPDATE notifications SET is_read = 1 WHERE id = ? AND recipient_user_id = ?', [req.params.id, req.body.user_id], (err) => {
+    if (err) return res.status(500).json({ success: false, message: err.sqlMessage });
+    res.json({ success: true });
   });
 });
 
@@ -605,9 +725,11 @@ app.delete('/api/news/:id', (req, res) => {
 
 app.get('/api/orders/track/:code', (req, res) => {
   const sql = `
-    SELECT o.*, u.full_name as shipper_name
+    SELECT o.*, COALESCE(ud.full_name, up.full_name) as shipper_name,
+      up.full_name as pickup_driver_name, ud.full_name as delivery_driver_name
     FROM orders o
-    LEFT JOIN users u ON o.shipper_id = u.id
+    LEFT JOIN users up ON o.pickup_shipper_id = up.id
+    LEFT JOIN users ud ON o.delivery_shipper_id = ud.id
     WHERE o.tracking_code = ?
   `;
   db.query(sql, [req.params.code], (err, results) => {
@@ -644,7 +766,7 @@ app.get('/api/orders/track/:code', (req, res) => {
               driver_location: driverLocation,
               status_history: historyErr ? [] : statusHistory,
               route_points: [warehouse, pickup, delivery],
-              progress: order.status === 'pending' ? 15 : order.status === 'picking' ? 40 : order.status === 'in_warehouse' ? 65 : order.status === 'delivering' ? 80 : order.status === 'completed' ? 100 : 0
+              progress: order.status === 'pending' ? 10 : order.status === 'picking' ? 30 : order.status === 'picked_up' ? 45 : order.status === 'in_warehouse' ? 60 : order.status === 'delivering' ? 80 : order.status === 'completed' ? 100 : 0
             }
           });
         }
@@ -656,7 +778,7 @@ app.get('/api/orders/track/:code', (req, res) => {
 app.get('/api/orders/:id/route', (req, res) => {
   const orderId = req.params.id;
   const sql = `
-        SELECT o.id, o.tracking_code, o.status, o.shipper_id,
+        SELECT o.id, o.tracking_code, o.status, COALESCE(o.delivery_shipper_id, o.pickup_shipper_id) AS shipper_id,
           o.shop_address, o.shop_province, o.receiver_address, o.receiver_lat, o.receiver_lng,
            10.762622 AS warehouse_lat,
            106.660172 AS warehouse_lng,
@@ -737,38 +859,52 @@ app.get('/api/orders/:id/route', (req, res) => {
 // 3. API ĐIỀU PHỐI & TÀI XẾ
 // =========================================
 app.get('/api/shippers', (req, res) => {
-  const sql = "SELECT id, full_name, email FROM users WHERE role IN ('shipper', 'driver') AND status = 'active'";
-  db.query(sql, (err, results) => {
+  const taskType = req.query.type;
+  if (!['pickup', 'delivery'].includes(taskType)) {
+    return res.status(400).json({ success: false, message: 'Cần chọn nhóm tài xế lấy hàng hoặc giao hàng.' });
+  }
+  const role = taskType === 'pickup' ? 'pickup_driver' : 'delivery_driver';
+  const sql = 'SELECT id, full_name, email, role FROM users WHERE role = ? AND status = "active"';
+  db.query(sql, [role], (err, results) => {
     if (err) return res.status(500).json({ success: false, message: err.sqlMessage });
     res.json({ success: true, data: results });
   });
 });
 
 app.put('/api/orders/:id/assign', (req, res) => {
-  const { shipper_id } = req.body;
+  const { shipper_id, task_type } = req.body;
   const orderId = req.params.id;
 
-  if (!shipper_id) {
-    return res.status(400).json({ success: false, message: 'Thiếu ID của tài xế!' });
+  if (!shipper_id || !['pickup', 'delivery'].includes(task_type)) {
+    return res.status(400).json({ success: false, message: 'Thiếu tài xế hoặc loại nhiệm vụ.' });
   }
 
-  db.query('SELECT status FROM orders WHERE id = ?', [orderId], (selectErr, orders) => {
+  const driverRole = task_type === 'pickup' ? 'pickup_driver' : 'delivery_driver';
+  db.query('SELECT status, shop_id, customer_email, tracking_code FROM orders WHERE id = ?', [orderId], (selectErr, orders) => {
     if (selectErr) return res.status(500).json({ success: false, message: 'Lỗi DB: ' + selectErr.sqlMessage });
     if (!orders.length) return res.status(404).json({ success: false, message: 'Không tìm thấy đơn hàng.' });
-    const previousStatus = orders[0].status;
-    if (!['pending', 'in_warehouse'].includes(previousStatus)) {
+    const order = orders[0];
+    const previousStatus = order.status;
+    const expectedStatus = task_type === 'pickup' ? 'pending' : 'in_warehouse';
+    if (previousStatus !== expectedStatus) {
       return res.status(409).json({ success: false, message: `Không thể phân công đơn ở trạng thái "${previousStatus}".` });
     }
 
-    const sql = 'UPDATE orders SET shipper_id = ?, status = "picking" WHERE id = ? AND status = ?';
-    db.query(sql, [shipper_id, orderId, previousStatus], (err, result) => {
+    db.query('SELECT id FROM users WHERE id = ? AND role = ? AND status = "active"', [shipper_id, driverRole], (driverErr, drivers) => {
+      if (driverErr) return res.status(500).json({ success: false, message: 'Lỗi kiểm tra tài xế: ' + driverErr.sqlMessage });
+      if (!drivers.length) return res.status(400).json({ success: false, message: 'Tài xế không thuộc đúng nhóm nhiệm vụ.' });
+
+      const assignedColumn = task_type === 'pickup' ? 'pickup_shipper_id' : 'delivery_shipper_id';
+      const nextStatus = task_type === 'pickup' ? 'picking' : previousStatus;
+      const sql = `UPDATE orders SET ${assignedColumn} = ?, status = ? WHERE id = ? AND status = ?`;
+      db.query(sql, [shipper_id, nextStatus, orderId, previousStatus], (err, result) => {
     if (err) {
       console.error("LỖI MYSQL KHI GÁN ĐƠN:", err);
       return res.status(500).json({ success: false, message: 'Lỗi DB: ' + err.sqlMessage });
     }
     if (!result.affectedRows) return res.status(409).json({ success: false, message: 'Trạng thái đơn đã thay đổi, vui lòng tải lại.' });
 
-    recordOrderStatus(orderId, previousStatus, 'picking', 'Phân công tài xế');
+    recordOrderStatus(orderId, previousStatus, nextStatus, `Điều phối phân công tài xế ${task_type === 'pickup' ? 'lấy hàng' : 'giao hàng'}`);
 
     const routeSql = `
       INSERT INTO driver_routes (order_id, shipper_id, warehouse_lat, warehouse_lng, pickup_lat, pickup_lng, delivery_lat, delivery_lng, route_status)
@@ -791,11 +927,15 @@ app.put('/api/orders/:id/assign', (req, res) => {
     });
 
     io.emit(`new_order_assigned_${shipper_id}`, {
-      message: '🔔 Bạn vừa được phân công một đơn hàng mới!'
+      message: task_type === 'pickup' ? 'Bạn vừa được phân công lấy hàng tại Shop.' : 'Bạn vừa được phân công giao hàng từ kho.'
     });
-    io.emit('order_status_changed', { order_id: Number(orderId), status: 'picking' });
+    notifyUser(shipper_id, orderId, 'Có nhiệm vụ vận chuyển mới', `Đơn ${order.tracking_code}: ${task_type === 'pickup' ? 'đến Shop lấy hàng' : 'nhận hàng tại kho để đi giao'}.`);
+    notifyUser(order.shop_id, orderId, 'Đơn hàng được phân công', `Đơn ${order.tracking_code} đã được điều phối ${task_type === 'pickup' ? 'tài xế đến lấy tại Shop' : 'tài xế giao hàng'}.`);
+    notifyCustomerByEmail(order.customer_email, orderId, 'Cập nhật vận đơn', `Đơn ${order.tracking_code} đã được phân công vận chuyển.`);
+    io.emit('order_status_changed', { order_id: Number(orderId), status: nextStatus });
 
-    res.json({ success: true, message: 'Đã phân công tài xế thành công!' });
+    res.json({ success: true, message: `Đã phân công tài xế ${task_type === 'pickup' ? 'lấy hàng' : 'giao hàng'} thành công!` });
+    });
     });
   });
 });
@@ -833,8 +973,15 @@ app.post('/api/driver/location', (req, res) => {
 });
 
 app.get('/api/orders/shipper/:id', (req, res) => {
-  const sql = 'SELECT * FROM orders WHERE shipper_id = ? ORDER BY created_at DESC';
-  db.query(sql, [req.params.id], (err, results) => {
+  const sql = `
+    SELECT o.*, u.role AS driver_role
+    FROM orders o
+    JOIN users u ON u.id = ?
+    WHERE (u.role = 'pickup_driver' AND o.pickup_shipper_id = ?)
+       OR (u.role = 'delivery_driver' AND o.delivery_shipper_id = ?)
+    ORDER BY o.created_at DESC
+  `;
+  db.query(sql, [req.params.id, req.params.id, req.params.id], (err, results) => {
     if (err) return res.status(500).json({ success: false, message: err.sqlMessage });
     res.json({ success: true, data: results });
   });
@@ -842,18 +989,20 @@ app.get('/api/orders/shipper/:id', (req, res) => {
 
 app.put('/api/orders/:id/status', upload.single('proof_image'), (req, res) => {
   const { id } = req.params;
-  const { status, fail_reason, customer_email, cod_collected, cod_payment_method } = req.body;
+  const { status, fail_reason, customer_email, cod_collected, cod_payment_method, user_id } = req.body;
   const imageUrl = req.file ? `/uploads/${req.file.filename}` : null;
 
-  db.query('SELECT status, cod_amount, shipping_fee FROM orders WHERE id = ?', [id], (selectErr, orders) => {
+  db.query('SELECT status, cod_amount, shipping_fee, shop_id, customer_email, tracking_code, pickup_shipper_id, delivery_shipper_id FROM orders WHERE id = ?', [id], (selectErr, orders) => {
     if (selectErr) return res.status(500).json({ success: false, message: 'Lỗi cập nhật: ' + selectErr.sqlMessage });
     if (!orders.length) return res.status(404).json({ success: false, message: 'Không tìm thấy đơn hàng.' });
 
     const order = orders[0];
     const amountToCollect = Number(order.cod_amount || 0) + Number(order.shipping_fee || 0);
-    const validTransition = status === 'delivering'
-      ? ['picking', 'in_warehouse'].includes(order.status)
-      : order.status === 'delivering' && ['completed', 'returning'].includes(status);
+    const validTransition = status === 'picked_up'
+      ? order.status === 'picking' && String(order.pickup_shipper_id) === String(user_id)
+      : status === 'delivering'
+      ? order.status === 'in_warehouse' && String(order.delivery_shipper_id) === String(user_id)
+      : order.status === 'delivering' && ['completed', 'returning'].includes(status) && String(order.delivery_shipper_id) === String(user_id);
     if (!validTransition) {
       return res.status(409).json({ success: false, message: `Không thể chuyển đơn từ "${order.status}" sang "${status}".` });
     }
@@ -899,16 +1048,21 @@ app.put('/api/orders/:id/status', upload.single('proof_image'), (req, res) => {
       if (!result.affectedRows) return res.status(409).json({ success: false, message: 'Trạng thái đơn đã thay đổi, vui lòng tải lại.' });
 
       recordOrderStatus(id, order.status, status, fail_reason, imageUrl, () => {
-        if (status === 'completed' && customer_email) {
+        notifyUser(order.shop_id, id, 'Cập nhật trạng thái vận đơn', `Đơn ${order.tracking_code} đã chuyển sang trạng thái ${status === 'picked_up' ? 'đã lấy hàng, chờ nhập kho' : status === 'delivering' ? 'đang giao' : status === 'completed' ? 'giao thành công' : 'giao thất bại, đang hoàn hàng'}.`);
+        const customerMessage = status === 'picked_up' ? 'Tài xế đã lấy hàng và đang đưa về kho.' : status === 'delivering' ? 'Đơn hàng đang trên đường giao đến bạn.' : status === 'completed' ? 'Đơn hàng đã được giao thành công.' : 'Giao hàng chưa thành công; đơn đang được chuyển hoàn.';
+        notifyCustomerByEmail(order.customer_email, id, 'Cập nhật vận đơn', `Đơn ${order.tracking_code}: ${customerMessage}`);
+        const customerEmail = customer_email || order.customer_email;
+        if (customerEmail) {
       const mailOptions = {
         from: 'Smart Logistics ERP <noreply@smartlogistics.vn>',
-        to: customer_email,
-        subject: `[Hóa Đơn] Xác nhận giao hàng thành công - Đơn ${id}`,
+        to: customerEmail,
+        subject: `[Cập nhật vận đơn] ${order.tracking_code}`,
         html: `
           <div style="font-family: sans-serif; max-w: 600px; margin: auto; padding: 20px; border: 1px solid #e5e7eb; border-radius: 12px;">
-            <h2 style="color: #10B981; text-align: center;">GIAO HÀNG THÀNH CÔNG!</h2>
-            <p style="color: #374151; font-size: 16px;">Cảm ơn bạn đã sử dụng dịch vụ của <b>Smart Logistics</b>.</p>
-            <p style="color: #4B5563;">Đơn hàng của bạn đã được giao đến nơi an toàn. Bạn có thể tra cứu hình ảnh minh chứng ngay trên Cổng tra cứu của hệ thống.</p>
+            <h2 style="color: #059669; text-align: center;">CẬP NHẬT VẬN ĐƠN</h2>
+            <p style="color: #374151; font-size: 16px;">Mã vận đơn: <b>${order.tracking_code}</b></p>
+            <p style="color: #4B5563;">${customerMessage}</p>
+            ${status === 'completed' ? '<p style="color: #4B5563;">Bạn có thể tra cứu hình ảnh minh chứng trên Cổng tra cứu của hệ thống.</p>' : ''}
             <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 20px 0;" />
             <p style="font-size: 12px; color: #9CA3AF; text-align: center;">Đây là email tự động, vui lòng không trả lời email này.</p>
           </div>
@@ -941,18 +1095,19 @@ app.post('/api/warehouse/scan', (req, res) => {
     let newStatus = '';
     let message = '';
 
-    if (order.status === 'picking') {
+    if (order.status === 'picked_up') {
         newStatus = 'in_warehouse';
         message = '📥 Đã NHẬP KHO thành công!';
-    } else if (order.status === 'in_warehouse') {
-        newStatus = 'delivering';
-        message = '📤 Đã XUẤT KHO cho tài xế đi giao!';
     } else if (order.status === 'returning') {
         newStatus = 'cancelled';
         message = '↩️ Đã NHẬP KHO HÀNG HOÀN thành công. Đơn hàng kết thúc (Đã Hủy)!';
     } else {
-      const message = order.status === 'delivering'
-        ? 'Đơn hàng đã rời kho và đang được giao, không cần quét tại kho lần nữa.'
+      const message = order.status === 'picking'
+        ? 'Tài xế chưa xác nhận đã lấy hàng, chưa thể nhập kho.'
+        : order.status === 'delivering'
+        ? 'Đơn hàng đã rời kho để giao, không thể nhập kho như hàng mới lấy.'
+        : order.status === 'in_warehouse'
+        ? 'Đơn hàng đã nhập kho, đang chờ Điều phối phân công tài xế giao.'
         : order.status === 'completed'
         ? 'Đơn hàng đã giao thành công, không thể quét lại tại kho.'
         : `Đơn hàng đang ở trạng thái "${order.status}" nên chưa thể xử lý tại kho.`;
@@ -963,6 +1118,7 @@ app.post('/api/warehouse/scan', (req, res) => {
         if (err) return res.status(500).json({ success: false, message: err.sqlMessage });
         if (!result.affectedRows) return res.status(409).json({ success: false, message: 'Trạng thái đơn đã thay đổi, vui lòng quét lại.' });
         recordOrderStatus(order.id, order.status, newStatus, 'Quét mã tại kho', null, () => {
+          notifyUser(order.shop_id, order.id, 'Cập nhật trạng thái vận đơn', `Đơn ${order.tracking_code} đã ${newStatus === 'in_warehouse' ? 'được nhập kho và chờ phân công giao' : 'được nhập kho hoàn, đơn đã hủy'}.`);
           io.emit('order_status_changed', { order_id: Number(order.id), status: newStatus });
           res.json({ success: true, message, order: { ...order, status: newStatus } });
         });
@@ -1281,15 +1437,37 @@ app.put('/api/hr/payroll/:userId', (req, res) => {
 // 7. API GIÁM ĐỐC (DASHBOARD)
 // =========================================
 app.get('/api/admin/dashboard', (req, res) => {
+  const period = ['today', 'week', 'month', 'year'].includes(req.query.period) ? req.query.period : 'month';
+  const requestedRegion = { mb: 'north', mt: 'central', mn: 'south' }[req.query.region] || req.query.region;
+  const region = ['north', 'central', 'south'].includes(requestedRegion) ? requestedRegion : 'all';
+  const conditions = [];
+  const params = [];
+  if (period === 'today') conditions.push('DATE(created_at) = CURDATE()');
+  if (period === 'week') conditions.push('YEARWEEK(created_at, 1) = YEARWEEK(CURDATE(), 1)');
+  if (period === 'month') conditions.push('YEAR(created_at) = YEAR(CURDATE()) AND MONTH(created_at) = MONTH(CURDATE())');
+  if (period === 'year') conditions.push('YEAR(created_at) = YEAR(CURDATE())');
+  const regionalPatterns = {
+    north: 'hà nội|bắc|phú thọ|thái nguyên|quảng ninh|hải phòng|nam định|ninh bình|tuyên quang|lào cai|sơn la|điện biên|lai châu|cao bằng|lạng sơn|hưng yên|thái bình|vĩnh phúc',
+    central: 'đà nẵng|huế|thừa thiên|quảng|nghệ an|hà tĩnh|thanh hóa|bình định|gia lai|kon tum|đắk|phú yên|khánh hòa|ninh thuận|bình thuận'
+  };
+  if (region === 'north' || region === 'central') {
+    conditions.push('LOWER(COALESCE(destination_province, "")) REGEXP ?');
+    params.push(regionalPatterns[region]);
+  } else if (region === 'south') {
+    conditions.push('LOWER(COALESCE(destination_province, "")) NOT REGEXP ? AND LOWER(COALESCE(destination_province, "")) NOT REGEXP ?');
+    params.push(regionalPatterns.north, regionalPatterns.central);
+  }
+  const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
   const sql = `
     SELECT 
       COUNT(*) as total_orders,
       SUM(CASE WHEN status = 'completed' THEN shipping_fee ELSE 0 END) as total_revenue,
-      SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending_orders,
+      SUM(CASE WHEN status IN ('pending', 'picking', 'picked_up', 'in_warehouse') THEN 1 ELSE 0 END) as pending_orders,
       SUM(CASE WHEN status = 'delivering' THEN 1 ELSE 0 END) as delivering_orders
     FROM orders
+    ${whereClause}
   `;
-  db.query(sql, (err, results) => {
+  db.query(sql, params, (err, results) => {
     if (err) return res.status(500).json({ success: false, message: err.sqlMessage });
     res.json({ success: true, data: results[0] });
   });

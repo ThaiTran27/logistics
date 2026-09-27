@@ -12,6 +12,8 @@ const normalizeRole = (value) => {
     coordinator: 'fleet_manager',
     shipper: 'driver',
     driver: 'driver',
+    pickup_driver: 'pickup_driver',
+    delivery_driver: 'delivery_driver',
     admin: 'director',
     warehouse: 'warehouse_manager',
     kho: 'warehouse_manager',

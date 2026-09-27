@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { io } from 'socket.io-client';
-import { MapPin, PhoneCall, Package, CheckCircle, XCircle, LogOut, Navigation, Wallet, UserCircle, Bike, Clock, Map, Send, CalendarOff, Camera, AlertTriangle, X, ShieldCheck } from 'lucide-react';
+import { MapPin, Package, CheckCircle, XCircle, LogOut, Navigation, Wallet, UserCircle, Bike, Map, Send, CalendarOff, Camera, AlertTriangle, X, ShieldCheck } from 'lucide-react';
 import { MapContainer, TileLayer, Marker, Popup } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
@@ -39,12 +39,16 @@ export default function AppTaiXe() {
   const [dangCapNhat, setDangCapNhat] = useState(false);
 
   const driverId = localStorage.getItem('user_id');
+  const driverRole = localStorage.getItem('role') || localStorage.getItem('user_role');
+  const isPickupDriver = driverRole === 'pickup_driver';
   const driverName = localStorage.getItem('full_name') || 'Tài Xế Giao Nhận';
-  const diemDi = routeInfo?.warehouse
-    ? `${routeInfo.warehouse.lat},${routeInfo.warehouse.lng}`
-    : '10.762622,106.660172';
+  const diemDi = isPickupDriver
+    ? `${routeInfo?.pickup?.lat || 10.7605},${routeInfo?.pickup?.lng || 106.6545}`
+    : `${routeInfo?.warehouse?.lat || 10.762622},${routeInfo?.warehouse?.lng || 106.660172}`;
   const tenKho = routeInfo?.warehouse?.address || 'Kho trung tâm Smart Logistics, TP. Hồ Chí Minh';
-  const diemDen = routeInfo?.delivery?.address || `${routeInfo?.delivery?.lat},${routeInfo?.delivery?.lng}`;
+  const diemDen = isPickupDriver
+    ? routeInfo?.warehouse?.address || tenKho
+    : routeInfo?.delivery?.address || `${routeInfo?.delivery?.lat},${routeInfo?.delivery?.lng}`;
   const urlChiDuong = routeInfo
     ? `https://www.google.com/maps/dir/?api=1&${new URLSearchParams({ origin: diemDi, destination: diemDen, travelmode: 'driving' })}`
     : '';
@@ -56,7 +60,8 @@ export default function AppTaiXe() {
       const data = await res.json();
       if (data.success) {
         setDonHang(data.data);
-        const firstActiveOrder = data.data.find(item => ['picking', 'delivering', 'in_warehouse'].includes(item.status));
+        const activeStatuses = isPickupDriver ? ['picking', 'picked_up'] : ['in_warehouse', 'delivering'];
+        const firstActiveOrder = data.data.find(item => activeStatuses.includes(item.status));
         if (firstActiveOrder) {
           const routeRes = await fetch(`http://localhost:5000/api/orders/${firstActiveOrder.id}/route`);
           const routeData = await routeRes.json();
@@ -83,7 +88,29 @@ export default function AppTaiXe() {
     });
 
     return () => socket.off(`new_order_assigned_${driverId}`);
-  }, [driverId]);
+  }, [driverId, isPickupDriver]);
+
+  const xacNhanDaLayHang = async (orderId) => {
+    if (!window.confirm('Xác nhận đã nhận kiện hàng từ Shop và mang về kho?')) return;
+    try {
+      const res = await fetch(`http://localhost:5000/api/orders/${orderId}/status`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'picked_up', user_id: driverId })
+      });
+      const data = await res.json();
+      if (!data.success) return alert(data.message || 'Không thể xác nhận lấy hàng.');
+      const order = donHang.find((item) => String(item.id) === String(orderId));
+      if (order) batDauPhatToaDo(orderId, order.tracking_code);
+      const routeRes = await fetch(`http://localhost:5000/api/orders/${orderId}/route`);
+      const routeData = await routeRes.json();
+      if (routeData.success) setRouteInfo(routeData.data);
+      alert('Đã xác nhận lấy hàng. Vui lòng bàn giao kiện hàng cho Thủ kho quét nhập.');
+      taiDuLieu();
+    } catch (error) {
+      alert('Lỗi kết nối!');
+    }
+  };
 
   const batDauPhatToaDo = (orderId, trackingCode) => {
     if (navigator.geolocation) {
@@ -111,7 +138,7 @@ export default function AppTaiXe() {
       const res = await fetch(`http://localhost:5000/api/orders/${orderId}/status`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: 'delivering' })
+        body: JSON.stringify({ status: 'delivering', user_id: driverId })
       });
       if ((await res.json()).success) {
         batDauPhatToaDo(orderId, trackingCode);
@@ -159,6 +186,7 @@ export default function AppTaiXe() {
     try {
       const formData = new FormData();
       formData.append('status', loai); // 'completed' hoặc 'returning'
+      formData.append('user_id', driverId);
       
       if (anhMinhChung) {
         formData.append('proof_image', anhMinhChung);
@@ -238,7 +266,9 @@ export default function AppTaiXe() {
 
   const donThanhCong = donHang.filter(d => d.status === 'completed');
   const tongTienThuHo = donThanhCong.reduce((sum, item) => sum + tinhTongTienCanThu(item), 0);
-  const donDangChay = donHang.filter(d => ['picking', 'delivering'].includes(d.status));
+  const donDangChay = donHang.filter(d => isPickupDriver
+    ? ['picking', 'picked_up'].includes(d.status)
+    : ['in_warehouse', 'delivering'].includes(d.status));
 
   return (
     <div className="bg-slate-100 min-h-screen flex justify-center font-sans text-slate-800">
@@ -252,7 +282,7 @@ export default function AppTaiXe() {
                 <Bike size={22} />
               </div>
               <div>
-                <p className="text-blue-100 text-[10px] font-bold uppercase tracking-wider">XIN CHÀO,</p>
+                <p className="text-blue-100 text-[10px] font-bold uppercase tracking-wider">{isPickupDriver ? 'TÀI XẾ LẤY HÀNG' : 'TÀI XẾ GIAO HÀNG'}</p>
                 <h2 className="font-black text-base">{driverName}</h2>
               </div>
             </div>
@@ -276,11 +306,11 @@ export default function AppTaiXe() {
 
         {/* CONTENT */}
         <div className="flex-1 overflow-y-auto pb-28">
-          {routeInfo?.status === 'delivering' && (
+          {routeInfo && (isPickupDriver ? ['picking', 'picked_up'].includes(routeInfo.status) : ['in_warehouse', 'delivering'].includes(routeInfo.status)) && (
             <div className="p-4 border-b border-slate-100 bg-slate-50">
               <div className="mb-2 flex items-center justify-between">
-                <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Lộ trình giao hàng</p>
-                <span className="rounded-full bg-emerald-100 px-2 py-1 text-[10px] font-bold text-emerald-700">Đã lấy hàng</span>
+                <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">{isPickupDriver ? 'Lộ trình lấy hàng về kho' : 'Lộ trình giao hàng'}</p>
+                <span className="rounded-full bg-emerald-100 px-2 py-1 text-[10px] font-bold text-emerald-700">{isPickupDriver ? 'Shop → Kho' : 'Kho → Người nhận'}</span>
               </div>
               <div className="h-36 overflow-hidden rounded-2xl border border-slate-200">
                 <iframe
@@ -291,12 +321,12 @@ export default function AppTaiXe() {
               </div>
               <div className="mt-3 space-y-2">
                 <div className="rounded-xl bg-white p-3">
-                  <p className="text-[10px] font-black uppercase tracking-wider text-emerald-700">Điểm đi · Kho trung tâm</p>
-                  <p className="mt-1 text-xs font-medium text-slate-700">{tenKho}</p>
+                  <p className="text-[10px] font-black uppercase tracking-wider text-emerald-700">{isPickupDriver ? 'Điểm lấy · Shop' : 'Điểm đi · Kho trung tâm'}</p>
+                  <p className="mt-1 text-xs font-medium text-slate-700">{isPickupDriver ? routeInfo?.pickup?.address : tenKho}</p>
                   <p className="mt-1 text-[10px] text-slate-400">{diemDi}</p>
                 </div>
                 <div className="rounded-xl bg-white p-3">
-                  <p className="text-[10px] font-black uppercase tracking-wider text-blue-700">Điểm đến</p>
+                  <p className="text-[10px] font-black uppercase tracking-wider text-blue-700">{isPickupDriver ? 'Điểm đến · Kho trung tâm' : 'Điểm giao · Người nhận'}</p>
                   <p className="mt-1 text-xs font-medium text-slate-700">{diemDen}</p>
                 </div>
                 <a href={urlChiDuong} target="_blank" rel="noreferrer" className="flex w-full items-center justify-center gap-2 rounded-xl bg-blue-600 px-4 py-3 text-sm font-bold text-white hover:bg-blue-700">
@@ -309,7 +339,7 @@ export default function AppTaiXe() {
           {tabHienTai === 'donhang' && (
             <div className="p-5 space-y-4">
               <h3 className="font-black text-base text-slate-800 flex items-center gap-2 mb-1">
-                <Navigation className="text-blue-600" size={18} /> Lộ trình hôm nay ({donDangChay.length})
+                <Navigation className="text-blue-600" size={18} /> {isPickupDriver ? 'Đơn cần lấy' : 'Đơn cần giao'} ({donDangChay.length})
               </h3>
 
               {donDangChay.length === 0 ? (
@@ -333,24 +363,30 @@ export default function AppTaiXe() {
                         <div className="flex items-start gap-2.5">
                           <UserCircle size={16} className="text-slate-400 mt-0.5 shrink-0" />
                           <div>
-                            <p className="font-bold text-slate-800">{don.receiver_name}</p>
-                            <a href={`tel:${don.receiver_phone}`} className="text-blue-600 font-bold text-xs">{don.receiver_phone}</a>
+                            <p className="font-bold text-slate-800">{isPickupDriver ? 'Điểm lấy hàng tại Shop' : don.receiver_name}</p>
+                              {!isPickupDriver && <a href={`tel:${don.receiver_phone}`} className="text-blue-600 font-bold text-xs">{don.receiver_phone}</a>}
                           </div>
                         </div>
                         <div className="flex items-start gap-2.5">
                           <MapPin size={16} className="text-orange-400 mt-0.5 shrink-0" />
-                          <p className="text-slate-600 text-xs leading-relaxed">{don.receiver_address}</p>
+                          <p className="text-slate-600 text-xs leading-relaxed">{isPickupDriver ? don.shop_address : don.receiver_address}</p>
                         </div>
-                        <div className="bg-slate-50 p-2.5 rounded-xl space-y-1.5 text-xs">
+                        {!isPickupDriver && <div className="bg-slate-50 p-2.5 rounded-xl space-y-1.5 text-xs">
                           <div className="flex justify-between"><span className="font-bold text-slate-500">COD hàng:</span><span>{Number(don.cod_amount || 0).toLocaleString()} đ</span></div>
                           <div className="flex justify-between"><span className="font-bold text-slate-500">Cước vận chuyển:</span><span>{Number(don.shipping_fee || 0).toLocaleString()} đ</span></div>
                           <div className="flex justify-between border-t border-slate-200 pt-1.5"><span className="font-black text-slate-700">Tổng cần thu:</span><span className="font-black text-red-500 text-sm">{tinhTongTienCanThu(don).toLocaleString()} đ</span></div>
-                        </div>
+                        </div>}
                       </div>
                       <div className="grid grid-cols-2 gap-2">
                         {don.status === 'picking' ? (
+                          <button onClick={() => xacNhanDaLayHang(don.id)} className="col-span-2 bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded-xl text-xs transition-all shadow-md shadow-blue-200">
+                            Xác nhận đã lấy hàng
+                          </button>
+                        ) : don.status === 'picked_up' ? (
+                          <p className="col-span-2 rounded-xl bg-amber-50 px-3 py-3 text-center text-xs font-bold text-amber-700">Đã lấy hàng, chờ Thủ kho quét nhập.</p>
+                        ) : don.status === 'in_warehouse' ? (
                           <button onClick={() => batDauGiaoHang(don.id, don.tracking_code)} className="col-span-2 bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded-xl text-xs transition-all shadow-md shadow-blue-200">
-                            🚀 Đã Lấy Hàng & Bật GPS
+                            Nhận hàng tại kho và bắt đầu giao
                           </button>
                         ) : (
                           <>

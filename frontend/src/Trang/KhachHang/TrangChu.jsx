@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Search, Package, MapPin, Truck, CheckCircle, Clock, User, Phone, XCircle, AlertCircle, Box, Camera, Navigation, Calculator, Store, Globe, Headphones, ChevronRight, FileText, Download, Play, MessageCircle, Users, ShieldCheck } from 'lucide-react';
+import { Search, Package, MapPin, Truck, CheckCircle, Clock, User, Phone, XCircle, AlertCircle, Box, Camera, Navigation, Calculator, Store, Globe, Headphones, ChevronRight, FileText, Download, Play, MessageCircle, Users, ShieldCheck, PackageSearch } from 'lucide-react';
 import { Link, useNavigate } from 'react-router-dom';
 
 export default function TraCuuHanhTrinh() {
@@ -82,6 +82,7 @@ export default function TraCuuHanhTrinh() {
   const cacBuocHanhTrinh = [
     { id: 'pending', ten: 'Chờ Lấy Hàng', desc: 'Đơn hàng đã được Shop tạo và đang chờ hệ thống AI phân tuyến.', icon: Clock },
     { id: 'picking', ten: 'Lộ Trình Lấy Hàng', desc: 'Tài xế đã nhận đơn và đang di chuyển đến địa chỉ Shop để lấy hàng.', icon: Truck },
+    { id: 'picked_up', ten: 'Đã Lấy Hàng', desc: 'Tài xế đang bàn giao kiện hàng cho kho.', icon: PackageSearch },
     { id: 'in_warehouse', ten: 'Đã Nhập Kho', desc: 'Hàng đã được đưa về kho trung tâm, chờ điều phối tuyến giao.', icon: Box },
     { id: 'delivering', ten: 'Đang Giao Hàng', desc: 'Tài xế đang trên đường đi giao hàng đến địa chỉ của bạn.', icon: Navigation },
     { id: 'completed', ten: 'Giao Thành Công', desc: 'Đơn hàng đã được giao tận tay người nhận.', icon: CheckCircle }
@@ -92,7 +93,7 @@ export default function TraCuuHanhTrinh() {
   const mapUrl = `https://www.google.com/maps?q=${mapQuery}&z=12&output=embed`;
 
   const layTrangThaiBuoc = (trangThaiHienTai, idBuoc) => {
-    const thuTu = ['pending', 'picking', 'in_warehouse', 'delivering', 'completed'];
+    const thuTu = ['pending', 'picking', 'picked_up', 'in_warehouse', 'delivering', 'completed'];
     if (trangThaiHienTai === 'cancelled' || trangThaiHienTai === 'returning') return 'that-bai';
     
     const viTriHienTai = thuTu.indexOf(trangThaiHienTai);
@@ -285,6 +286,7 @@ export default function TraCuuHanhTrinh() {
 
                   {thongTinDon.status === 'pending' ? 'Chờ Lấy Hàng' :
                     thongTinDon.status === 'picking' ? 'Lộ Trình Lấy Hàng' :
+                    thongTinDon.status === 'picked_up' ? 'Đã Lấy, Chờ Nhập Kho' :
                     thongTinDon.status === 'in_warehouse' ? 'Đã Nhập Kho' :
                     thongTinDon.status === 'delivering' ? 'Đang Giao Hàng' :
                     thongTinDon.status === 'completed' ? 'Giao Thành Công' :
@@ -331,7 +333,7 @@ export default function TraCuuHanhTrinh() {
             </div>
 
             <div className="p-6 md:p-10 bg-white">
-              {(thongTinDon.status === 'delivering' || thongTinDon.status === 'picking') && (
+              {(thongTinDon.status === 'delivering' || thongTinDon.status === 'picking' || thongTinDon.status === 'picked_up') && (
                 <div className="bg-gradient-to-r from-blue-50 to-sky-50 border border-blue-100 p-5 rounded-xl mb-8 flex items-center justify-between shadow-sm">
                   <div className="flex items-center gap-4">
                     <div className="relative">
@@ -344,7 +346,7 @@ export default function TraCuuHanhTrinh() {
                     </div>
                     <div>
                       <p className="text-[10px] font-black text-blue-600 uppercase tracking-widest mb-0.5">
-                        {thongTinDon.status === 'picking' ? 'Bưu tá đang tới lấy hàng' : 'Bưu tá đang phát hàng'}
+                        {thongTinDon.status === 'picking' ? 'Tài xế lấy hàng đang tới Shop' : thongTinDon.status === 'picked_up' ? 'Tài xế đang đưa hàng về kho' : 'Tài xế giao hàng đang phát đơn'}
                       </p>
                       <p className="font-bold text-slate-800 text-base">{thongTinDon.shipper_name || 'Bưu tá khu vực'}</p>
                     </div>
@@ -436,7 +438,8 @@ export default function TraCuuHanhTrinh() {
                           <p className="font-bold text-slate-700">
                             {{
                               pending: 'Đã tạo đơn',
-                              picking: 'Đã phân công tài xế',
+                              picking: 'Tài xế lấy hàng đang đến Shop',
+                              picked_up: 'Đã lấy hàng, chờ nhập kho',
                               in_warehouse: 'Đã nhập kho',
                               delivering: 'Bắt đầu giao hàng',
                               completed: 'Giao thành công',
