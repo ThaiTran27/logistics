@@ -12,6 +12,9 @@ import {
   ShieldAlert,
   Briefcase,
   CalendarCheck,
+  Clock3,
+  Wallet,
+  Save,
   X,
   PlusCircle,
   Pencil,
@@ -39,6 +42,10 @@ export default function HoSoNhanVien() {
   const [formNhanVien, setFormNhanVien] = useState(defaultForm);
   const [editingId, setEditingId] = useState(null);
   const [submitting, setSubmitting] = useState(false);
+  const [thangXem, setThangXem] = useState(() => new Date().toISOString().slice(0, 7));
+  const [chamCongList, setChamCongList] = useState([]);
+  const [bangLuong, setBangLuong] = useState([]);
+  const [luongChinhSua, setLuongChinhSua] = useState({});
 
   const hrName = localStorage.getItem('full_name') || 'Phòng Nhân Sự';
 
@@ -85,6 +92,52 @@ export default function HoSoNhanVien() {
     taiDuLieuNghiPhep();
     taiYeuCauWebsite();
   }, []);
+
+  useEffect(() => {
+    if (tabHienTai === 'cham-cong') {
+      fetch(`http://localhost:5000/api/attendance?month=${thangXem}`)
+        .then((response) => response.json())
+        .then((data) => { if (data.success) setChamCongList(data.data || []); })
+        .catch((error) => console.error('Lỗi tải bảng chấm công:', error));
+    }
+    if (tabHienTai === 'bang-luong') {
+      fetch(`http://localhost:5000/api/hr/payroll?month=${thangXem}`)
+        .then((response) => response.json())
+        .then((data) => { if (data.success) setBangLuong(data.data || []); })
+        .catch((error) => console.error('Lỗi tải bảng lương:', error));
+    }
+  }, [tabHienTai, thangXem]);
+
+  const capNhatLuongNhap = (id, field, value) => {
+    setLuongChinhSua((current) => ({
+      ...current,
+      [id]: { ...current[id], [field]: value },
+    }));
+  };
+
+  const luuLuong = async (person) => {
+    const draft = luongChinhSua[person.id] || {};
+    try {
+      const response = await fetch(`http://localhost:5000/api/hr/payroll/${person.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          monthly_salary: draft.monthly_salary ?? person.monthly_salary,
+          allowance: draft.allowance ?? person.allowance,
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok || !data.success) throw new Error(data.message || 'Không thể lưu mức lương.');
+      setBangLuong((current) => current.map((item) => item.id === person.id ? {
+        ...item,
+        monthly_salary: draft.monthly_salary ?? item.monthly_salary,
+        allowance: draft.allowance ?? item.allowance,
+      } : item));
+      setLuongChinhSua((current) => { const next = { ...current }; delete next[person.id]; return next; });
+    } catch (error) {
+      alert(error.message || 'Lỗi kết nối máy chủ.');
+    }
+  };
 
   const capNhatTrangThaiWebsite = async (loai, id, status) => {
     const endpoint = loai === 'ung-tuyen' ? 'job-applications' : 'service-requests';
@@ -300,6 +353,18 @@ export default function HoSoNhanVien() {
               )}
             </button>
             <button
+              onClick={() => setTabHienTai('cham-cong')}
+              className={`w-full px-5 py-4 rounded-2xl font-bold flex items-center gap-4 transition-all ${tabHienTai === 'cham-cong' ? 'bg-rose-50 text-rose-600 border border-rose-200 shadow-sm' : 'text-slate-500 hover:bg-rose-50/50'}`}
+            >
+              <Clock3 size={20} /> Bảng Chấm Công
+            </button>
+            <button
+              onClick={() => setTabHienTai('bang-luong')}
+              className={`w-full px-5 py-4 rounded-2xl font-bold flex items-center gap-4 transition-all ${tabHienTai === 'bang-luong' ? 'bg-rose-50 text-rose-600 border border-rose-200 shadow-sm' : 'text-slate-500 hover:bg-rose-50/50'}`}
+            >
+              <Wallet size={20} /> Bảng Lương
+            </button>
+            <button
               onClick={() => setTabHienTai('website')}
               className={`w-full px-5 py-4 rounded-2xl font-bold flex items-center gap-4 transition-all ${tabHienTai === 'website' ? 'bg-rose-50 text-rose-600 border border-rose-200 shadow-sm relative' : 'text-slate-500 hover:bg-rose-50/50 relative'}`}
             >
@@ -332,14 +397,18 @@ export default function HoSoNhanVien() {
         <div className="mb-8 flex justify-between items-end">
           <div>
             <h1 className="text-3xl font-black text-slate-800 tracking-tight">
-              {tabHienTai === 'nhan-vien' ? 'Hồ Sơ Nhân Sự' : tabHienTai === 'nghi-phep' ? 'Đơn Từ Xin Nghỉ Phép' : 'Yêu Cầu Từ Website'}
+              {tabHienTai === 'nhan-vien' ? 'Hồ Sơ Nhân Sự' : tabHienTai === 'nghi-phep' ? 'Đơn Từ Xin Nghỉ Phép' : tabHienTai === 'cham-cong' ? 'Bảng Chấm Công' : tabHienTai === 'bang-luong' ? 'Bảng Lương Nhân Sự' : 'Yêu Cầu Từ Website'}
             </h1>
             <p className="text-slate-500 mt-2 font-medium">
               {tabHienTai === 'nhan-vien'
                 ? 'Quản lý tài khoản, chức vụ và trạng thái hoạt động của toàn bộ nhân sự trong hệ thống.'
                 : tabHienTai === 'nghi-phep'
                   ? 'Xem xét và phê duyệt các yêu cầu nghỉ phép, vắng mặt của nhân sự.'
-                  : 'Theo dõi hồ sơ ứng tuyển và yêu cầu tư vấn các gói dịch vụ.'}
+                  : tabHienTai === 'cham-cong'
+                    ? 'Theo dõi giờ vào ca và tan ca của nhân viên, bao gồm đội ngũ tài xế.'
+                    : tabHienTai === 'bang-luong'
+                      ? 'Xem mức lương tháng, phụ cấp và số ngày chấm công của nhân viên.'
+                      : 'Theo dõi hồ sơ ứng tuyển và yêu cầu tư vấn các gói dịch vụ.'}
             </p>
           </div>
 
@@ -620,6 +689,63 @@ export default function HoSoNhanVien() {
               )}
             </div>
           </div>
+        )}
+
+        {tabHienTai === 'cham-cong' && (
+          <section className="overflow-hidden border border-rose-100 bg-white shadow-sm">
+            <div className="flex flex-wrap items-center justify-between gap-4 border-b border-rose-100 p-5">
+              <div><h2 className="font-black text-slate-800">Lịch sử chấm công</h2><p className="mt-1 text-sm text-slate-500">Dữ liệu vào ca và tan ca theo tháng đã chọn.</p></div>
+              <input type="month" value={thangXem} onChange={(event) => setThangXem(event.target.value)} className="border border-slate-200 bg-white p-2 font-bold text-slate-700" />
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[700px] text-left">
+                <thead className="bg-[#FFF5F6] text-xs uppercase text-rose-500"><tr><th className="p-4">Nhân viên</th><th className="p-4">Chức vụ</th><th className="p-4">Ngày</th><th className="p-4">Vào ca</th><th className="p-4">Tan ca</th></tr></thead>
+                <tbody className="divide-y divide-rose-50">
+                  {chamCongList.length ? chamCongList.map((record) => (
+                    <tr key={record.id}>
+                      <td className="p-4 font-bold">{record.full_name}</td>
+                      <td className="p-4">{dichTenChucVu(record.role)}</td>
+                      <td className="p-4">{new Date(`${String(record.work_date).slice(0, 10)}T00:00:00`).toLocaleDateString('vi-VN')}</td>
+                      <td className="p-4">{record.check_in ? new Date(record.check_in).toLocaleTimeString('vi-VN') : 'Chưa chấm công'}</td>
+                      <td className="p-4">{record.check_out ? new Date(record.check_out).toLocaleTimeString('vi-VN') : 'Chưa chấm công'}</td>
+                    </tr>
+                  )) : <tr><td colSpan="5" className="p-12 text-center text-slate-400">Chưa có lượt chấm công trong tháng này.</td></tr>}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        )}
+
+        {tabHienTai === 'bang-luong' && (
+          <section className="overflow-hidden border border-rose-100 bg-white shadow-sm">
+            <div className="flex flex-wrap items-center justify-between gap-4 border-b border-rose-100 p-5">
+              <div><h2 className="font-black text-slate-800">Bảng lương tháng</h2><p className="mt-1 text-sm text-slate-500">Tổng dự kiến = lương tháng + phụ cấp.</p></div>
+              <input type="month" value={thangXem} onChange={(event) => setThangXem(event.target.value)} className="border border-slate-200 bg-white p-2 font-bold text-slate-700" />
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[900px] text-left">
+                <thead className="bg-[#FFF5F6] text-xs uppercase text-rose-500"><tr><th className="p-4">Nhân viên</th><th className="p-4">Chức vụ</th><th className="p-4">Ngày công</th><th className="p-4">Lương tháng</th><th className="p-4">Phụ cấp</th><th className="p-4">Tổng dự kiến</th><th className="p-4">Lưu</th></tr></thead>
+                <tbody className="divide-y divide-rose-50">
+                  {bangLuong.length ? bangLuong.map((person) => {
+                    const draft = luongChinhSua[person.id] || {};
+                    const salary = Number(draft.monthly_salary ?? person.monthly_salary);
+                    const allowance = Number(draft.allowance ?? person.allowance);
+                    return (
+                      <tr key={person.id}>
+                        <td className="p-4"><p className="font-bold">{person.full_name}</p><p className="text-xs text-slate-500">{person.email}</p></td>
+                        <td className="p-4">{dichTenChucVu(person.role)}</td>
+                        <td className="p-4">{person.attendance_days}</td>
+                        <td className="p-4"><input type="number" min="0" step="1000" aria-label={`Lương tháng ${person.full_name}`} value={draft.monthly_salary ?? person.monthly_salary} onChange={(event) => capNhatLuongNhap(person.id, 'monthly_salary', event.target.value)} className="w-36 border border-slate-200 p-2" /></td>
+                        <td className="p-4"><input type="number" min="0" step="1000" aria-label={`Phụ cấp ${person.full_name}`} value={draft.allowance ?? person.allowance} onChange={(event) => capNhatLuongNhap(person.id, 'allowance', event.target.value)} className="w-32 border border-slate-200 p-2" /></td>
+                        <td className="p-4 font-black text-emerald-700">{(salary + allowance).toLocaleString('vi-VN')} đ</td>
+                        <td className="p-4"><button onClick={() => luuLuong(person)} title="Lưu mức lương" className="bg-emerald-50 p-2.5 text-emerald-700 hover:bg-emerald-100"><Save size={17} /></button></td>
+                      </tr>
+                    );
+                  }) : <tr><td colSpan="7" className="p-12 text-center text-slate-400">Chưa có nhân sự để hiển thị.</td></tr>}
+                </tbody>
+              </table>
+            </div>
+          </section>
         )}
 
         {tabHienTai === 'website' && (

@@ -18,6 +18,9 @@ import TrungTamDieuPhoi from '../Trang/DieuHanh/TrungTamDieuPhoi';
 import DoiSoatCOD from '../Trang/KeToan/DoiSoatCOD';
 import BanGiamDoc from '../Trang/Admin/BanGiamDoc';
 import HoSoNhanVien from '../Trang/NhanSu/HoSoNhanVien';
+import ChamCong from '../Trang/NhanSu/ChamCong';
+import { Link, useLocation } from 'react-router-dom';
+import { CalendarCheck } from 'lucide-react';
 
 import BaoVeTuyenDuong from './BaoVeTuyenDuong';
 
@@ -159,7 +162,12 @@ function TimKiemBuuCuc() {
 }
 
 export default function DieuHuongChinh() {
+  const location = useLocation();
+  const userRole = localStorage.getItem('role') || localStorage.getItem('user_role');
+  const showAttendanceShortcut = userRole && userRole !== 'customer' && location.pathname !== '/cham-cong';
+
   return (
+    <>
     <Routes>
       <Route element={<PublicLayout />}>
         <Route path="/" element={<TrangChu />} />
@@ -201,9 +209,19 @@ export default function DieuHuongChinh() {
         <BaoVeTuyenDuong allowedRoles={['hr_manager']}><HoSoNhanVien /></BaoVeTuyenDuong>
       } />
 
+      <Route path="/cham-cong" element={
+        <BaoVeTuyenDuong allowedRoles={['driver', 'shop', 'warehouse_manager', 'fleet_manager', 'accountant', 'hr_manager', 'director', 'content_manager']}><ChamCong /></BaoVeTuyenDuong>
+      } />
+
       <Route path="/admin" element={
         <BaoVeTuyenDuong allowedRoles={['director']}><BanGiamDoc /></BaoVeTuyenDuong>
       } />
     </Routes>
+    {showAttendanceShortcut && (
+      <Link to="/cham-cong" title="Mở chấm công" className="fixed bottom-5 right-5 z-[60] flex items-center gap-2 bg-emerald-700 px-4 py-3 text-sm font-bold text-white shadow-lg hover:bg-emerald-800">
+        <CalendarCheck size={18} /> Chấm công
+      </Link>
+    )}
+    </>
   );
 }

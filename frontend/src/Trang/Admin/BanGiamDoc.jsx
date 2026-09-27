@@ -21,12 +21,8 @@ export default function DashboardGiamDoc() {
 
   const [baoCao, setBaoCao] = useState([]);
   const [tabHienTai, setTabHienTai] = useState('dashboard');
-  const [truongPhong, setTruongPhong] = useState([
-    { id: 1, ten: 'Phòng Tài Chính', nguoi: 'Nguyễn Thị Kế Toán', status: 'Đang hoạt động' },
-    { id: 2, ten: 'Phòng Điều Hành', nguoi: 'Đoàn Minh Điều Hành', status: 'Đang hoạt động' },
-    { id: 3, ten: 'Phòng Kho', nguoi: 'Trần Vũ Thủ Kho', status: 'Cần báo cáo' },
-    { id: 4, ten: 'Phòng Nhân Sự', nguoi: 'Trương Phòng Nhân Sự', status: 'Ổn định' }
-  ]);
+  const [truongPhong, setTruongPhong] = useState([]);
+  const [nhanSu, setNhanSu] = useState([]);
   
   // STATE BỘ LỌC THEO YÊU CẦU CỦA CÔ
   const [locThoiGian, setLocThoiGian] = useState('month'); // today, week, month, year
@@ -62,12 +58,65 @@ export default function DashboardGiamDoc() {
     }
   };
 
+  const taiTruongPhong = async () => {
+    try {
+      const res = await fetch('http://localhost:5000/api/admin/leaders');
+      const data = await res.json();
+      if (data.success) {
+        setNhanSu(data.data.staff || []);
+        setTruongPhong((data.data.departments || []).map((department) => {
+          const assignment = (data.data.leaders || []).find((leader) => leader.department === department);
+          return { ten: department, userId: assignment?.user_id ? String(assignment.user_id) : '' };
+        }));
+      }
+    } catch (error) {
+      console.error('Lỗi tải danh sách trưởng phòng:', error);
+    }
+  };
+
   useEffect(() => {
     taiDuLieuThongKe();
     taiBaoCao();
+    taiTruongPhong();
     const interval = setInterval(() => taiDuLieuThongKe(), 30000);
     return () => clearInterval(interval);
   }, []);
+
+  const capNhatLuaChonTruongPhong = (department, userId) => {
+    setTruongPhong((current) => current.map((item) => item.ten === department ? { ...item, userId } : item));
+  };
+
+  const luuTruongPhong = async (department) => {
+    const assignment = truongPhong.find((item) => item.ten === department);
+    if (!assignment?.userId) return alert('Vui lòng chọn nhân viên làm trưởng phòng.');
+    try {
+      const res = await fetch('http://localhost:5000/api/admin/leaders', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ department, user_id: assignment.userId })
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) throw new Error(data.message || 'Không thể lưu phân công.');
+      await taiTruongPhong();
+    } catch (error) {
+      alert(error.message || 'Lỗi kết nối máy chủ.');
+    }
+  };
+
+  const goTruongPhong = async (department) => {
+    try {
+      const res = await fetch('http://localhost:5000/api/admin/leaders', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ department })
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) throw new Error(data.message || 'Không thể gỡ phân công.');
+      await taiTruongPhong();
+    } catch (error) {
+      alert(error.message || 'Lỗi kết nối máy chủ.');
+    }
+  };
 
   // LOGIC MÔ PHỎNG LỌC DỮ LIỆU (Giúp biểu đồ tự nhảy số khi chọn Filter để Demo)
   useEffect(() => {
@@ -399,22 +448,29 @@ export default function DashboardGiamDoc() {
             <div className="rounded-[32px] border border-slate-200 bg-white p-4 shadow-sm">
               <div className="grid gap-4 md:grid-cols-2">
                 {truongPhong.map((phong) => (
-                  <div key={phong.id} className="rounded-[24px] border border-slate-200 bg-slate-50 p-5">
+                  <div key={phong.ten} className="rounded-[24px] border border-slate-200 bg-slate-50 p-5">
                     <div className="flex items-start justify-between gap-4">
                       <div>
                         <p className="text-xs font-black uppercase tracking-[0.2em] text-slate-500">Phòng ban</p>
                         <h3 className="mt-2 text-xl font-black text-slate-800">{phong.ten}</h3>
                       </div>
-                      <span className={`rounded-full px-3 py-1 text-xs font-black ${phong.status === 'Cần báo cáo' ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700'}`}>
-                        {phong.status}
+                      <span className={`rounded-full px-3 py-1 text-xs font-black ${phong.userId ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
+                        {phong.userId ? 'Đã phân công' : 'Chưa có trưởng phòng'}
                       </span>
                     </div>
-                    <div className="mt-5 rounded-2xl bg-white p-4 border border-slate-200">
-                      <p className="text-sm text-slate-500">Trưởng phòng</p>
-                      <p className="mt-2 text-lg font-black text-slate-800">{phong.nguoi}</p>
+                    <label className="mt-5 block text-sm font-bold text-slate-600">Chọn trưởng phòng
+                      <select value={phong.userId} onChange={(event) => capNhatLuaChonTruongPhong(phong.ten, event.target.value)} className="mt-2 w-full border border-slate-200 bg-white p-3 font-medium text-slate-700">
+                        <option value="">Chưa phân công</option>
+                        {nhanSu.map((person) => <option key={person.id} value={person.id}>{person.full_name} · {person.email}</option>)}
+                      </select>
+                    </label>
+                    <div className="mt-4 flex gap-2">
+                      <button onClick={() => luuTruongPhong(phong.ten)} disabled={!phong.userId} className="bg-slate-900 px-4 py-2.5 text-sm font-bold text-white hover:bg-slate-700 disabled:bg-slate-300">Lưu phân công</button>
+                      {phong.userId && <button onClick={() => goTruongPhong(phong.ten)} className="border border-rose-200 px-4 py-2.5 text-sm font-bold text-rose-700 hover:bg-rose-50">Gỡ phân công</button>}
                     </div>
                   </div>
                 ))}
+                {truongPhong.length === 0 && <p className="col-span-full p-8 text-center text-slate-500">Không tải được danh sách phòng ban. Vui lòng kiểm tra kết nối máy chủ.</p>}
               </div>
             </div>
           </div>
@@ -457,6 +513,11 @@ export default function DashboardGiamDoc() {
                         <div className="text-sm text-slate-700 bg-white border border-slate-200 p-5 rounded-xl shadow-inner whitespace-pre-wrap leading-relaxed">
                           {bc.content}
                         </div>
+                        {bc.attachment_url && (
+                          <a href={`http://localhost:5000${bc.attachment_url}`} target="_blank" rel="noreferrer" className="mt-4 inline-flex items-center gap-2 border border-blue-200 bg-blue-50 px-4 py-2.5 text-sm font-bold text-blue-700 hover:bg-blue-100">
+                            <FileText size={17} /> Tải tệp đính kèm
+                          </a>
+                        )}
                         
                         {bc.status === 'pending' ? (
                           <div className="flex flex-col sm:flex-row gap-3 mt-6 pt-6 border-t border-slate-200 border-dashed">

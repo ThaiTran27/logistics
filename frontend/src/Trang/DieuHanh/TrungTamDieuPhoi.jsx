@@ -47,6 +47,7 @@ export default function TrungTamDieuPhoi() {
   const [tabHienTai, setTabHienTai] = useState('dieuphoan'); 
 
   const [formBaoCao, setFormBaoCao] = useState({ title: '', content: '' });
+  const [fileBaoCao, setFileBaoCao] = useState(null);
   const [dangGuiBaoCao, setDangGuiBaoCao] = useState(false);
 
   const userId = localStorage.getItem('user_id');
@@ -196,20 +197,28 @@ export default function TrungTamDieuPhoi() {
 
   const guiBaoCao = async (e) => {
     e.preventDefault();
+    const form = e.currentTarget;
     if (!formBaoCao.title.trim() || !formBaoCao.content.trim()) return alert("Nhập đủ thông tin!");
     
     setDangGuiBaoCao(true);
     try {
+      const formData = new FormData();
+      formData.append('created_by', userId);
+      formData.append('department', 'Phòng Điều Phối');
+      formData.append('title', formBaoCao.title);
+      formData.append('content', formBaoCao.content);
+      if (fileBaoCao) formData.append('attachment', fileBaoCao);
       const res = await fetch('http://localhost:5000/api/reports', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ created_by: userId, department: 'Phòng Điều Phối', title: formBaoCao.title, content: formBaoCao.content })
+        body: formData
       });
       const data = await res.json();
       
       if (data.success) {
         alert("✅ Đã gửi báo cáo lên Ban Giám Đốc!");
-        setFormBaoCao({ title: '', content: '' }); 
+        setFormBaoCao({ title: '', content: '' });
+        setFileBaoCao(null);
+        form.reset();
       } else alert("Lỗi: " + data.message);
     } catch (error) {
       alert("Lỗi kết nối!");
@@ -395,6 +404,10 @@ export default function TrungTamDieuPhoi() {
             <form onSubmit={guiBaoCao} className="bg-white p-8 rounded-[24px] shadow-sm border border-slate-200 space-y-6">
               <div><label className="block text-sm font-bold text-slate-700 mb-2">Tiêu đề báo cáo</label><input type="text" required placeholder="VD: Báo cáo hiệu suất tài xế tuần 3..." className="w-full px-4 py-3.5 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:bg-white focus:border-emerald-400 focus:ring-4 focus:ring-emerald-50 transition-all font-bold text-slate-800" value={formBaoCao?.title || ''} onChange={(e) => setFormBaoCao({...formBaoCao, title: e.target.value})} /></div>
               <div><label className="block text-sm font-bold text-slate-700 mb-2">Nội dung chi tiết</label><textarea required rows="8" placeholder="Nhập chi tiết các chỉ số..." className="w-full px-4 py-3.5 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:bg-white focus:border-emerald-400 focus:ring-4 focus:ring-emerald-50 transition-all font-medium text-slate-700 resize-none leading-relaxed" value={formBaoCao?.content || ''} onChange={(e) => setFormBaoCao({...formBaoCao, content: e.target.value})}></textarea></div>
+              <label className="block text-sm font-bold text-slate-700">Tệp đính kèm (tối đa 15 MB)
+                <input type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.csv,.txt,.jpg,.jpeg,.png,.webp" onChange={(e) => setFileBaoCao(e.target.files?.[0] || null)} className="mt-2 block w-full rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm font-medium file:mr-4 file:border-0 file:bg-emerald-100 file:px-4 file:py-2 file:font-bold file:text-emerald-700" />
+                {fileBaoCao && <span className="mt-2 block text-xs font-medium text-slate-500">Đã chọn: {fileBaoCao.name}</span>}
+              </label>
               <div className="pt-2 flex justify-end"><button type="submit" disabled={dangGuiBaoCao} className="bg-emerald-500 hover:bg-emerald-600 text-white font-bold px-8 py-3.5 rounded-xl shadow-lg shadow-emerald-200 transition-all flex items-center gap-2 disabled:opacity-70">{dangGuiBaoCao ? 'Đang Gửi...' : <><Send size={18}/> Gửi Lên Ban Giám Đốc</>}</button></div>
             </form>
           </div>

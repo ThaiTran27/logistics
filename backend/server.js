@@ -4,6 +4,7 @@ const cors = require('cors');
 const http = require('http'); 
 const { Server } = require('socket.io'); 
 const multer = require('multer');
+const crypto = require('crypto');
 const nodemailer = require('nodemailer');
 const fs = require('fs');
 const path = require('path');
@@ -16,7 +17,7 @@ app.use(express.json());
 app.use('/uploads', express.static(path.join(__dirname, 'public/uploads')));
 
 // Tự động tạo thư mục chứa ảnh nếu chưa có
-const uploadDir = './public/uploads';
+const uploadDir = path.join(__dirname, 'public/uploads');
 if (!fs.existsSync(uploadDir)){
     fs.mkdirSync(uploadDir, { recursive: true });
 }
@@ -26,13 +27,34 @@ if (!fs.existsSync(uploadDir)){
 // =========================================
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
-    cb(null, 'public/uploads/');
+    cb(null, uploadDir);
   },
   filename: function (req, file, cb) {
     cb(null, 'POD-' + Date.now() + path.extname(file.originalname));
   }
 });
 const upload = multer({ storage: storage });
+const reportStorage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    cb(null, uploadDir);
+  },
+  filename: function (req, file, cb) {
+    cb(null, 'report-' + Date.now() + '-' + crypto.randomBytes(6).toString('hex') + path.extname(file.originalname).toLowerCase());
+  }
+});
+const reportUpload = multer({
+  storage: reportStorage,
+  limits: { fileSize: 15 * 1024 * 1024 },
+  fileFilter: function (req, file, cb) {
+    const allowedExtensions = /\.(pdf|doc|docx|xls|xlsx|ppt|pptx|csv|txt|jpg|jpeg|png|webp)$/i;
+    if (!allowedExtensions.test(path.extname(file.originalname))) {
+      return cb(new Error('Định dạng tệp không được hỗ trợ.'));
+    }
+    cb(null, true);
+  }
+});
+
+const departments = ['Phòng Tài Chính', 'Phòng Điều Phối', 'Phòng Kho', 'Phòng Nhân Sự', 'Phòng Nội Dung'];
 
 const transporter = nodemailer.createTransport({
   service: 'gmail',
@@ -179,6 +201,34 @@ db.connect((err) => {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         KEY idx_job_applications_status (status, created_at)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `,
+    `
+      CREATE TABLE IF NOT EXISTS attendance_records (
+        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+        user_id INT NOT NULL,
+        work_date DATE NOT NULL,
+        check_in DATETIME DEFAULT NULL,
+        check_out DATETIME DEFAULT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        KEY idx_attendance_user_date (user_id, work_date),
+        KEY idx_attendance_work_date (work_date)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `,
+    `
+      CREATE TABLE IF NOT EXISTS employee_salaries (
+        user_id INT PRIMARY KEY,
+        monthly_salary DECIMAL(12,2) NOT NULL DEFAULT 0,
+        allowance DECIMAL(12,2) NOT NULL DEFAULT 0,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `,
+    `
+      CREATE TABLE IF NOT EXISTS department_leaders (
+        department VARCHAR(255) PRIMARY KEY,
+        user_id INT NOT NULL,
+        assigned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        KEY idx_department_leader_user (user_id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `
   ];
 
@@ -186,6 +236,18 @@ db.connect((err) => {
     db.query(sql, (createErr) => {
       if (createErr) console.error('Lỗi khởi tạo bảng:', createErr);
     });
+  });
+
+  db.query('ALTER TABLE attendance_records DROP INDEX uq_attendance_user_date, ADD INDEX idx_attendance_user_date (user_id, work_date)', (alterErr) => {
+    if (alterErr && alterErr.code !== 'ER_CANT_DROP_FIELD_OR_KEY' && alterErr.code !== 'ER_NO_SUCH_TABLE') {
+      console.error('Lỗi cập nhật chỉ mục chấm công:', alterErr);
+    }
+  });
+
+  db.query('ALTER TABLE department_reports ADD COLUMN attachment_url VARCHAR(255) DEFAULT NULL', (alterErr) => {
+    if (alterErr && alterErr.code !== 'ER_DUP_FIELDNAME') {
+      console.error('Lỗi bổ sung tệp đính kèm báo cáo:', alterErr);
+    }
   });
 
   db.query('ALTER TABLE orders ADD COLUMN length DECIMAL(8,2) DEFAULT 0', (alterErr) => {
@@ -1097,6 +1159,124 @@ app.put('/api/hr/leave/:id', (req, res) => {
   });
 });
 
+app.get('/api/attendance', (req, res) => {
+  const month = /^\d{4}-\d{2}$/.test(req.query.month || '')
+    ? req.query.month
+    : new Date().toISOString().slice(0, 7);
+  const userId = req.query.user_id ? Number(req.query.user_id) : null;
+  if (req.query.user_id && (!Number.isInteger(userId) || userId <= 0)) {
+    return res.status(400).json({ success: false, message: 'Mã nhân viên không hợp lệ.' });
+  }
+
+  const sql = `
+    SELECT a.id, a.user_id, u.full_name, u.role,
+      DATE_FORMAT(a.work_date, '%Y-%m-%d') AS work_date, a.check_in, a.check_out
+    FROM attendance_records a
+    JOIN users u ON u.id = a.user_id
+    WHERE DATE_FORMAT(a.work_date, '%Y-%m') = ? ${userId ? 'AND a.user_id = ?' : ''}
+    ORDER BY a.work_date DESC, a.id DESC, u.full_name ASC
+  `;
+  db.query(sql, userId ? [month, userId] : [month], (err, results) => {
+    if (err) return res.status(500).json({ success: false, message: err.sqlMessage });
+    res.json({ success: true, data: results });
+  });
+});
+
+app.post('/api/attendance/check-in', (req, res) => {
+  const userId = Number(req.body.user_id);
+  if (!Number.isInteger(userId) || userId <= 0) {
+    return res.status(400).json({ success: false, message: 'Mã nhân viên không hợp lệ.' });
+  }
+
+  db.query(`
+    SELECT id FROM attendance_records
+    WHERE user_id = ? AND work_date = CURDATE() AND check_in IS NOT NULL AND check_out IS NULL
+    ORDER BY id DESC LIMIT 1
+  `, [userId], (findErr, rows) => {
+    if (findErr) return res.status(500).json({ success: false, message: findErr.sqlMessage });
+    if (rows.length) {
+      return res.status(409).json({ success: false, message: 'Bạn vẫn còn một ca chưa chấm công tan ca.' });
+    }
+    const sql = `
+      INSERT INTO attendance_records (user_id, work_date, check_in)
+      VALUES (?, CURDATE(), CURRENT_TIMESTAMP)
+    `;
+    db.query(sql, [userId], (insertErr) => {
+      if (insertErr) return res.status(500).json({ success: false, message: insertErr.sqlMessage });
+      res.json({ success: true, message: 'Đã ghi nhận giờ vào.' });
+    });
+  });
+});
+
+app.post('/api/attendance/check-out', (req, res) => {
+  const userId = Number(req.body.user_id);
+  if (!Number.isInteger(userId) || userId <= 0) {
+    return res.status(400).json({ success: false, message: 'Mã nhân viên không hợp lệ.' });
+  }
+
+  db.query(`
+    SELECT id FROM attendance_records
+    WHERE user_id = ? AND work_date = CURDATE() AND check_in IS NOT NULL AND check_out IS NULL
+    ORDER BY id DESC LIMIT 1
+  `, [userId], (findErr, rows) => {
+    if (findErr) return res.status(500).json({ success: false, message: findErr.sqlMessage });
+    if (!rows.length) {
+      return res.status(409).json({ success: false, message: 'Không có ca nào đang mở để chấm công tan ca.' });
+    }
+    db.query('UPDATE attendance_records SET check_out = CURRENT_TIMESTAMP WHERE id = ? AND check_out IS NULL', [rows[0].id], (err, result) => {
+      if (err) return res.status(500).json({ success: false, message: err.sqlMessage });
+      if (!result.affectedRows) {
+        return res.status(409).json({ success: false, message: 'Ca làm này đã được chấm công tan.' });
+      }
+      res.json({ success: true, message: 'Đã ghi nhận giờ ra.' });
+    });
+  });
+});
+
+app.get('/api/hr/payroll', (req, res) => {
+  const month = /^\d{4}-\d{2}$/.test(req.query.month || '')
+    ? req.query.month
+    : new Date().toISOString().slice(0, 7);
+  const sql = `
+    SELECT u.id, u.full_name, u.email, u.role,
+      COALESCE(s.monthly_salary, 0) AS monthly_salary,
+      COALESCE(s.allowance, 0) AS allowance,
+      COUNT(DISTINCT a.work_date) AS attendance_days
+    FROM users u
+    LEFT JOIN employee_salaries s ON s.user_id = u.id
+    LEFT JOIN attendance_records a ON a.user_id = u.id AND DATE_FORMAT(a.work_date, '%Y-%m') = ?
+    WHERE u.role != 'customer'
+    GROUP BY u.id, u.full_name, u.email, u.role, s.monthly_salary, s.allowance
+    ORDER BY u.full_name ASC
+  `;
+  db.query(sql, [month], (err, results) => {
+    if (err) return res.status(500).json({ success: false, message: err.sqlMessage });
+    res.json({ success: true, data: results });
+  });
+});
+
+app.put('/api/hr/payroll/:userId', (req, res) => {
+  const userId = Number(req.params.userId);
+  const monthlySalary = Number(req.body.monthly_salary);
+  const allowance = Number(req.body.allowance || 0);
+  if (!Number.isInteger(userId) || userId <= 0 || !Number.isFinite(monthlySalary) || monthlySalary < 0 || !Number.isFinite(allowance) || allowance < 0) {
+    return res.status(400).json({ success: false, message: 'Mức lương và phụ cấp phải là số không âm.' });
+  }
+  const sql = `
+    INSERT INTO employee_salaries (user_id, monthly_salary, allowance)
+    SELECT id, ?, ? FROM users WHERE id = ? AND role != 'customer'
+    ON DUPLICATE KEY UPDATE monthly_salary = VALUES(monthly_salary), allowance = VALUES(allowance)
+  `;
+  db.query("SELECT id FROM users WHERE id = ? AND role != 'customer'", [userId], (findErr, users) => {
+    if (findErr) return res.status(500).json({ success: false, message: findErr.sqlMessage });
+    if (!users.length) return res.status(404).json({ success: false, message: 'Không tìm thấy nhân viên.' });
+    db.query(sql, [monthlySalary, allowance, userId], (err) => {
+      if (err) return res.status(500).json({ success: false, message: err.sqlMessage });
+      res.json({ success: true, message: 'Đã cập nhật mức lương.' });
+    });
+  });
+});
+
 // =========================================
 // 7. API GIÁM ĐỐC (DASHBOARD)
 // =========================================
@@ -1128,15 +1308,79 @@ app.get('/api/admin/reports', (req, res) => {
   });
 });
 
-app.post('/api/reports', (req, res) => {
+app.get('/api/admin/leaders', (req, res) => {
+  const sql = `
+    SELECT u.id, u.full_name, u.email, u.role
+    FROM users u
+    WHERE u.role != 'customer' AND u.status = 'active'
+    ORDER BY u.full_name ASC
+  `;
+  db.query(sql, (staffErr, staff) => {
+    if (staffErr) return res.status(500).json({ success: false, message: staffErr.sqlMessage });
+    db.query('SELECT department, user_id FROM department_leaders', (leadersErr, leaders) => {
+      if (leadersErr) return res.status(500).json({ success: false, message: leadersErr.sqlMessage });
+      res.json({ success: true, data: { departments, staff, leaders } });
+    });
+  });
+});
+
+app.put('/api/admin/leaders', (req, res) => {
+  const { department } = req.body;
+  const userId = Number(req.body.user_id);
+  if (!departments.includes(department) || !Number.isInteger(userId) || userId <= 0) {
+    return res.status(400).json({ success: false, message: 'Phòng ban hoặc nhân viên không hợp lệ.' });
+  }
+  const sql = `
+    INSERT INTO department_leaders (department, user_id)
+    SELECT ?, id FROM users WHERE id = ? AND role != 'customer' AND status = 'active'
+    ON DUPLICATE KEY UPDATE user_id = VALUES(user_id)
+  `;
+  db.query("SELECT id FROM users WHERE id = ? AND role != 'customer' AND status = 'active'", [userId], (findErr, users) => {
+    if (findErr) return res.status(500).json({ success: false, message: findErr.sqlMessage });
+    if (!users.length) return res.status(404).json({ success: false, message: 'Không tìm thấy nhân viên đang hoạt động.' });
+    db.query(sql, [department, userId], (err) => {
+      if (err) return res.status(500).json({ success: false, message: err.sqlMessage });
+      res.json({ success: true, message: 'Đã cập nhật trưởng phòng.' });
+    });
+  });
+});
+
+app.delete('/api/admin/leaders', (req, res) => {
+  const { department } = req.body;
+  if (!departments.includes(department)) {
+    return res.status(400).json({ success: false, message: 'Phòng ban không hợp lệ.' });
+  }
+  db.query('DELETE FROM department_leaders WHERE department = ?', [department], (err) => {
+    if (err) return res.status(500).json({ success: false, message: err.sqlMessage });
+    res.json({ success: true, message: 'Đã gỡ trưởng phòng.' });
+  });
+});
+
+app.post('/api/reports', (req, res, next) => {
+  reportUpload.single('attachment')(req, res, (uploadErr) => {
+    if (uploadErr) {
+      const message = uploadErr.code === 'LIMIT_FILE_SIZE'
+        ? 'Tệp đính kèm không được vượt quá 15 MB.'
+        : uploadErr.message === 'Định dạng tệp không được hỗ trợ.'
+          ? uploadErr.message
+          : 'Không thể tải tệp lên.';
+      return res.status(400).json({ success: false, message });
+    }
+    next();
+  });
+}, (req, res) => {
   const { created_by, department, title, content } = req.body;
-  const sql = 'INSERT INTO department_reports (created_by, department, title, content, status) VALUES (?, ?, ?, ?, "pending")';
-  db.query(sql, [created_by, department, title, content], (err, result) => {
+  if (!created_by || !department || !title || !content) {
+    return res.status(400).json({ success: false, message: 'Vui lòng nhập đầy đủ thông tin báo cáo.' });
+  }
+  const attachmentUrl = req.file ? `/uploads/${req.file.filename}` : null;
+  const sql = 'INSERT INTO department_reports (created_by, department, title, content, attachment_url, status) VALUES (?, ?, ?, ?, ?, "pending")';
+  db.query(sql, [created_by, department, title, content, attachmentUrl], (err, result) => {
     if (err) {
       console.error("Lỗi Database khi gửi báo cáo:", err);
       return res.status(500).json({ success: false, message: 'Lỗi MySQL: ' + err.sqlMessage });
     }
-    res.json({ success: true, message: 'Đã gửi báo cáo cho Giám đốc!' });
+    res.json({ success: true, message: 'Đã gửi báo cáo cho Giám đốc!', reportId: result.insertId });
   });
 });
 

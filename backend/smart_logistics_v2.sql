@@ -12,6 +12,9 @@ DROP TABLE IF EXISTS cod_settlements;
 DROP TABLE IF EXISTS order_status_history;
 DROP TABLE IF EXISTS service_requests;
 DROP TABLE IF EXISTS job_applications;
+DROP TABLE IF EXISTS attendance_records;
+DROP TABLE IF EXISTS employee_salaries;
+DROP TABLE IF EXISTS department_leaders;
 DROP TABLE IF EXISTS leave_requests;
 DROP TABLE IF EXISTS department_reports;
 DROP TABLE IF EXISTS news_articles;
@@ -165,8 +168,34 @@ CREATE TABLE department_reports (
   department VARCHAR(255) NOT NULL,
   title VARCHAR(255) NOT NULL,
   content TEXT NOT NULL,
+  attachment_url VARCHAR(255) DEFAULT NULL,
   status VARCHAR(30) DEFAULT 'pending',
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE attendance_records (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  user_id INT NOT NULL,
+  work_date DATE NOT NULL,
+  check_in DATETIME DEFAULT NULL,
+  check_out DATETIME DEFAULT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_attendance_user_date (user_id, work_date),
+  KEY idx_attendance_work_date (work_date)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE employee_salaries (
+  user_id INT PRIMARY KEY,
+  monthly_salary DECIMAL(12,2) NOT NULL DEFAULT 0,
+  allowance DECIMAL(12,2) NOT NULL DEFAULT 0,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE department_leaders (
+  department VARCHAR(255) PRIMARY KEY,
+  user_id INT NOT NULL,
+  assigned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  KEY idx_department_leader_user (user_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE leave_requests (
@@ -187,6 +216,19 @@ INSERT INTO users (email, password, full_name, role, status) VALUES
   ('taixe1@smartlogistics.vn', 'driver123', 'Nguyễn Văn Bửu Tài', 'driver', 'active'),
   ('content@smartlogistics.vn', 'content123', 'Phòng ban nội dung', 'content_manager', 'active');
 
+INSERT INTO users (email, password, full_name, role, status) VALUES
+  ('taixe2@smartlogistics.vn', 'driver123', 'Bùi Quang Huy', 'driver', 'active'),
+  ('taixe3@smartlogistics.vn', 'driver123', 'Lê Hoàng Nam', 'driver', 'active'),
+  ('taixe4@smartlogistics.vn', 'driver123', 'Phạm Quốc Đạt', 'driver', 'active'),
+  ('kho2@smartlogistics.vn', 'staff123', 'Võ Khánh Linh', 'warehouse_manager', 'active'),
+  ('dieu_hanh2@smartlogistics.vn', 'staff123', 'Lê Gia Bảo', 'fleet_manager', 'active'),
+  ('ketoan2@smartlogistics.vn', 'staff123', 'Phạm Hải Yến', 'accountant', 'active'),
+  ('hr2@smartlogistics.vn', 'staff123', 'Nguyễn Ngọc Mai', 'hr_manager', 'active'),
+  ('content2@smartlogistics.vn', 'staff123', 'Đặng Thu Hà', 'content_manager', 'active'),
+  ('shop2@smartlogistics.vn', 'shop123', 'Công ty Minh Long', 'shop', 'active')
+ON DUPLICATE KEY UPDATE
+  full_name = VALUES(full_name), role = VALUES(role), status = VALUES(status);
+
 INSERT INTO orders (
   tracking_code, shop_id, shipper_id, receiver_name, receiver_phone, receiver_address,
   customer_email, cod_amount, shipping_fee, weight_kg, width, height, item_value,
@@ -197,6 +239,37 @@ INSERT INTO orders (
   1000000.00, 420000.00, 1.00, 0.00, 0.00, 0.00,
   0.00, 0, 'standard', 0, 0, NULL, NULL, 'pending'
 );
+
+INSERT INTO orders (
+  tracking_code, shop_id, shipper_id, receiver_name, receiver_phone, receiver_address,
+  customer_email, cod_amount, shipping_fee, weight_kg, service_type, status
+)
+SELECT seed_orders.tracking_code, shop.id, driver.id, seed_orders.receiver_name,
+  seed_orders.receiver_phone, seed_orders.receiver_address, seed_orders.customer_email,
+  seed_orders.cod_amount, seed_orders.shipping_fee, seed_orders.weight_kg,
+  seed_orders.service_type, seed_orders.status
+FROM (
+  SELECT 'SLTEST260901VN' AS tracking_code, 'shop2@smartlogistics.vn' AS shop_email, 'taixe2@smartlogistics.vn' AS driver_email,
+    'Nguyễn Thị Mai' AS receiver_name, '0901000001' AS receiver_phone, 'Quận 1, TP. Hồ Chí Minh' AS receiver_address,
+    'khach01@example.com' AS customer_email, 850000 AS cod_amount, 28000 AS shipping_fee, 1.2 AS weight_kg, 'standard' AS service_type, 'picking' AS status
+  UNION ALL SELECT 'SLTEST260902VN', 'shop2@smartlogistics.vn', 'taixe2@smartlogistics.vn', 'Trần Quốc Bảo', '0901000002', 'Quận 3, TP. Hồ Chí Minh', 'khach02@example.com', 1250000, 32000, 2.0, 'express', 'delivering'
+  UNION ALL SELECT 'SLTEST260903VN', 'shop@smartlogistics.vn', 'taixe3@smartlogistics.vn', 'Lê Minh Châu', '0901000003', 'Thủ Đức, TP. Hồ Chí Minh', 'khach03@example.com', 450000, 25000, 0.8, 'standard', 'completed'
+  UNION ALL SELECT 'SLTEST260904VN', 'shop@smartlogistics.vn', 'taixe3@smartlogistics.vn', 'Phạm Gia Hân', '0901000004', 'Dĩ An, Bình Dương', 'khach04@example.com', 720000, 35000, 1.5, 'economy', 'returning'
+  UNION ALL SELECT 'SLTEST260905VN', 'shop2@smartlogistics.vn', 'taixe4@smartlogistics.vn', 'Võ Thành Đạt', '0901000005', 'Gò Vấp, TP. Hồ Chí Minh', 'khach05@example.com', 2000000, 30000, 3.0, 'express', 'delivering'
+  UNION ALL SELECT 'SLTEST260906VN', 'shop@smartlogistics.vn', '', 'Ngô Thanh Tùng', '0901000006', 'Biên Hòa, Đồng Nai', 'khach06@example.com', 310000, 42000, 0.5, 'economy', 'in_warehouse'
+  UNION ALL SELECT 'SLTEST260907VN', 'shop2@smartlogistics.vn', '', 'Đặng Thu Trang', '0901000007', 'Quận 7, TP. Hồ Chí Minh', 'khach07@example.com', 980000, 29000, 1.0, 'standard', 'pending'
+  UNION ALL SELECT 'SLTEST260908VN', 'shop2@smartlogistics.vn', 'taixe4@smartlogistics.vn', 'Hoàng Minh Đức', '0901000008', 'Tân Bình, TP. Hồ Chí Minh', 'khach08@example.com', 560000, 26000, 1.1, 'standard', 'completed'
+) AS seed_orders
+JOIN users shop ON shop.email = seed_orders.shop_email
+LEFT JOIN users driver ON driver.email = seed_orders.driver_email
+WHERE NOT EXISTS (SELECT 1 FROM orders existing WHERE existing.tracking_code = seed_orders.tracking_code);
+
+INSERT INTO driver_routes (order_id, shipper_id, route_status)
+SELECT o.id, o.shipper_id, 'assigned'
+FROM orders o
+WHERE o.tracking_code IN ('SLTEST260901VN', 'SLTEST260902VN', 'SLTEST260905VN')
+  AND o.shipper_id IS NOT NULL
+  AND NOT EXISTS (SELECT 1 FROM driver_routes route WHERE route.order_id = o.id);
 
 INSERT INTO news_articles (title, slug, summary, content, image_url, category, status, created_by) VALUES
   (
@@ -230,10 +303,190 @@ INSERT INTO news_articles (title, slug, summary, content, image_url, category, s
     'content_team'
   );
 
+INSERT INTO news_articles (title, slug, summary, content, image_url, category, status, created_by)
+SELECT 'Hướng dẫn chuẩn bị hàng trước khi gửi', 'huong-dan-chuan-bi-hang-truoc-khi-gui',
+  'Các bước đóng gói giúp hàng hóa an toàn và rút ngắn thời gian xử lý tại kho.',
+  '<p>Chọn thùng vừa kích thước, chèn vật liệu chống sốc và dán kín các cạnh.</p><p>Ghi rõ mã đơn bên ngoài kiện hàng và tách riêng hàng dễ vỡ để được xử lý phù hợp.</p>',
+  'https://images.unsplash.com/photo-1607082349566-187342175e2f?auto=format&fit=crop&w=1200&q=80',
+  'Hướng dẫn', 'published', 'content_team'
+WHERE NOT EXISTS (SELECT 1 FROM news_articles WHERE slug = 'huong-dan-chuan-bi-hang-truoc-khi-gui');
+
+INSERT INTO news_articles (title, slug, summary, content, image_url, category, status, created_by)
+SELECT 'Mở rộng mạng lưới giao nhận khu vực phía Nam', 'mo-rong-mang-luoi-giao-nhan-phia-nam',
+  'Smart Logistics bổ sung điểm trung chuyển để tăng tốc độ giao hàng liên tỉnh.',
+  '<p>Điểm trung chuyển mới giúp các tuyến nội vùng được phân loại sớm hơn.</p><p>Đội điều phối sẽ theo dõi sản lượng theo ngày để điều chỉnh lịch xe linh hoạt.</p>',
+  'https://images.unsplash.com/photo-1586528116311-ad8ed7c663be?auto=format&fit=crop&w=1200&q=80',
+  'Tin tức', 'published', 'content_team'
+WHERE NOT EXISTS (SELECT 1 FROM news_articles WHERE slug = 'mo-rong-mang-luoi-giao-nhan-phia-nam');
+
+INSERT INTO news_articles (title, slug, summary, content, image_url, category, status, created_by)
+SELECT 'Quy trình đối soát COD minh bạch', 'quy-trinh-doi-soat-cod-minh-bach',
+  'Shop có thể kiểm tra số đơn, số tiền thu hộ và lịch sử thanh toán theo từng đợt.',
+  '<p>Mỗi đợt đối soát tổng hợp đơn giao thành công và số tiền tài xế đã thu.</p><p>Vui lòng đối chiếu mã vận đơn trước khi xác nhận thanh toán.</p>',
+  'https://images.unsplash.com/photo-1556742049-0cfed4f6a45d?auto=format&fit=crop&w=1200&q=80',
+  'Hướng dẫn', 'published', 'content_team'
+WHERE NOT EXISTS (SELECT 1 FROM news_articles WHERE slug = 'quy-trinh-doi-soat-cod-minh-bach');
+
+INSERT INTO news_articles (title, slug, summary, content, image_url, category, status, created_by)
+SELECT 'Tuyển tài xế giao nhận trong tháng 10', 'tuyen-tai-xe-giao-nhan-thang-10',
+  'Smart Logistics mở rộng đội giao nhận và tiếp nhận hồ sơ tài xế toàn thời gian.',
+  '<p>Ứng viên cần có giấy phép lái xe phù hợp, điện thoại thông minh và thông tin cư trú rõ ràng.</p><p>Hồ sơ có thể gửi qua trang Tuyển dụng để bộ phận nhân sự liên hệ.</p>',
+  'https://images.unsplash.com/photo-1516321318423-f06f85e504b3?auto=format&fit=crop&w=1200&q=80',
+  'Tuyển dụng', 'published', 'content_team'
+WHERE NOT EXISTS (SELECT 1 FROM news_articles WHERE slug = 'tuyen-tai-xe-giao-nhan-thang-10');
+
+INSERT INTO news_articles (title, slug, summary, content, image_url, category, status, created_by)
+SELECT 'Quét mã vạch giúp kiểm soát tồn kho', 'quet-ma-vach-kiem-soat-ton-kho',
+  'Quy trình quét mã đồng bộ trạng thái kiện hàng giữa kho và đội điều phối.',
+  '<p>Mỗi lần nhận, xuất hoặc phân loại kiện hàng cần quét mã vận đơn để cập nhật trạng thái.</p><p>Thao tác này giúp giảm nhập liệu thủ công và dễ tra soát khi phát sinh chênh lệch.</p>',
+  'https://images.unsplash.com/photo-1580674285054-bed31e145f59?auto=format&fit=crop&w=1200&q=80',
+  'Công nghệ', 'published', 'content_team'
+WHERE NOT EXISTS (SELECT 1 FROM news_articles WHERE slug = 'quet-ma-vach-kiem-soat-ton-kho');
+
+INSERT INTO job_applications (job_title, full_name, email, phone, experience, message, status)
+SELECT 'Tài xế giao nhận', 'Đỗ Minh Phúc', 'ungvien.phuc@example.com', '0902000001',
+  '3 năm giao hàng nội thành, thông thạo các tuyến TP. Hồ Chí Minh.', 'Có thể nhận việc theo ca sáng.', 'new'
+WHERE NOT EXISTS (SELECT 1 FROM job_applications WHERE email = 'ungvien.phuc@example.com');
+
+INSERT INTO job_applications (job_title, full_name, email, phone, experience, message, status)
+SELECT 'Nhân viên điều phối', 'Nguyễn Hà My', 'ungvien.my@example.com', '0902000002',
+  '2 năm theo dõi đơn hàng và điều phối đội giao nhận.', 'Mong muốn làm việc tại văn phòng TP. Hồ Chí Minh.', 'reviewing'
+WHERE NOT EXISTS (SELECT 1 FROM job_applications WHERE email = 'ungvien.my@example.com');
+
+INSERT INTO job_applications (job_title, full_name, email, phone, experience, message, status)
+SELECT 'Nhân viên kho', 'Trần Đức Long', 'ungvien.long@example.com', '0902000003',
+  'Từng kiểm kê và phân loại hàng hóa tại kho thương mại điện tử.', 'Có thể làm việc theo ca.', 'accepted'
+WHERE NOT EXISTS (SELECT 1 FROM job_applications WHERE email = 'ungvien.long@example.com');
+
+INSERT INTO service_requests (plan_name, full_name, email, phone, message, status)
+SELECT 'Doanh nghiệp', 'Lê Thanh Bình', 'shop.binh@example.com', '0903000001',
+  'Cần tư vấn bảng giá giao hàng liên tỉnh cho khoảng 500 đơn mỗi tháng.', 'new'
+WHERE NOT EXISTS (SELECT 1 FROM service_requests WHERE email = 'shop.binh@example.com');
+
+INSERT INTO service_requests (plan_name, full_name, email, phone, message, status)
+SELECT 'Cửa hàng trực tuyến', 'Phạm Ngọc Anh', 'shop.anh@example.com', '0903000002',
+  'Muốn kết nối quy trình lấy hàng hằng ngày và đối soát COD.', 'contacted'
+WHERE NOT EXISTS (SELECT 1 FROM service_requests WHERE email = 'shop.anh@example.com');
+
+INSERT INTO service_requests (plan_name, full_name, email, phone, message, status)
+SELECT 'Tiết kiệm', 'Võ Hoàng Sơn', 'shop.son@example.com', '0903000003',
+  'Đang so sánh chi phí giao hàng cho cửa hàng mới mở.', 'closed'
+WHERE NOT EXISTS (SELECT 1 FROM service_requests WHERE email = 'shop.son@example.com');
+
+INSERT INTO leave_requests (user_id, reason, status)
+SELECT u.id, 'Xin nghỉ phép một ngày để giải quyết việc gia đình.', 'pending'
+FROM users u
+WHERE u.email = 'taixe2@smartlogistics.vn'
+  AND NOT EXISTS (SELECT 1 FROM leave_requests l WHERE l.user_id = u.id AND l.reason = 'Xin nghỉ phép một ngày để giải quyết việc gia đình.');
+
+INSERT INTO leave_requests (user_id, reason, status)
+SELECT u.id, 'Xin đổi ca và nghỉ phép ngày thứ Bảy tuần này.', 'pending'
+FROM users u
+WHERE u.email = 'kho2@smartlogistics.vn'
+  AND NOT EXISTS (SELECT 1 FROM leave_requests l WHERE l.user_id = u.id AND l.reason = 'Xin đổi ca và nghỉ phép ngày thứ Bảy tuần này.');
+
+INSERT INTO leave_requests (user_id, reason, status)
+SELECT u.id, 'Đề nghị nghỉ phép đã được quản lý xác nhận.', 'approved'
+FROM users u
+WHERE u.email = 'taixe3@smartlogistics.vn'
+  AND NOT EXISTS (SELECT 1 FROM leave_requests l WHERE l.user_id = u.id AND l.reason = 'Đề nghị nghỉ phép đã được quản lý xác nhận.');
+
 INSERT INTO leave_requests (user_id, reason, status) VALUES
   (7, 'Xin nghỉ phép 1 ngày do gia đình có việc cần xử lý.', 'approved');
 
 INSERT INTO department_reports (created_by, department, title, content, status) VALUES
   (1, 'Phòng Điều Phối', 'Báo cáo hoạt động tuần', 'Tuần này có 18 đơn hàng mới, trong đó 3 đơn chậm do thời tiết.', 'pending');
+
+INSERT INTO attendance_records (user_id, work_date, check_in, check_out)
+SELECT u.id,
+  DATE_SUB(CURDATE(), INTERVAL 1 DAY),
+  TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 1 DAY), '08:00:00'),
+  TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 1 DAY), CASE WHEN u.id IN (1, 7) THEN '12:00:00' ELSE '17:00:00' END)
+FROM users u
+WHERE u.role != 'customer'
+  AND NOT EXISTS (
+    SELECT 1 FROM attendance_records a
+    WHERE a.user_id = u.id
+      AND a.work_date = DATE_SUB(CURDATE(), INTERVAL 1 DAY)
+      AND a.check_in = TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 1 DAY), '08:00:00')
+  );
+
+INSERT INTO attendance_records (user_id, work_date, check_in, check_out)
+SELECT u.id,
+  DATE_SUB(CURDATE(), INTERVAL 1 DAY),
+  TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 1 DAY), '13:00:00'),
+  TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 1 DAY), '17:00:00')
+FROM users u
+WHERE u.id IN (1, 7)
+  AND NOT EXISTS (
+    SELECT 1 FROM attendance_records a
+    WHERE a.user_id = u.id
+      AND a.work_date = DATE_SUB(CURDATE(), INTERVAL 1 DAY)
+      AND a.check_in = TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 1 DAY), '13:00:00')
+  );
+
+INSERT INTO attendance_records (user_id, work_date, check_in, check_out)
+SELECT u.id,
+  DATE_SUB(CURDATE(), INTERVAL 2 DAY),
+  TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 2 DAY), '08:00:00'),
+  TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 2 DAY), '17:00:00')
+FROM users u
+WHERE u.role != 'customer'
+  AND NOT EXISTS (
+    SELECT 1 FROM attendance_records a
+    WHERE a.user_id = u.id
+      AND a.work_date = DATE_SUB(CURDATE(), INTERVAL 2 DAY)
+      AND a.check_in = TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL 2 DAY), '08:00:00')
+  );
+
+INSERT INTO employee_salaries (user_id, monthly_salary, allowance)
+SELECT id,
+  CASE role
+    WHEN 'director' THEN 45000000
+    WHEN 'hr_manager' THEN 18000000
+    WHEN 'fleet_manager' THEN 20000000
+    WHEN 'accountant' THEN 16000000
+    WHEN 'warehouse_manager' THEN 15000000
+    WHEN 'shop' THEN 12000000
+    WHEN 'driver' THEN 12000000
+    WHEN 'content_manager' THEN 15000000
+    ELSE 10000000
+  END,
+  CASE role
+    WHEN 'director' THEN 10000000
+    WHEN 'hr_manager' THEN 3000000
+    WHEN 'fleet_manager' THEN 4000000
+    WHEN 'accountant' THEN 2500000
+    WHEN 'warehouse_manager' THEN 2000000
+    WHEN 'shop' THEN 1500000
+    WHEN 'driver' THEN 4000000
+    WHEN 'content_manager' THEN 2000000
+    ELSE 0
+  END
+FROM users
+WHERE role != 'customer'
+ON DUPLICATE KEY UPDATE
+  monthly_salary = IF(employee_salaries.monthly_salary = 0, VALUES(monthly_salary), employee_salaries.monthly_salary),
+  allowance = IF(employee_salaries.allowance = 0, VALUES(allowance), employee_salaries.allowance);
+
+INSERT INTO department_leaders (department, user_id) VALUES
+  ('Phòng Tài Chính', 4),
+  ('Phòng Điều Phối', 3),
+  ('Phòng Kho', 5),
+  ('Phòng Nhân Sự', 2),
+  ('Phòng Nội Dung', 8)
+ON DUPLICATE KEY UPDATE user_id = VALUES(user_id);
+
+INSERT INTO department_reports (created_by, department, title, content, status)
+SELECT 3, 'Phòng Điều Phối', 'Báo cáo điều phối tuần mẫu', 'Đã xử lý 42 đơn hàng; 38 đơn giao thành công, 4 đơn đang chờ xác nhận. Hai tài xế hoàn thành tuyến đúng kế hoạch.', 'pending'
+WHERE NOT EXISTS (SELECT 1 FROM department_reports WHERE title = 'Báo cáo điều phối tuần mẫu');
+
+INSERT INTO department_reports (created_by, department, title, content, status)
+SELECT 2, 'Phòng Nhân Sự', 'Tổng hợp chấm công tháng mẫu', 'Tỷ lệ đi làm đúng giờ đạt 96%. Đã ghi nhận hai ca trong ngày cho giám đốc và tài xế để kiểm tra quy trình chấm công nhiều ca.', 'approved'
+WHERE NOT EXISTS (SELECT 1 FROM department_reports WHERE title = 'Tổng hợp chấm công tháng mẫu');
+
+INSERT INTO department_reports (created_by, department, title, content, status)
+SELECT 5, 'Phòng Kho', 'Đề xuất kiểm kê kho mẫu', 'Đề xuất kiểm kê bổ sung nhóm hàng tồn quá 30 ngày và đối chiếu số liệu trước khi chốt báo cáo tuần.', 'rejected'
+WHERE NOT EXISTS (SELECT 1 FROM department_reports WHERE title = 'Đề xuất kiểm kê kho mẫu');
 
 SELECT 'Database smart_logistics_v2 đã được khởi tạo thành công!' AS status;
