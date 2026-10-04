@@ -155,12 +155,14 @@ export default function QuanLyDonHang() {
     shop_province: 'Thành phố Hồ Chí Minh',
     shop_lat: 10.762622,
     shop_lng: 106.660172,
+    shop_location_verified: false,
     receiver_name: '', 
     receiver_phone: '', 
     customer_email: '',
     receiver_address: '', 
     receiver_lat: null,
     receiver_lng: null,
+    receiver_location_verified: false,
     destination_province: 'Thành phố Hồ Chí Minh',
     cod_amount: '',
     weight_kg: '1',
@@ -280,7 +282,6 @@ export default function QuanLyDonHang() {
     const volume = Number(length) * Number(width) * Number(height);
     const dist = Number(distance_km) || 0;
 
-    if (dist > 500 || actualWeight > 50 || volume > 150000) return 'airplane';
     if (dist > 180 || actualWeight > 25 || volume > 60000) return 'truck';
     if (dist > 80 || actualWeight > 8 || volume > 30000) return 'van';
     return 'motorbike';
@@ -368,7 +369,7 @@ export default function QuanLyDonHang() {
     const insuranceFee = value > 1000000 ? value * 0.005 : 0;
     const remoteFee = isRemote ? 22000 : 0;
     const fragileFee = isFragile ? 12000 : 0;
-    const vehicleFactor = selectedVehicleType === 'truck' ? 1.35 : selectedVehicleType === 'van' ? 1.2 : selectedVehicleType === 'airplane' ? 2.6 : 1;
+    const vehicleFactor = selectedVehicleType === 'truck' ? 1.4 : selectedVehicleType === 'van' ? 1.2 : 1;
     const regionOf = (province = '') => {
       const name = province.toLowerCase();
       if (/hà nội|bắc|phú thọ|thái nguyên|quảng ninh|hải phòng|nam định|ninh bình|tuyên quang|lào cai|sơn la|điện biên|lai châu|cao bằng|lạng sơn|bắc giang|bắc ninh|hưng yên|thái bình|vĩnh phúc/.test(name)) return 'north';
@@ -413,7 +414,7 @@ export default function QuanLyDonHang() {
       });
       const data = await res.json();
       const detail = data?.display_name || 'Địa điểm đã chọn trên bản đồ';
-      setForm((prev) => ({ ...prev, shop_address: detail, shop_lat: lat, shop_lng: lng }));
+      setForm((prev) => ({ ...prev, shop_address: detail, shop_lat: lat, shop_lng: lng, shop_location_verified: true }));
       setShopMapSearch(detail);
     } catch (error) {
       console.error('Không lấy được địa chỉ từ bản đồ:', error);
@@ -480,14 +481,14 @@ export default function QuanLyDonHang() {
     const lat = Number(place.lat);
     const lng = Number(place.lon);
     const displayName = place.display_name || 'Địa điểm đã chọn';
-    setForm((prev) => ({ ...prev, shop_address: displayName, shop_lat: lat, shop_lng: lng }));
+    setForm((prev) => ({ ...prev, shop_address: displayName, shop_lat: lat, shop_lng: lng, shop_location_verified: !String(place.place_id).startsWith('fallback-') }));
     setShopMapSearch(displayName);
     setShopSuggestions([]);
     setShowShopMap(true);
   };
 
   const updateReceiverLocationFromMap = async (lat, lng) => {
-    setForm((prev) => ({ ...prev, receiver_lat: lat, receiver_lng: lng }));
+    setForm((prev) => ({ ...prev, receiver_lat: lat, receiver_lng: lng, receiver_location_verified: true }));
 
     try {
       const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}&zoom=18&addressdetails=1`, {
@@ -495,7 +496,7 @@ export default function QuanLyDonHang() {
       });
       const data = await res.json();
       const detail = data?.display_name || 'Địa điểm giao hàng đã chọn';
-      setForm((prev) => ({ ...prev, receiver_address: detail, receiver_lat: lat, receiver_lng: lng }));
+      setForm((prev) => ({ ...prev, receiver_address: detail, receiver_lat: lat, receiver_lng: lng, receiver_location_verified: true }));
       setReceiverMapSearch(detail);
     } catch (error) {
       console.error('Không lấy được địa chỉ giao hàng từ bản đồ:', error);
@@ -530,7 +531,7 @@ export default function QuanLyDonHang() {
     const lat = Number(place.lat);
     const lng = Number(place.lon);
     const displayName = place.display_name || 'Địa điểm giao hàng đã chọn';
-    setForm((prev) => ({ ...prev, receiver_address: displayName, receiver_lat: lat, receiver_lng: lng }));
+    setForm((prev) => ({ ...prev, receiver_address: displayName, receiver_lat: lat, receiver_lng: lng, receiver_location_verified: !String(place.place_id).startsWith('fallback-') }));
     setReceiverMapSearch(displayName);
     setReceiverSuggestions([]);
     setShowReceiverMap(true);
@@ -538,6 +539,9 @@ export default function QuanLyDonHang() {
 
   const taoDonMoi = async (e) => {
     e.preventDefault();
+    if (!form.shop_location_verified || !form.receiver_location_verified) {
+      return alert('Vui lòng chọn đúng vị trí Shop và điểm giao trên bản đồ để hệ thống định tuyến qua kho con.');
+    }
     const tracking_code = 'VTP' + Math.floor(100000 + Math.random() * 900000) + 'VN'; // Dùng VTP cho chuẩn style
     
     try {
@@ -585,7 +589,7 @@ export default function QuanLyDonHang() {
         setShippingFee(confirmedFee);
         alert(`Tạo đơn thành công! Mã vận đơn: ${tracking_code} | Cước phí: ${confirmedFee.toLocaleString()} đ`);
         setForm({ 
-          shop_address: '', shop_province: 'Thành phố Hồ Chí Minh', shop_lat: 10.762622, shop_lng: 106.660172, receiver_name: '', receiver_phone: '', receiver_address: '', receiver_lat: null, receiver_lng: null, destination_province: 'Thành phố Hồ Chí Minh', cod_amount: '', 
+          shop_address: '', shop_province: 'Thành phố Hồ Chí Minh', shop_lat: 10.762622, shop_lng: 106.660172, shop_location_verified: false, receiver_name: '', receiver_phone: '', receiver_address: '', receiver_lat: null, receiver_lng: null, receiver_location_verified: false, destination_province: 'Thành phố Hồ Chí Minh', cod_amount: '', 
           customer_email: '',
           weight_kg: '1', length: '10', width: '10', height: '10', item_value: '0', 
           distance_km: '5', is_remote_area: false, service_type: 'standard', vehicle_type: 'motorbike', is_fragile: false 
@@ -616,6 +620,11 @@ export default function QuanLyDonHang() {
       case 'pending': return <span className="bg-amber-100 text-amber-700 px-3 py-1.5 rounded-lg text-xs font-bold uppercase flex items-center gap-1.5 w-fit"><Clock size={14}/> Chờ xử lý</span>;
       case 'picking': return <span className="bg-blue-100 text-blue-700 px-3 py-1.5 rounded-lg text-xs font-bold uppercase flex items-center gap-1.5 w-fit"><PackageSearch size={14}/> Lấy hàng</span>;
       case 'picked_up': return <span className="bg-cyan-100 text-cyan-700 px-3 py-1.5 rounded-lg text-xs font-bold uppercase flex items-center gap-1.5 w-fit"><PackageSearch size={14}/> Đã lấy, chờ nhập kho</span>;
+      case 'at_origin_warehouse': return <span className="bg-purple-100 text-purple-700 px-3 py-1.5 rounded-lg text-xs font-bold uppercase flex items-center gap-1.5 w-fit"><Box size={14}/> Đã về kho con nguồn</span>;
+      case 'transferring_to_central': return <span className="bg-blue-100 text-blue-700 px-3 py-1.5 rounded-lg text-xs font-bold uppercase flex items-center gap-1.5 w-fit"><Truck size={14}/> Đang về kho tổng</span>;
+      case 'at_central_warehouse': return <span className="bg-purple-100 text-purple-700 px-3 py-1.5 rounded-lg text-xs font-bold uppercase flex items-center gap-1.5 w-fit"><Box size={14}/> Đang phân luồng tại kho tổng</span>;
+      case 'transferring_to_destination': return <span className="bg-blue-100 text-blue-700 px-3 py-1.5 rounded-lg text-xs font-bold uppercase flex items-center gap-1.5 w-fit"><Truck size={14}/> Đang về kho con đích</span>;
+      case 'at_destination_warehouse': return <span className="bg-purple-100 text-purple-700 px-3 py-1.5 rounded-lg text-xs font-bold uppercase flex items-center gap-1.5 w-fit"><Box size={14}/> Đã tới kho con đích</span>;
       case 'in_warehouse': return <span className="bg-purple-100 text-purple-700 px-3 py-1.5 rounded-lg text-xs font-bold uppercase flex items-center gap-1.5 w-fit"><Box size={14}/> Đã nhập kho</span>;
       case 'delivering': return <span className="bg-indigo-100 text-indigo-700 px-3 py-1.5 rounded-lg text-xs font-bold uppercase flex items-center gap-1.5 w-fit"><Truck size={14}/> Đang giao</span>;
       case 'completed': return <span className="bg-emerald-100 text-emerald-700 px-3 py-1.5 rounded-lg text-xs font-bold uppercase flex items-center gap-1.5 w-fit"><CheckCircle size={14}/> Thành công</span>;
@@ -630,17 +639,16 @@ export default function QuanLyDonHang() {
       { id: 'pending', name: 'Chờ Xử Lý', desc: 'Đơn hàng mới tạo từ Cửa hàng', icon: <Clock size={18} /> },
       { id: 'picking', name: 'Đang Lấy Hàng', desc: 'Tài xế đã nhận việc và đang đến lấy', icon: <PackageSearch size={18} /> },
       { id: 'picked_up', name: 'Đã Lấy Hàng', desc: 'Tài xế đang bàn giao kiện hàng cho kho', icon: <PackageSearch size={18} /> },
-      { id: 'in_warehouse', name: 'Đã Nhập Kho', desc: 'Hàng đã về hệ thống kho bãi', icon: <Box size={18} /> },
+      { id: 'at_origin_warehouse', name: 'Kho Con Nguồn', desc: 'Hàng đã được nhận tại kho con theo phường lấy', icon: <Box size={18} /> },
+      { id: 'transferring_to_central', name: 'Về Kho Tổng', desc: 'Tài xế trung chuyển đưa hàng về kho tổng', icon: <Truck size={18} /> },
+      { id: 'at_central_warehouse', name: 'Phân Luồng Tại Kho Tổng', desc: 'Hàng được tổng hợp và phân về kho con đích', icon: <Box size={18} /> },
+      { id: 'transferring_to_destination', name: 'Về Kho Con Đích', desc: 'Tài xế trung chuyển đưa hàng tới kho con giao', icon: <Truck size={18} /> },
+      { id: 'at_destination_warehouse', name: 'Kho Con Đích', desc: 'Hàng chờ tài xế giao nhận tại phường đích', icon: <Box size={18} /> },
       { id: 'delivering', name: 'Đang Giao Hàng', desc: 'Shipper đang mang hàng đến khách', icon: <Truck size={18} /> },
       { id: 'completed', name: 'Giao Thành Công', desc: 'Khách đã nhận và thanh toán COD', icon: <CheckCircle size={18} /> }
     ];
 
-    let mucHienTai = 0;
-    if (status === 'picking') mucHienTai = 1;
-    if (status === 'picked_up') mucHienTai = 2;
-    if (status === 'in_warehouse') mucHienTai = 3;
-    if (status === 'delivering') mucHienTai = 4;
-    if (status === 'completed') mucHienTai = 5;
+    const mucHienTai = cacBuoc.findIndex((buoc) => buoc.id === status);
 
     if (status === 'cancelled' || status === 'returning') {
       return (
@@ -813,7 +821,6 @@ export default function QuanLyDonHang() {
                       { value: 'motorbike', label: 'Xe máy', note: 'Giao nhanh trong thành phố' },
                       { value: 'van', label: 'Xe van', note: 'Phù hợp hàng vừa' },
                       { value: 'truck', label: 'Xe tải', note: 'Giao hàng nặng / xa' },
-                      { value: 'airplane', label: 'Máy bay', note: 'Cho tuyến quốc tế / đường dài' }
                     ].map((vehicle) => (
                       <button
                         key={vehicle.value}
@@ -876,7 +883,7 @@ export default function QuanLyDonHang() {
                         <textarea rows="2" required
                           className="w-full pl-11 pr-4 py-3.5 bg-slate-50 border-2 border-transparent rounded-xl outline-none focus:bg-white focus:border-blue-400 transition-all font-medium resize-none"
                           placeholder="Số nhà, tên đường, quận/huyện..."
-                          value={form.shop_address} onChange={e => setForm({...form, shop_address: e.target.value})}
+                          value={form.shop_address} onChange={e => setForm({...form, shop_address: e.target.value, shop_location_verified: false})}
                         ></textarea>
                       </div>
                       <div className="mt-3 flex items-center justify-between gap-3 flex-wrap">
@@ -888,7 +895,7 @@ export default function QuanLyDonHang() {
                           <MapPinned size={16} /> {showShopMap ? 'Ẩn bản đồ' : 'Chọn trên bản đồ'}
                         </button>
                         <span className="text-xs text-slate-500 font-medium">
-                          {form.shop_lat && form.shop_lng ? `Vị trí: ${form.shop_lat.toFixed(5)}, ${form.shop_lng.toFixed(5)}` : 'Chưa chọn vị trí'}
+                          {form.shop_location_verified ? `Đã xác nhận: ${form.shop_lat.toFixed(5)}, ${form.shop_lng.toFixed(5)}` : 'Chưa xác nhận vị trí Shop'}
                         </span>
                       </div>
 
@@ -937,7 +944,7 @@ export default function QuanLyDonHang() {
                       <label className="block text-sm font-bold text-slate-600 mb-2">Tỉnh / thành cửa hàng</label>
                       <select
                         value={form.shop_province}
-                        onChange={(e) => setForm({ ...form, shop_province: e.target.value })}
+                        onChange={(e) => setForm({ ...form, shop_province: e.target.value, shop_location_verified: false })}
                         className="w-full px-4 py-3.5 bg-slate-50 border-2 border-transparent rounded-xl outline-none focus:bg-white focus:border-blue-400 transition-all font-medium"
                       >
                         {vietnamProvinces.map((province) => (
@@ -954,7 +961,7 @@ export default function QuanLyDonHang() {
                       <textarea rows="2" required
                         className="w-full pl-11 pr-4 py-3.5 bg-slate-50 border-2 border-transparent rounded-xl outline-none focus:bg-white focus:border-blue-400 transition-all font-medium resize-none"
                         placeholder="Số nhà, tên đường, phường/xã, quận/huyện..."
-                        value={form.receiver_address} onChange={e => setForm({...form, receiver_address: e.target.value})} 
+                        value={form.receiver_address} onChange={e => setForm({...form, receiver_address: e.target.value, receiver_location_verified: false})} 
                       ></textarea>
                     </div>
                     <div className="mt-3 flex items-center justify-between gap-3 flex-wrap">
@@ -966,7 +973,7 @@ export default function QuanLyDonHang() {
                         <MapPinned size={16} /> {showReceiverMap ? 'Ẩn bản đồ' : 'Chọn điểm giao'}
                       </button>
                       <span className="text-xs text-slate-500 font-medium">
-                        {form.receiver_lat && form.receiver_lng ? `Điểm đến: ${form.receiver_lat.toFixed(5)}, ${form.receiver_lng.toFixed(5)}` : 'Chưa có điểm đến cụ thể'}
+                        {form.receiver_location_verified ? `Đã xác nhận: ${form.receiver_lat.toFixed(5)}, ${form.receiver_lng.toFixed(5)}` : 'Chưa xác nhận điểm giao'}
                       </span>
                     </div>
 
@@ -1022,7 +1029,7 @@ export default function QuanLyDonHang() {
                     <label className="block text-sm font-bold text-slate-600 mb-2">Tỉnh / thành giao hàng</label>
                     <select
                       value={form.destination_province}
-                      onChange={(e) => setForm({ ...form, destination_province: e.target.value })}
+                      onChange={(e) => setForm({ ...form, destination_province: e.target.value, receiver_location_verified: false })}
                       className="w-full px-4 py-3.5 bg-slate-50 border-2 border-transparent rounded-xl outline-none focus:bg-white focus:border-blue-400 transition-all font-medium"
                     >
                       {vietnamProvinces.map((province) => (

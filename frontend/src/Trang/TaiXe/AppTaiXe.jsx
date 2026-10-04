@@ -42,13 +42,10 @@ export default function AppTaiXe() {
   const driverRole = localStorage.getItem('role') || localStorage.getItem('user_role');
   const isPickupDriver = driverRole === 'pickup_driver';
   const driverName = localStorage.getItem('full_name') || 'Tài Xế Giao Nhận';
-  const diemDi = isPickupDriver
-    ? `${routeInfo?.pickup?.lat || 10.7605},${routeInfo?.pickup?.lng || 106.6545}`
-    : `${routeInfo?.warehouse?.lat || 10.762622},${routeInfo?.warehouse?.lng || 106.660172}`;
+  const taskRoute = routeInfo?.task_route;
+  const diemDi = taskRoute?.origin?.address || (taskRoute?.origin ? `${taskRoute.origin.lat},${taskRoute.origin.lng}` : '10.762622,106.660172');
   const tenKho = routeInfo?.warehouse?.address || 'Kho trung tâm Smart Logistics, TP. Hồ Chí Minh';
-  const diemDen = isPickupDriver
-    ? routeInfo?.warehouse?.address || tenKho
-    : routeInfo?.delivery?.address || `${routeInfo?.delivery?.lat},${routeInfo?.delivery?.lng}`;
+  const diemDen = taskRoute?.destination?.address || (taskRoute?.destination ? `${taskRoute.destination.lat},${taskRoute.destination.lng}` : tenKho);
   const urlChiDuong = routeInfo
     ? `https://www.google.com/maps/dir/?api=1&${new URLSearchParams({ origin: diemDi, destination: diemDen, travelmode: 'driving' })}`
     : '';
@@ -60,12 +57,19 @@ export default function AppTaiXe() {
       const data = await res.json();
       if (data.success) {
         setDonHang(data.data);
-        const activeStatuses = isPickupDriver ? ['picking', 'picked_up'] : ['in_warehouse', 'delivering'];
+        const activeStatuses = isPickupDriver
+          ? ['picking', 'picked_up', 'transferring_to_central', 'transferring_to_destination']
+          : ['at_destination_warehouse', 'delivering'];
         const firstActiveOrder = data.data.find(item => activeStatuses.includes(item.status));
         if (firstActiveOrder) {
           const routeRes = await fetch(`http://localhost:5000/api/orders/${firstActiveOrder.id}/route`);
           const routeData = await routeRes.json();
-          if (routeData.success) setRouteInfo(routeData.data);
+          if (routeData.success) {
+            setRouteInfo(routeData.data);
+            if (['transferring_to_central', 'transferring_to_destination'].includes(firstActiveOrder.status)) {
+              batDauPhatToaDo(firstActiveOrder.id, firstActiveOrder.tracking_code);
+            }
+          }
         }
       }
     } catch (error) {
@@ -267,8 +271,8 @@ export default function AppTaiXe() {
   const donThanhCong = donHang.filter(d => d.status === 'completed');
   const tongTienThuHo = donThanhCong.reduce((sum, item) => sum + tinhTongTienCanThu(item), 0);
   const donDangChay = donHang.filter(d => isPickupDriver
-    ? ['picking', 'picked_up'].includes(d.status)
-    : ['in_warehouse', 'delivering'].includes(d.status));
+    ? ['picking', 'picked_up', 'transferring_to_central', 'transferring_to_destination'].includes(d.status)
+    : ['at_destination_warehouse', 'delivering'].includes(d.status));
 
   return (
     <div className="bg-slate-100 min-h-screen flex justify-center font-sans text-slate-800">
@@ -306,11 +310,11 @@ export default function AppTaiXe() {
 
         {/* CONTENT */}
         <div className="flex-1 overflow-y-auto pb-28">
-          {routeInfo && (isPickupDriver ? ['picking', 'picked_up'].includes(routeInfo.status) : ['in_warehouse', 'delivering'].includes(routeInfo.status)) && (
+          {routeInfo && (isPickupDriver ? ['picking', 'picked_up', 'transferring_to_central', 'transferring_to_destination'].includes(routeInfo.status) : ['at_destination_warehouse', 'delivering'].includes(routeInfo.status)) && (
             <div className="p-4 border-b border-slate-100 bg-slate-50">
               <div className="mb-2 flex items-center justify-between">
-                <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">{isPickupDriver ? 'Lộ trình lấy hàng về kho' : 'Lộ trình giao hàng'}</p>
-                <span className="rounded-full bg-emerald-100 px-2 py-1 text-[10px] font-bold text-emerald-700">{isPickupDriver ? 'Shop → Kho' : 'Kho → Người nhận'}</span>
+                <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">{taskRoute?.label || 'Lộ trình vận chuyển'}</p>
+                <span className="rounded-full bg-emerald-100 px-2 py-1 text-[10px] font-bold text-emerald-700">{isPickupDriver ? 'Lấy hàng / trung chuyển' : 'Giao hàng'}</span>
               </div>
               <div className="h-36 overflow-hidden rounded-2xl border border-slate-200">
                 <iframe
@@ -321,12 +325,12 @@ export default function AppTaiXe() {
               </div>
               <div className="mt-3 space-y-2">
                 <div className="rounded-xl bg-white p-3">
-                  <p className="text-[10px] font-black uppercase tracking-wider text-emerald-700">{isPickupDriver ? 'Điểm lấy · Shop' : 'Điểm đi · Kho trung tâm'}</p>
-                  <p className="mt-1 text-xs font-medium text-slate-700">{isPickupDriver ? routeInfo?.pickup?.address : tenKho}</p>
+                  <p className="text-[10px] font-black uppercase tracking-wider text-emerald-700">Điểm đi</p>
+                  <p className="mt-1 text-xs font-medium text-slate-700">{diemDi}</p>
                   <p className="mt-1 text-[10px] text-slate-400">{diemDi}</p>
                 </div>
                 <div className="rounded-xl bg-white p-3">
-                  <p className="text-[10px] font-black uppercase tracking-wider text-blue-700">{isPickupDriver ? 'Điểm đến · Kho trung tâm' : 'Điểm giao · Người nhận'}</p>
+                  <p className="text-[10px] font-black uppercase tracking-wider text-blue-700">Điểm đến</p>
                   <p className="mt-1 text-xs font-medium text-slate-700">{diemDen}</p>
                 </div>
                 <a href={urlChiDuong} target="_blank" rel="noreferrer" className="flex w-full items-center justify-center gap-2 rounded-xl bg-blue-600 px-4 py-3 text-sm font-bold text-white hover:bg-blue-700">
@@ -356,20 +360,27 @@ export default function AppTaiXe() {
                       <div className="flex justify-between items-center mb-3 border-b border-slate-50 pb-2">
                         <span className="font-black text-slate-800">{don.tracking_code}</span>
                         <span className={`px-2.5 py-1 rounded-md text-[10px] font-bold uppercase ${don.status === 'picking' ? 'bg-blue-50 text-blue-600' : 'bg-amber-50 text-amber-600'}`}>
-                          {don.status === 'picking' ? 'Đang đi lấy' : 'Đang đi giao'}
+                          {{
+                            picking: 'Đang đến Shop',
+                            picked_up: 'Đã lấy hàng',
+                            transferring_to_central: 'Điều chuyển về kho tổng',
+                            transferring_to_destination: 'Điều chuyển về kho con đích',
+                            at_destination_warehouse: 'Chờ xuất phát giao',
+                            delivering: 'Đang giao'
+                          }[don.status]}
                         </span>
                       </div>
                       <div className="space-y-2.5 mb-4 text-sm">
                         <div className="flex items-start gap-2.5">
                           <UserCircle size={16} className="text-slate-400 mt-0.5 shrink-0" />
                           <div>
-                            <p className="font-bold text-slate-800">{isPickupDriver ? 'Điểm lấy hàng tại Shop' : don.receiver_name}</p>
+                            <p className="font-bold text-slate-800">{isPickupDriver ? taskRoute?.label || 'Nhiệm vụ lấy hàng / trung chuyển' : don.receiver_name}</p>
                               {!isPickupDriver && <a href={`tel:${don.receiver_phone}`} className="text-blue-600 font-bold text-xs">{don.receiver_phone}</a>}
                           </div>
                         </div>
                         <div className="flex items-start gap-2.5">
                           <MapPin size={16} className="text-orange-400 mt-0.5 shrink-0" />
-                          <p className="text-slate-600 text-xs leading-relaxed">{isPickupDriver ? don.shop_address : don.receiver_address}</p>
+                          <p className="text-slate-600 text-xs leading-relaxed">{isPickupDriver ? diemDen : don.receiver_address}</p>
                         </div>
                         {!isPickupDriver && <div className="bg-slate-50 p-2.5 rounded-xl space-y-1.5 text-xs">
                           <div className="flex justify-between"><span className="font-bold text-slate-500">COD hàng:</span><span>{Number(don.cod_amount || 0).toLocaleString()} đ</span></div>
@@ -382,11 +393,11 @@ export default function AppTaiXe() {
                           <button onClick={() => xacNhanDaLayHang(don.id)} className="col-span-2 bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded-xl text-xs transition-all shadow-md shadow-blue-200">
                             Xác nhận đã lấy hàng
                           </button>
-                        ) : don.status === 'picked_up' ? (
-                          <p className="col-span-2 rounded-xl bg-amber-50 px-3 py-3 text-center text-xs font-bold text-amber-700">Đã lấy hàng, chờ Thủ kho quét nhập.</p>
-                        ) : don.status === 'in_warehouse' ? (
+                        ) : don.status === 'picked_up' || don.status === 'transferring_to_central' || don.status === 'transferring_to_destination' ? (
+                          <p className="col-span-2 rounded-xl bg-amber-50 px-3 py-3 text-center text-xs font-bold text-amber-700">{don.status === 'picked_up' ? 'Đã lấy tại Shop, chờ kho con quét nhận.' : 'Đang trung chuyển, kho nhận sẽ quét khi hàng đến.'}</p>
+                        ) : don.status === 'at_destination_warehouse' ? (
                           <button onClick={() => batDauGiaoHang(don.id, don.tracking_code)} className="col-span-2 bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded-xl text-xs transition-all shadow-md shadow-blue-200">
-                            Nhận hàng tại kho và bắt đầu giao
+                            Nhận hàng tại kho con và bắt đầu giao
                           </button>
                         ) : (
                           <>

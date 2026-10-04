@@ -83,7 +83,11 @@ export default function TraCuuHanhTrinh() {
     { id: 'pending', ten: 'Chờ Lấy Hàng', desc: 'Đơn hàng đã được Shop tạo và đang chờ hệ thống AI phân tuyến.', icon: Clock },
     { id: 'picking', ten: 'Lộ Trình Lấy Hàng', desc: 'Tài xế đã nhận đơn và đang di chuyển đến địa chỉ Shop để lấy hàng.', icon: Truck },
     { id: 'picked_up', ten: 'Đã Lấy Hàng', desc: 'Tài xế đang bàn giao kiện hàng cho kho.', icon: PackageSearch },
-    { id: 'in_warehouse', ten: 'Đã Nhập Kho', desc: 'Hàng đã được đưa về kho trung tâm, chờ điều phối tuyến giao.', icon: Box },
+    { id: 'at_origin_warehouse', ten: 'Đã Về Kho Con Nguồn', desc: 'Kho con tại phường lấy đã nhận kiện hàng.', icon: Box },
+    { id: 'transferring_to_central', ten: 'Đang Về Kho Tổng', desc: 'Hàng đang được trung chuyển về kho tổng TP.HCM.', icon: Truck },
+    { id: 'at_central_warehouse', ten: 'Đang Phân Luồng', desc: 'Kho tổng tổng hợp hàng và phân về kho con đích.', icon: Box },
+    { id: 'transferring_to_destination', ten: 'Đang Về Kho Con Đích', desc: 'Hàng đang được chuyển tới kho con gần người nhận.', icon: Truck },
+    { id: 'at_destination_warehouse', ten: 'Đã Tới Kho Con Đích', desc: 'Đơn chờ tài xế giao tại phường nhận hàng.', icon: Box },
     { id: 'delivering', ten: 'Đang Giao Hàng', desc: 'Tài xế đang trên đường đi giao hàng đến địa chỉ của bạn.', icon: Navigation },
     { id: 'completed', ten: 'Giao Thành Công', desc: 'Đơn hàng đã được giao tận tay người nhận.', icon: CheckCircle }
   ];
@@ -93,7 +97,7 @@ export default function TraCuuHanhTrinh() {
   const mapUrl = `https://www.google.com/maps?q=${mapQuery}&z=12&output=embed`;
 
   const layTrangThaiBuoc = (trangThaiHienTai, idBuoc) => {
-    const thuTu = ['pending', 'picking', 'picked_up', 'in_warehouse', 'delivering', 'completed'];
+    const thuTu = cacBuocHanhTrinh.map((step) => step.id);
     if (trangThaiHienTai === 'cancelled' || trangThaiHienTai === 'returning') return 'that-bai';
     
     const viTriHienTai = thuTu.indexOf(trangThaiHienTai);
@@ -287,7 +291,11 @@ export default function TraCuuHanhTrinh() {
                   {thongTinDon.status === 'pending' ? 'Chờ Lấy Hàng' :
                     thongTinDon.status === 'picking' ? 'Lộ Trình Lấy Hàng' :
                     thongTinDon.status === 'picked_up' ? 'Đã Lấy, Chờ Nhập Kho' :
-                    thongTinDon.status === 'in_warehouse' ? 'Đã Nhập Kho' :
+                    thongTinDon.status === 'at_origin_warehouse' ? 'Đã Về Kho Con Nguồn' :
+                    thongTinDon.status === 'transferring_to_central' ? 'Đang Về Kho Tổng' :
+                    thongTinDon.status === 'at_central_warehouse' ? 'Đang Phân Luồng Tại Kho Tổng' :
+                    thongTinDon.status === 'transferring_to_destination' ? 'Đang Về Kho Con Đích' :
+                    thongTinDon.status === 'at_destination_warehouse' ? 'Đã Tới Kho Con Đích' :
                     thongTinDon.status === 'delivering' ? 'Đang Giao Hàng' :
                     thongTinDon.status === 'completed' ? 'Giao Thành Công' :
                     thongTinDon.status === 'returning' ? 'Đang Hoàn Hàng' : 'Đã Hủy'}
@@ -333,7 +341,7 @@ export default function TraCuuHanhTrinh() {
             </div>
 
             <div className="p-6 md:p-10 bg-white">
-              {(thongTinDon.status === 'delivering' || thongTinDon.status === 'picking' || thongTinDon.status === 'picked_up') && (
+              {(thongTinDon.status === 'delivering' || thongTinDon.status === 'picking' || thongTinDon.status === 'picked_up' || thongTinDon.status === 'transferring_to_central' || thongTinDon.status === 'transferring_to_destination') && (
                 <div className="bg-gradient-to-r from-blue-50 to-sky-50 border border-blue-100 p-5 rounded-xl mb-8 flex items-center justify-between shadow-sm">
                   <div className="flex items-center gap-4">
                     <div className="relative">
@@ -346,7 +354,7 @@ export default function TraCuuHanhTrinh() {
                     </div>
                     <div>
                       <p className="text-[10px] font-black text-blue-600 uppercase tracking-widest mb-0.5">
-                        {thongTinDon.status === 'picking' ? 'Tài xế lấy hàng đang tới Shop' : thongTinDon.status === 'picked_up' ? 'Tài xế đang đưa hàng về kho' : 'Tài xế giao hàng đang phát đơn'}
+                        {thongTinDon.status === 'picking' ? 'Tài xế lấy hàng đang tới Shop' : thongTinDon.status === 'picked_up' || thongTinDon.status === 'transferring_to_central' || thongTinDon.status === 'transferring_to_destination' ? 'Tài xế đang trung chuyển đơn hàng' : 'Tài xế giao hàng đang phát đơn'}
                       </p>
                       <p className="font-bold text-slate-800 text-base">{thongTinDon.shipper_name || 'Bưu tá khu vực'}</p>
                     </div>
@@ -440,6 +448,11 @@ export default function TraCuuHanhTrinh() {
                               pending: 'Đã tạo đơn',
                               picking: 'Tài xế lấy hàng đang đến Shop',
                               picked_up: 'Đã lấy hàng, chờ nhập kho',
+                              at_origin_warehouse: 'Đã nhập kho con nguồn',
+                              transferring_to_central: 'Đang trung chuyển về kho tổng',
+                              at_central_warehouse: 'Đang phân luồng tại kho tổng',
+                              transferring_to_destination: 'Đang trung chuyển về kho con đích',
+                              at_destination_warehouse: 'Đã nhập kho con đích',
                               in_warehouse: 'Đã nhập kho',
                               delivering: 'Bắt đầu giao hàng',
                               completed: 'Giao thành công',

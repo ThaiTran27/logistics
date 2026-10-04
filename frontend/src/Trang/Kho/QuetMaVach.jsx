@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { ScanLine, Barcode, LogOut, Box, ArrowRightLeft, CheckCircle, AlertCircle, PackageSearch, Camera, ImagePlus, X } from 'lucide-react';
+import { ScanLine, Barcode, LogOut, Box, ArrowRightLeft, CheckCircle, AlertCircle, PackageSearch, Camera, ImagePlus, X, MapPin, Save, Plus } from 'lucide-react';
 import { Html5Qrcode, Html5QrcodeScanner, Html5QrcodeSupportedFormats } from 'html5-qrcode';
 
 const supportedBarcodeFormats = [
@@ -26,6 +26,10 @@ export default function QuetMaVach() {
   const [trangThaiCamera, setTrangThaiCamera] = useState('');
   const [dangXuLy, setDangXuLy] = useState(false);
   const [tabKho, setTabKho] = useState('scan');
+  const [danhSachKho, setDanhSachKho] = useState([]);
+  const [khoDrafts, setKhoDrafts] = useState({});
+  const [phuongMoi, setPhuongMoi] = useState('');
+  const [warehouseId, setWarehouseId] = useState('');
   
   // State quản lý việc bật/tắt Camera
   const [moCamera, setMoCamera] = useState(false);
@@ -34,9 +38,10 @@ export default function QuetMaVach() {
   const imageInputRef = useRef(null);
   const warehouseName = localStorage.getItem('full_name') || 'Thủ Kho';
 
-  const taiTonKho = async () => {
+  const taiTonKho = async (selectedWarehouseId = warehouseId) => {
     try {
-      const res = await fetch('http://localhost:5000/api/warehouse/inventory');
+      if (!selectedWarehouseId) return setTonKho([]);
+      const res = await fetch(`http://localhost:5000/api/warehouse/inventory?warehouse_id=${selectedWarehouseId}`);
       const data = await res.json();
       if (data.success && Array.isArray(data.data)) {
         setTonKho(data.data);
@@ -46,11 +51,58 @@ export default function QuetMaVach() {
     }
   };
 
+  const taiDanhSachKho = async () => {
+    try {
+      const res = await fetch('http://localhost:5000/api/warehouses');
+      const data = await res.json();
+      if (data.success) {
+        setDanhSachKho(data.data || []);
+        const activeWarehouses = (data.data || []).filter((warehouse) => warehouse.is_configured && warehouse.is_active);
+        setWarehouseId((current) => current || (activeWarehouses.length === 1 ? String(activeWarehouses[0].id) : ''));
+      }
+    } catch (error) {
+      console.error('Lỗi tải danh mục kho:', error);
+    }
+  };
+
   useEffect(() => {
-    taiTonKho();
+    taiDanhSachKho();
     // Focus vào input trừ khi camera đang mở
     if (inputRef.current && !moCamera) inputRef.current.focus();
   }, [moCamera]);
+
+  useEffect(() => {
+    taiTonKho(warehouseId);
+  }, [warehouseId]);
+
+  const taoKhoPhuong = async (event) => {
+    event.preventDefault();
+    const wardName = phuongMoi.trim();
+    if (!wardName) return;
+    const res = await fetch('http://localhost:5000/api/warehouses', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ward_name: wardName })
+    });
+    const data = await res.json();
+    setThongBao({ loai: data.success ? 'thanhcong' : 'loi', thongDiep: data.message });
+    if (data.success) {
+      setPhuongMoi('');
+      taiDanhSachKho();
+    }
+  };
+
+  const luuKhoPhuong = async (warehouse) => {
+    const draft = khoDrafts[warehouse.id] || warehouse;
+    const res = await fetch(`http://localhost:5000/api/warehouses/${warehouse.id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(draft)
+    });
+    const data = await res.json();
+    setThongBao({ loai: data.success ? 'thanhcong' : 'loi', thongDiep: data.message });
+    if (data.success) taiDanhSachKho();
+  };
 
   // HÀM XỬ LÝ CHUNG CHO CẢ SÚNG QUÉT, NHẬP TAY VÀ CAMERA
   const xuLyQuetMa = async (e, maTuCamera = null) => {
@@ -59,6 +111,10 @@ export default function QuetMaVach() {
     // Lấy mã từ Camera hoặc từ ô Input
     const maCanXuly = String(maTuCamera || maVanDon).trim().replace(/\s+/g, '').toUpperCase();
     if (!maCanXuly) return;
+    if (!warehouseId) {
+      setThongBao({ loai: 'loi', thongDiep: 'Vui lòng chọn đúng kho đang thao tác trước khi quét.' });
+      return;
+    }
 
     setDangXuLy(true);
     setThongBao({ loai: '', thongDiep: '' });
@@ -67,7 +123,7 @@ export default function QuetMaVach() {
       const res = await fetch('http://localhost:5000/api/warehouse/scan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tracking_code: maCanXuly })
+        body: JSON.stringify({ tracking_code: maCanXuly, warehouse_id: Number(warehouseId) })
       });
       const data = await res.json();
 
@@ -213,6 +269,9 @@ export default function QuetMaVach() {
             <button onClick={() => setTabKho('kiem-ke')} className={`w-full px-5 py-4 rounded-2xl font-bold flex items-center gap-4 transition-all ${tabKho === 'kiem-ke' ? 'bg-indigo-500/10 text-indigo-400 border border-indigo-500/20' : 'text-slate-500 hover:bg-slate-800 hover:text-slate-300'}`}>
               <Box size={20} /> Kiểm Kê Định Kỳ
             </button>
+            <button onClick={() => setTabKho('warehouses')} className={`w-full px-5 py-4 rounded-2xl font-bold flex items-center gap-4 transition-all ${tabKho === 'warehouses' ? 'bg-indigo-500/10 text-indigo-400 border border-indigo-500/20' : 'text-slate-500 hover:bg-slate-800 hover:text-slate-300'}`}>
+              <MapPin size={20} /> Danh Mục Kho
+            </button>
           </div>
         </div>
 
@@ -234,7 +293,44 @@ export default function QuetMaVach() {
 
       {/* MAIN CONTENT */}
       <>
-        {tabKho === 'kiem-ke' ? (
+        {tabKho === 'warehouses' ? (
+          <div className="flex-1 p-6 md:p-10">
+            <div className="mb-8">
+              <p className="text-xs font-black uppercase tracking-[0.22em] text-indigo-600">Mạng lưới kho TP.HCM</p>
+              <h1 className="mt-3 text-3xl font-black text-slate-800">Kho tổng và kho theo phường</h1>
+              <p className="mt-2 max-w-3xl text-sm text-slate-500">Kho tổng đã đặt tại 10.762622, 106.660172. Chỉ kho con có địa chỉ và tọa độ thật mới được dùng để định tuyến.</p>
+            </div>
+            <div className="mb-6 rounded-2xl border border-indigo-100 bg-indigo-50 p-5">
+              <p className="font-bold text-indigo-900">Kho tổng Smart Logistics</p>
+              <p className="mt-1 text-sm text-indigo-700">10.762622, 106.660172 · TP. Hồ Chí Minh</p>
+            </div>
+            <form onSubmit={taoKhoPhuong} className="mb-6 flex flex-col gap-3 sm:flex-row">
+              <input value={phuongMoi} onChange={(event) => setPhuongMoi(event.target.value)} required placeholder="Tên phường cần tạo kho con" className="min-w-0 flex-1 rounded-xl border border-slate-200 bg-white px-4 py-3 outline-none focus:border-indigo-400" />
+              <button type="submit" className="inline-flex items-center justify-center gap-2 rounded-xl bg-indigo-600 px-5 py-3 font-bold text-white hover:bg-indigo-700"><Plus size={18} /> Tạo kho phường</button>
+            </form>
+            <div className="space-y-4">
+              {danhSachKho.filter((warehouse) => warehouse.warehouse_type === 'ward').map((warehouse) => {
+                const draft = khoDrafts[warehouse.id] || warehouse;
+                return (
+                  <div key={warehouse.id} className="rounded-2xl border border-slate-200 bg-white p-5">
+                    <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+                      <h2 className="font-black text-slate-800">{warehouse.name}</h2>
+                      <span className={`text-xs font-bold ${warehouse.is_configured && warehouse.is_active ? 'text-emerald-700' : 'text-amber-700'}`}>{warehouse.is_configured && warehouse.is_active ? 'Đang hoạt động' : 'Chờ cấu hình vị trí'}</span>
+                    </div>
+                    <div className="grid gap-3 md:grid-cols-2">
+                      <label className="text-xs font-bold text-slate-500">Tên kho<input value={draft.name || ''} onChange={(event) => setKhoDrafts((current) => ({ ...current, [warehouse.id]: { ...draft, name: event.target.value } }))} className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium text-slate-800" /></label>
+                      <label className="text-xs font-bold text-slate-500 md:col-span-2">Địa chỉ thực tế<input value={draft.address || ''} onChange={(event) => setKhoDrafts((current) => ({ ...current, [warehouse.id]: { ...draft, address: event.target.value } }))} placeholder="Số nhà, đường, phường, TP.HCM" className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium text-slate-800" /></label>
+                      <label className="text-xs font-bold text-slate-500">Vĩ độ<input type="number" step="any" value={draft.lat ?? ''} onChange={(event) => setKhoDrafts((current) => ({ ...current, [warehouse.id]: { ...draft, lat: event.target.value } }))} className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium text-slate-800" /></label>
+                      <label className="text-xs font-bold text-slate-500">Kinh độ<input type="number" step="any" value={draft.lng ?? ''} onChange={(event) => setKhoDrafts((current) => ({ ...current, [warehouse.id]: { ...draft, lng: event.target.value } }))} className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium text-slate-800" /></label>
+                    </div>
+                    <button onClick={() => luuKhoPhuong(warehouse)} className="mt-4 inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-bold text-white hover:bg-indigo-700"><Save size={16} /> Lưu và kích hoạt</button>
+                  </div>
+                );
+              })}
+              {danhSachKho.filter((warehouse) => warehouse.warehouse_type === 'ward').length === 0 && <p className="rounded-xl border border-dashed border-slate-300 p-8 text-center text-sm text-slate-500">Chưa tạo kho con nào. Thêm từng phường và nhập vị trí thật để kích hoạt.</p>}
+            </div>
+          </div>
+        ) : tabKho === 'kiem-ke' ? (
           <div className="flex-1 p-10">
             <div className="mb-8">
               <p className="text-xs font-black uppercase tracking-[0.22em] text-indigo-600">Kho bãi</p>
@@ -294,6 +390,13 @@ export default function QuetMaVach() {
             </div>
             <h2 className="text-2xl font-black text-slate-800 mb-2">Quét Mã Vận Đơn</h2>
             <p className="text-slate-500 text-sm mb-6 font-medium">Đưa trọn mã vạch vào khung quét. Có thể dùng ảnh mã rõ nét, súng quét hoặc nhập mã tay.</p>
+
+            <label className="mb-5 block text-left text-sm font-bold text-slate-700">Kho đang thao tác
+              <select value={warehouseId} onChange={(event) => setWarehouseId(event.target.value)} className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 outline-none focus:border-indigo-400">
+                <option value="">-- Chọn kho thực tế --</option>
+                {danhSachKho.filter((warehouse) => warehouse.is_configured && warehouse.is_active).map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}
+              </select>
+            </label>
 
             {/* VÙNG CHỨA CAMERA / NÚT BẬT CAMERA */}
             {!moCamera ? (

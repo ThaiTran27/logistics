@@ -10,6 +10,7 @@ DROP TABLE IF EXISTS driver_positions;
 DROP TABLE IF EXISTS driver_routes;
 DROP TABLE IF EXISTS cod_settlements;
 DROP TABLE IF EXISTS notifications;
+DROP TABLE IF EXISTS warehouses;
 DROP TABLE IF EXISTS order_status_history;
 DROP TABLE IF EXISTS service_requests;
 DROP TABLE IF EXISTS job_applications;
@@ -40,7 +41,12 @@ CREATE TABLE orders (
   shop_id INT NULL,
   shipper_id INT NULL,
   pickup_shipper_id INT NULL,
+  central_transfer_shipper_id INT NULL,
+  destination_transfer_shipper_id INT NULL,
   delivery_shipper_id INT NULL,
+  origin_warehouse_id INT NULL,
+  destination_warehouse_id INT NULL,
+  current_warehouse_id INT NULL,
   shop_address TEXT DEFAULT NULL,
   shop_province VARCHAR(255) DEFAULT 'Hồ Chí Minh',
   shop_lat DOUBLE DEFAULT 10.762622,
@@ -53,6 +59,8 @@ CREATE TABLE orders (
   customer_email VARCHAR(255) DEFAULT NULL,
   cod_amount DECIMAL(12,2) DEFAULT 0,
   shipping_fee DECIMAL(12,2) DEFAULT 0,
+  fee_payer ENUM('sender','receiver') NOT NULL DEFAULT 'sender',
+  delivery_otp CHAR(6) DEFAULT NULL,
   weight_kg DECIMAL(8,2) DEFAULT 1,
   length DECIMAL(8,2) DEFAULT 0,
   width DECIMAL(8,2) DEFAULT 0,
@@ -77,7 +85,12 @@ CREATE TABLE orders (
   KEY idx_shop_id (shop_id),
   KEY idx_shipper_id (shipper_id),
   KEY idx_pickup_shipper_id (pickup_shipper_id),
+  KEY idx_central_transfer_shipper_id (central_transfer_shipper_id),
+  KEY idx_destination_transfer_shipper_id (destination_transfer_shipper_id),
   KEY idx_delivery_shipper_id (delivery_shipper_id),
+  KEY idx_origin_warehouse_id (origin_warehouse_id),
+  KEY idx_destination_warehouse_id (destination_warehouse_id),
+  KEY idx_current_warehouse_id (current_warehouse_id),
   KEY idx_status (status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
@@ -102,6 +115,25 @@ CREATE TABLE notifications (
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   KEY idx_notifications_recipient (recipient_user_id, is_read, created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE warehouses (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  warehouse_type ENUM('central','ward') NOT NULL,
+  ward_name VARCHAR(120) NOT NULL,
+  name VARCHAR(255) NOT NULL,
+  address TEXT DEFAULT NULL,
+  lat DOUBLE DEFAULT NULL,
+  lng DOUBLE DEFAULT NULL,
+  is_configured TINYINT(1) NOT NULL DEFAULT 0,
+  is_active TINYINT(1) NOT NULL DEFAULT 0,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_warehouse_ward (ward_name),
+  KEY idx_warehouse_type_active (warehouse_type, is_active)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+INSERT INTO warehouses (warehouse_type, ward_name, name, address, lat, lng, is_configured, is_active)
+VALUES ('central', '__CENTRAL__', 'Kho tổng Smart Logistics', '10.762622, 106.660172, TP. Hồ Chí Minh', 10.762622, 106.660172, 1, 1);
 
 CREATE TABLE cod_settlements (
   id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -194,7 +226,13 @@ CREATE TABLE attendance_records (
   user_id INT NOT NULL,
   work_date DATE NOT NULL,
   check_in DATETIME DEFAULT NULL,
+  check_in_photo VARCHAR(255) DEFAULT NULL,
+  check_in_lat DOUBLE DEFAULT NULL,
+  check_in_lng DOUBLE DEFAULT NULL,
   check_out DATETIME DEFAULT NULL,
+  check_out_photo VARCHAR(255) DEFAULT NULL,
+  check_out_lat DOUBLE DEFAULT NULL,
+  check_out_lng DOUBLE DEFAULT NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   KEY idx_attendance_user_date (user_id, work_date),
   KEY idx_attendance_work_date (work_date)

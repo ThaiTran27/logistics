@@ -3,7 +3,7 @@ import { io } from 'socket.io-client';
 import { MapContainer, TileLayer, Marker, Popup, useMap } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
-import { Truck, MapPin, Navigation, Search, PackageSearch, CheckCircle, Clock, Map, FileText, Send, Zap, Star, Users, Package, ShieldCheck, ToggleLeft, ToggleRight } from 'lucide-react';
+import { Truck, MapPin, Navigation, Search, PackageSearch, CheckCircle, Clock, Map, FileText, Send, Zap, Users, Package, ShieldCheck } from 'lucide-react';
 
 // Fix lỗi mất icon mặc định của Leaflet trong React
 import iconMarkerUrl from 'leaflet/dist/images/marker-icon.png';
@@ -40,10 +40,6 @@ export default function TrungTamDieuPhoi() {
   const [taiXeDuocChon, setTaiXeDuocChon] = useState('');
   const [loaiNhiemVu, setLoaiNhiemVu] = useState('pickup');
   
-  // State quản lý giới hạn khu vực phân quyền
-  const [gioiHanKhuVuc, setGioiHanKhuVuc] = useState(true);
-  const [khuVucDonHang, setKhuVucDonHang] = useState('');
-
   const [viTriTaiXeMap, setViTriTaiXeMap] = useState({});
   const [tabHienTai, setTabHienTai] = useState('dieuphoan'); 
 
@@ -54,18 +50,6 @@ export default function TrungTamDieuPhoi() {
   const userId = localStorage.getItem('user_id');
   const userName = localStorage.getItem('full_name') || 'Điều Phối Viên';
 
-  // [THUẬT TOÁN HAVERSINE] Tính khoảng cách đường chim bay
-  const tinhKhoangCachHaversine = (lat1, lon1, lat2, lon2) => {
-    const R = 6371; 
-    const dLat = (lat2 - lat1) * (Math.PI / 180);
-    const dLon = (lon2 - lon1) * (Math.PI / 180);
-    const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-              Math.cos(lat1 * (Math.PI / 180)) * Math.cos(lat2 * (Math.PI / 180)) *
-              Math.sin(dLon / 2) * Math.sin(dLon / 2);
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-    return (R * c).toFixed(1); 
-  };
-
   const taiDuLieu = async () => {
     try {
       const res = await fetch('http://localhost:5000/api/orders');
@@ -73,7 +57,9 @@ export default function TrungTamDieuPhoi() {
       if (data.success && Array.isArray(data.data)) {
         const donCanDieuPhoi = data.data.filter(d =>
           (d?.status === 'pending' && !d?.pickup_shipper_id) ||
-          (d?.status === 'in_warehouse' && !d?.delivery_shipper_id)
+          (d?.status === 'at_origin_warehouse' && !d?.central_transfer_shipper_id) ||
+          (d?.status === 'at_central_warehouse' && !d?.destination_transfer_shipper_id) ||
+          (d?.status === 'at_destination_warehouse' && !d?.delivery_shipper_id)
         );
         setDonHang(donCanDieuPhoi);
       }
@@ -87,15 +73,8 @@ export default function TrungTamDieuPhoi() {
       const res = await fetch(`http://localhost:5000/api/shippers?type=${taskType}`);
       const data = await res.json();
       if (data.success && Array.isArray(data.data)) {
-        const zones = ['Nội thành TP.HCM', 'Ngoại thành TP.HCM'];
-        const taiXeGps = data.data.map((tx, i) => ({
-          ...tx,
-          lat: 10.762622 + (Math.random() - 0.5) * 0.1,
-          lng: 106.660172 + (Math.random() - 0.5) * 0.1,
-          zone: zones[i % 2] 
-        }));
-        setTaiXeList(taiXeGps);
-        return taiXeGps;
+        setTaiXeList(data.data);
+        return data.data;
       }
     } catch (error) {
       console.error("Lỗi tải tài xế:", error);
@@ -127,56 +106,22 @@ export default function TrungTamDieuPhoi() {
   }, []);
 
   const moModalPhanCong = async (don) => {
-    const taskType = don?.status === 'pending' ? 'pickup' : 'delivery';
-    const taiXeTheoNhiemVu = await taiDanhSachTaiXe(taskType);
-    const diaChi = taskType === 'pickup' ? don?.shop_address || '' : don?.receiver_address || '';
-    const isNgoaiThanh = diaChi.toLowerCase().includes('hóc môn') || 
-                         diaChi.toLowerCase().includes('củ chi') || 
-                         diaChi.toLowerCase().includes('bình chánh') ||
-                         diaChi.toLowerCase().includes('quận 9');
-    const kv = isNgoaiThanh ? 'Ngoại thành TP.HCM' : 'Nội thành TP.HCM';
-    
-    setKhuVucDonHang(kv);
-    setGioiHanKhuVuc(true); 
+    const taskTypeByStatus = {
+      pending: 'pickup',
+      at_origin_warehouse: 'central_transfer',
+      at_central_warehouse: 'destination_transfer',
+      at_destination_warehouse: 'delivery'
+    };
+    const taskType = taskTypeByStatus[don?.status];
+    const driverGroup = taskType === 'delivery' ? 'delivery' : 'pickup';
+    const taiXeTheoNhiemVu = await taiDanhSachTaiXe(driverGroup);
     setDonDangChon(don);
     setLoaiNhiemVu(taskType);
-    
-    const orderLat = 10.762622;
-    const orderLng = 106.660172;
-    let danhSachHienThi = taiXeTheoNhiemVu.map(tx => ({
-      ...tx, distance: parseFloat(tinhKhoangCachHaversine(orderLat, orderLng, tx.lat, tx.lng))
-    })).filter(tx => tx.zone === kv).sort((a, b) => a.distance - b.distance);
-
-    setTaiXeDuocChon(danhSachHienThi.length > 0 ? String(danhSachHienThi[0].id) : '');
+    setTaiXeDuocChon(taiXeTheoNhiemVu.length > 0 ? String(taiXeTheoNhiemVu[0].id) : '');
     setModalMo(true);
   };
 
-  const danhSachTaiXeHienThi = (() => {
-    const orderLat = 10.762622; 
-    const orderLng = 106.660172;
-    let list = [...taiXeList].map(tx => ({
-      ...tx, distance: parseFloat(tinhKhoangCachHaversine(orderLat, orderLng, tx.lat, tx.lng))
-    }));
-    
-    if (gioiHanKhuVuc) {
-      list = list.filter(tx => tx.zone === khuVucDonHang);
-    }
-    
-    return list.sort((a, b) => a.distance - b.distance);
-  })();
-
-  const doiTrangThaiGioiHan = () => {
-    const trangThaiMoi = !gioiHanKhuVuc;
-    setGioiHanKhuVuc(trangThaiMoi);
-    const orderLat = 10.762622;
-    const orderLng = 106.660172;
-    let list = [...taiXeList].map(tx => ({
-      ...tx, distance: parseFloat(tinhKhoangCachHaversine(orderLat, orderLng, tx.lat, tx.lng))
-    }));
-    if (trangThaiMoi) list = list.filter(tx => tx.zone === khuVucDonHang);
-    list.sort((a, b) => a.distance - b.distance);
-    setTaiXeDuocChon(list.length > 0 ? String(list[0].id) : '');
-  };
+  const danhSachTaiXeHienThi = taiXeList;
 
   const phanCongTaiXe = async (e) => {
     e.preventDefault();
@@ -255,7 +200,7 @@ export default function TrungTamDieuPhoi() {
   });
 
   const donChoLay = safeDonHang.filter(d => d.status === 'pending').length;
-  const donChoGiao = safeDonHang.filter(d => d.status === 'in_warehouse').length;
+  const donChoGiao = safeDonHang.filter(d => d.status === 'at_destination_warehouse').length;
 
   return (
     <div className="flex min-h-screen bg-[#F8FAFC] font-sans text-slate-700">
@@ -343,7 +288,10 @@ export default function TrungTamDieuPhoi() {
                       <span className={`px-3 py-1.5 rounded-lg text-xs font-bold uppercase flex items-center gap-1.5 ${
                         don.status === 'pending' ? 'bg-amber-100 text-amber-700' : 'bg-purple-100 text-purple-700'
                       }`}>
-                        {don.status === 'pending' ? <><Clock size={14}/> Cần Lấy Hàng</> : <><PackageSearch size={14}/> Cần Giao Hàng</>}
+                        {don.status === 'pending' ? <><Clock size={14}/> Shop → Kho con</> :
+                          don.status === 'at_origin_warehouse' ? <><PackageSearch size={14}/> Kho con → Kho tổng</> :
+                          don.status === 'at_central_warehouse' ? <><PackageSearch size={14}/> Kho tổng → Kho con đích</> :
+                          <><PackageSearch size={14}/> Kho con → Người nhận</>}
                       </span>
                     </div>
                     
@@ -432,28 +380,16 @@ export default function TrungTamDieuPhoi() {
           <div className="bg-white rounded-[28px] shadow-2xl max-w-md w-full p-8 relative animate-in fade-in zoom-in-95 duration-300">
             
             <div className="absolute -top-6 left-1/2 -translate-x-1/2 bg-gradient-to-r from-emerald-400 to-teal-500 text-white px-6 py-2 rounded-full font-black shadow-lg flex items-center gap-2 text-sm border-4 border-white whitespace-nowrap">
-              <ShieldCheck size={16} className="fill-white"/> PHÂN QUYỀN VÀ GIỚI HẠN KHU VỰC
+              <ShieldCheck size={16} className="fill-white"/> PHÂN CÔNG THEO NHÓM TÀI XẾ
             </div>
 
-            <h3 className="text-2xl font-black text-slate-800 mb-2 mt-4 text-center">{loaiNhiemVu === 'pickup' ? 'Phân công tài xế lấy hàng' : 'Phân công tài xế giao hàng'}</h3>
+            <h3 className="text-2xl font-black text-slate-800 mb-2 mt-4 text-center">{{ pickup: 'Shop → Kho con', central_transfer: 'Kho con → Kho tổng', destination_transfer: 'Kho tổng → Kho con đích', delivery: 'Kho con → Người nhận' }[loaiNhiemVu]}</h3>
             <p className="text-slate-500 text-sm mb-4 text-center">Đơn hàng: <span className="font-bold text-slate-700">{donDangChon?.tracking_code}</span></p>
 
-            <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 mb-6 flex justify-between items-center cursor-pointer" onClick={doiTrangThaiGioiHan}>
-              <div>
-                <p className="font-bold text-sm text-slate-800">Khóa Tuyến: {khuVucDonHang}</p>
-                <p className="text-xs text-slate-500 mt-0.5">Chỉ hiển thị tài xế đăng ký ở khu vực này</p>
-              </div>
-              <div>
-                {gioiHanKhuVuc ? (
-                  <ToggleRight size={36} className="text-emerald-500" />
-                ) : (
-                  <ToggleLeft size={36} className="text-slate-300" />
-                )}
-              </div>
-            </div>
+            <p className="mb-5 rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">Danh sách chỉ gồm tài xế thuộc nhóm phù hợp với chặng này.</p>
 
             <form onSubmit={phanCongTaiXe} className="space-y-4">
-              <label className="block text-sm font-bold text-slate-700 mb-1">{loaiNhiemVu === 'pickup' ? 'Nhóm tài xế lấy hàng' : 'Nhóm tài xế giao hàng'}:</label>
+              <label className="block text-sm font-bold text-slate-700 mb-1">{loaiNhiemVu === 'delivery' ? 'Nhóm tài xế giao hàng' : 'Nhóm tài xế lấy hàng / trung chuyển'}:</label>
               
               <div className="space-y-3 max-h-56 overflow-y-auto pr-2 custom-scrollbar">
                 {danhSachTaiXeHienThi.length === 0 ? (
@@ -462,7 +398,7 @@ export default function TrungTamDieuPhoi() {
                     <p className="text-xs text-red-400 mt-1">Vui lòng tắt "Khóa tuyến" ở trên để huy động tài xế tuyến khác.</p>
                   </div>
                 ) : (
-                  danhSachTaiXeHienThi.map((tx, index) => (
+                  danhSachTaiXeHienThi.map((tx) => (
                     <label key={tx.id} className={`flex items-center gap-4 p-4 rounded-xl border-2 cursor-pointer transition-all ${
                       String(taiXeDuocChon) === String(tx.id) ? 'border-emerald-500 bg-emerald-50' : 'border-slate-100 hover:border-slate-200 bg-white'
                     }`}>
@@ -475,20 +411,11 @@ export default function TrungTamDieuPhoi() {
                         onChange={() => setTaiXeDuocChon(String(tx.id))}
                       />
                       <div className="bg-slate-100 p-2.5 rounded-full text-slate-500 relative">
-                        {index === 0 && <Star size={12} className="absolute -top-1 -right-1 text-amber-400 fill-amber-400" />}
                         <Truck size={20} />
                       </div>
                       <div className="flex-1">
-                        <p className="font-bold text-slate-800 flex items-center gap-2">
-                          {tx?.full_name} 
-                          {index === 0 && <span className="text-[10px] bg-emerald-500 text-white px-2 py-0.5 rounded uppercase">Gần nhất</span>}
-                        </p>
-                        <p className="text-xs text-slate-500 mt-0.5">
-                          Khu vực: <span className="font-bold text-slate-700">{tx.zone}</span> 
-                        </p>
-                        <p className="text-[11px] font-bold text-emerald-600 mt-0.5">
-                          Cách điểm giao: {tx.distance} km
-                        </p>
+                        <p className="font-bold text-slate-800">{tx?.full_name}</p>
+                        <p className="text-xs text-slate-500 mt-0.5">{tx.role === 'delivery_driver' ? 'Tài xế giao hàng' : 'Tài xế lấy hàng / trung chuyển'}</p>
                       </div>
                       {String(taiXeDuocChon) === String(tx.id) && <CheckCircle className="ml-auto text-emerald-500" size={20} />}
                     </label>
