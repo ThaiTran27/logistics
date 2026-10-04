@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { MapContainer, TileLayer, CircleMarker, Popup } from 'react-leaflet';
 import { 
   BarChart3, TrendingUp, Package, Truck, Wallet, 
   FileText, CheckCircle, AlertCircle, LogOut, 
@@ -9,8 +10,13 @@ import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip as RechartsToolti
 export default function DashboardGiamDoc() {
   // State hiển thị sau khi lọc
   const [thongKeHienThi, setThongKeHienThi] = useState({
-    total_orders: 0, total_revenue: 0, pending_orders: 0, delivering_orders: 0
+    total_orders: 0, total_revenue: 0, pending_orders: 0, delivering_orders: 0,
+    completed_orders: 0, failed_orders: 0
   });
+  const [doanhThuTheoThoiGian, setDoanhThuTheoThoiGian] = useState([]);
+  const [matDoDonHang, setMatDoDonHang] = useState([]);
+  const [tuNgay, setTuNgay] = useState('');
+  const [denNgay, setDenNgay] = useState('');
 
   const [baoCao, setBaoCao] = useState([]);
   const [tabHienTai, setTabHienTai] = useState('dashboard');
@@ -18,14 +24,19 @@ export default function DashboardGiamDoc() {
   const [nhanSu, setNhanSu] = useState([]);
   
   // STATE BỘ LỌC THEO YÊU CẦU CỦA CÔ
-  const [locThoiGian, setLocThoiGian] = useState('month'); // today, week, month, year
-  const [locKhuVuc, setLocKhuVuc] = useState('all'); // all, mb, mt, mn
+  const [locThoiGian, setLocThoiGian] = useState('month');
+  const [locKhuVuc, setLocKhuVuc] = useState('all');
 
   const directorName = localStorage.getItem('full_name') || 'Ban Giám Đốc';
 
   const taiDuLieuThongKe = async () => {
+    if (locThoiGian === 'custom' && (!tuNgay || !denNgay)) return;
     try {
-      const query = new URLSearchParams({ period: locThoiGian, region: locKhuVuc });
+      const query = new URLSearchParams({ period: locThoiGian, district: locKhuVuc === 'all' ? '' : locKhuVuc });
+      if (locThoiGian === 'custom') {
+        query.set('start_date', tuNgay);
+        query.set('end_date', denNgay);
+      }
       const res = await fetch(`http://localhost:5000/api/admin/dashboard?${query}`);
       const data = await res.json();
       if (data.success && data.data) {
@@ -33,9 +44,13 @@ export default function DashboardGiamDoc() {
           total_orders: data.data.total_orders || 0,
           total_revenue: data.data.total_revenue || 0,
           pending_orders: data.data.pending_orders || 0,
-          delivering_orders: data.data.delivering_orders || 0
+          delivering_orders: data.data.delivering_orders || 0,
+          completed_orders: data.data.completed_orders || 0,
+          failed_orders: data.data.failed_orders || 0
         };
         setThongKeHienThi(stats);
+        setDoanhThuTheoThoiGian(data.data.revenue_timeline || []);
+        setMatDoDonHang(data.data.heatmap || []);
       }
     } catch (error) {
       console.error("Lỗi tải thống kê:", error);
@@ -77,7 +92,7 @@ export default function DashboardGiamDoc() {
     taiDuLieuThongKe();
     const interval = setInterval(taiDuLieuThongKe, 30000);
     return () => clearInterval(interval);
-  }, [locThoiGian, locKhuVuc]);
+  }, [locThoiGian, locKhuVuc, tuNgay, denNgay]);
 
   const capNhatLuaChonTruongPhong = (department, userId) => {
     setTruongPhong((current) => current.map((item) => item.ten === department ? { ...item, userId } : item));
@@ -128,7 +143,7 @@ export default function DashboardGiamDoc() {
       if ((await res.json()).success) {
         taiBaoCao(); 
       }
-    } catch (error) {
+    } catch {
       alert("Lỗi kết nối máy chủ!");
     }
   };
@@ -141,42 +156,19 @@ export default function DashboardGiamDoc() {
   };
 
   // ================= DỮ LIỆU BIỂU ĐỒ TRỰC QUAN ĐỘNG =================
-  const donThanhCong = Math.max(0, thongKeHienThi.total_orders - thongKeHienThi.pending_orders - thongKeHienThi.delivering_orders);
-  
   const dataTrangThai = [
-    { name: 'Chờ Xử Lý/Kho', value: thongKeHienThi.pending_orders, color: '#F59E0B' },
-    { name: 'Đang Giao', value: thongKeHienThi.delivering_orders, color: '#4F46E5' },
-    { name: 'Thành Công', value: donThanhCong, color: '#10B981' }
+    { name: 'Giao thành công', value: thongKeHienThi.completed_orders, color: '#10B981' },
+    { name: 'Giao thất bại / hoàn hàng', value: thongKeHienThi.failed_orders, color: '#EF4444' }
   ];
+  const totalOutcomeOrders = thongKeHienThi.completed_orders + thongKeHienThi.failed_orders;
 
-  // Logic tạo mảng biểu đồ mượt mà theo Bộ Lọc Thời Gian
-  let dataDoanhThu = [];
-  const doanhThuNen = thongKeHienThi.total_revenue || 0;
-
-  if (locThoiGian === 'today') {
-    dataDoanhThu = [
-      { label: '08:00', revenue: doanhThuNen * 0.05 }, { label: '11:00', revenue: doanhThuNen * 0.2 },
-      { label: '14:00', revenue: doanhThuNen * 0.35 }, { label: '17:00', revenue: doanhThuNen * 0.25 },
-      { label: '20:00', revenue: doanhThuNen * 0.15 }
-    ];
-  } else if (locThoiGian === 'week') {
-    dataDoanhThu = [
-      { label: 'T2', revenue: doanhThuNen * 0.1 }, { label: 'T3', revenue: doanhThuNen * 0.15 },
-      { label: 'T4', revenue: doanhThuNen * 0.12 }, { label: 'T5', revenue: doanhThuNen * 0.2 },
-      { label: 'T6', revenue: doanhThuNen * 0.25 }, { label: 'T7', revenue: doanhThuNen * 0.1 },
-      { label: 'CN', revenue: doanhThuNen * 0.08 }
-    ];
-  } else if (locThoiGian === 'month') {
-    dataDoanhThu = [
-      { label: 'Tuần 1', revenue: doanhThuNen * 0.2 }, { label: 'Tuần 2', revenue: doanhThuNen * 0.25 },
-      { label: 'Tuần 3', revenue: doanhThuNen * 0.35 }, { label: 'Tuần 4', revenue: doanhThuNen * 0.2 }
-    ];
-  } else {
-    dataDoanhThu = [
-      { label: 'Quý 1', revenue: doanhThuNen * 0.2 }, { label: 'Quý 2', revenue: doanhThuNen * 0.25 },
-      { label: 'Quý 3', revenue: doanhThuNen * 0.22 }, { label: 'Quý 4', revenue: doanhThuNen * 0.33 }
-    ];
-  }
+  const maxHeatmapOrders = Math.max(...matDoDonHang.map((item) => Number(item.order_count) || 0), 1);
+  const heatmapPoints = matDoDonHang.filter((item) => (
+    item.lat !== null && item.lat !== undefined
+    && item.lng !== null && item.lng !== undefined
+    && Number.isFinite(Number(item.lat)) && Number.isFinite(Number(item.lng))
+    && Math.abs(Number(item.lat)) <= 90 && Math.abs(Number(item.lng)) <= 180
+  ));
 
   return (
     <div className="flex min-h-screen bg-[#F4F7FE] font-sans text-slate-700">
@@ -260,8 +252,22 @@ export default function DashboardGiamDoc() {
                     <option value="week">Tuần này</option>
                     <option value="month">Tháng này</option>
                     <option value="year">Năm nay</option>
+                    <option value="custom">Khoảng ngày</option>
                   </select>
                 </div>
+                {locThoiGian === 'custom' && (
+                  <div className="flex flex-col gap-1">
+                    <div className="flex flex-wrap items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 shadow-sm">
+                      <label className="text-xs font-bold text-slate-500">Từ
+                        <input type="date" value={tuNgay} max={denNgay || undefined} onChange={(event) => setTuNgay(event.target.value)} className="ml-2 rounded border border-slate-200 p-1.5 text-sm font-medium text-slate-700" />
+                      </label>
+                      <label className="text-xs font-bold text-slate-500">Đến
+                        <input type="date" value={denNgay} min={tuNgay || undefined} onChange={(event) => setDenNgay(event.target.value)} className="ml-2 rounded border border-slate-200 p-1.5 text-sm font-medium text-slate-700" />
+                      </label>
+                    </div>
+                    {(!tuNgay || !denNgay) && <span className="text-xs font-medium text-amber-700">Chọn đủ ngày bắt đầu và kết thúc để tải báo cáo.</span>}
+                  </div>
+                )}
                 
                 <div className="flex items-center gap-2 bg-white px-4 py-2.5 rounded-xl border border-slate-200 shadow-sm">
                   <MapPin size={18} className="text-blue-500"/>
@@ -270,10 +276,14 @@ export default function DashboardGiamDoc() {
                     onChange={e => setLocKhuVuc(e.target.value)}
                     className="bg-transparent border-none outline-none font-bold text-slate-700 text-sm cursor-pointer"
                   >
-                    <option value="all">Toàn Quốc</option>
-                    <option value="mb">Khu Vực Miền Bắc</option>
-                    <option value="mt">Khu Vực Miền Trung</option>
-                    <option value="mn">Khu Vực Miền Nam</option>
+                    <option value="all">Tất cả Quận/Huyện</option>
+                    {[
+                      'Quận 1', 'Quận 3', 'Quận 4', 'Quận 5', 'Quận 6', 'Quận 7', 'Quận 8', 'Quận 10',
+                      'Quận 11', 'Quận 12', 'Quận Bình Tân', 'Quận Bình Thạnh', 'Quận Gò Vấp',
+                      'Quận Phú Nhuận', 'Quận Tân Bình', 'Quận Tân Phú', 'Thành phố Thủ Đức',
+                      'Huyện Bình Chánh', 'Huyện Cần Giờ', 'Huyện Củ Chi', 'Huyện Hóc Môn', 'Huyện Nhà Bè',
+                      'Quận 2', 'Quận 9'
+                    ].map((district) => <option key={district} value={district}>{district}</option>)}
                   </select>
                 </div>
 
@@ -336,7 +346,7 @@ export default function DashboardGiamDoc() {
                 </div>
                 <div className="h-[320px] w-full">
                   <ResponsiveContainer width="100%" height="100%">
-                    <AreaChart data={dataDoanhThu} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+                    <AreaChart data={doanhThuTheoThoiGian} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
                       <defs>
                         <linearGradient id="colorRevenue" x1="0" y1="0" x2="0" y2="1">
                           <stop offset="5%" stopColor="#F59E0B" stopOpacity={0.3}/>
@@ -363,7 +373,7 @@ export default function DashboardGiamDoc() {
                   <p className="text-sm text-slate-500 font-medium mt-1">Tỷ lệ hoàn thành đơn</p>
                 </div>
                 <div className="flex-1 flex flex-col justify-center items-center relative mt-4">
-                  {thongKeHienThi.total_orders === 0 ? (
+                  {totalOutcomeOrders === 0 ? (
                     <p className="text-slate-400 font-medium my-auto">Chưa có dữ liệu.</p>
                   ) : (
                     <>
@@ -387,8 +397,8 @@ export default function DashboardGiamDoc() {
                       </div>
                       
                       <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none mt-2">
-                        <span className="text-4xl font-black text-slate-800">{thongKeHienThi.total_orders}</span>
-                        <span className="text-xs font-bold text-slate-400">TỔNG ĐƠN</span>
+                        <span className="text-4xl font-black text-slate-800">{totalOutcomeOrders}</span>
+                        <span className="text-xs font-bold text-slate-400">ĐÃ CÓ KẾT QUẢ</span>
                       </div>
                       
                       <div className="w-full grid grid-cols-1 gap-3 mt-4">
@@ -407,6 +417,34 @@ export default function DashboardGiamDoc() {
                 </div>
               </div>
 
+            </div>
+            <div className="mt-6 rounded-[32px] border border-slate-100 bg-white p-6 shadow-sm">
+              <div className="mb-4">
+                <h3 className="text-xl font-black text-slate-800">Heatmap mật độ đơn hàng</h3>
+                <p className="mt-1 text-sm font-medium text-slate-500">Vị trí được tổng hợp từ tọa độ giao hàng thực tế; vòng tròn lớn và đậm biểu thị nhiều đơn hơn.</p>
+              </div>
+              {heatmapPoints.length > 0 ? (
+                <MapContainer center={[10.7769, 106.7009]} zoom={10} scrollWheelZoom={false} className="h-[420px] w-full rounded-2xl">
+                  <TileLayer attribution="&copy; OpenStreetMap contributors" url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
+                  {heatmapPoints.map((item) => {
+                    const intensity = Math.min(Number(item.order_count) / maxHeatmapOrders, 1);
+                    return (
+                      <CircleMarker
+                        key={`${item.district}-${item.lat}-${item.lng}`}
+                        center={[Number(item.lat), Number(item.lng)]}
+                        radius={8 + intensity * 22}
+                        pathOptions={{ color: '#b91c1c', fillColor: '#ef4444', fillOpacity: 0.2 + intensity * 0.55, weight: 2 }}
+                      >
+                        <Popup>{item.district || 'Chưa phân khu'}: {Number(item.order_count).toLocaleString()} đơn</Popup>
+                      </CircleMarker>
+                    );
+                  })}
+                </MapContainer>
+              ) : (
+                <div className="flex h-48 items-center justify-center rounded-2xl bg-slate-50 text-sm font-medium text-slate-500">
+                  Chưa có đơn hàng có tọa độ giao hàng trong bộ lọc này.
+                </div>
+              )}
             </div>
           </div>
         )}

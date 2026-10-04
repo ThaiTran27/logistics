@@ -8,6 +8,8 @@ SET FOREIGN_KEY_CHECKS = 0;
 
 DROP TABLE IF EXISTS driver_positions;
 DROP TABLE IF EXISTS driver_routes;
+DROP TABLE IF EXISTS chat_messages;
+DROP TABLE IF EXISTS chat_sessions;
 DROP TABLE IF EXISTS cod_settlements;
 DROP TABLE IF EXISTS notifications;
 DROP TABLE IF EXISTS warehouses;
@@ -76,6 +78,9 @@ CREATE TABLE orders (
   cod_collected_amount DECIMAL(12,2) NOT NULL DEFAULT 0,
   cod_payment_method ENUM('cash','bank_transfer') DEFAULT NULL,
   cod_settlement_id INT NULL,
+  cod_remittance_id BIGINT NULL,
+  service_fee DECIMAL(12,2) NOT NULL DEFAULT 0,
+  insurance_fee DECIMAL(12,2) NOT NULL DEFAULT 0,
   is_cod_paid TINYINT(1) DEFAULT 0,
   proof_image VARCHAR(255) DEFAULT NULL,
   fail_reason TEXT DEFAULT NULL,
@@ -116,6 +121,31 @@ CREATE TABLE notifications (
   KEY idx_notifications_recipient (recipient_user_id, is_read, created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+CREATE TABLE chat_sessions (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  mode ENUM('ai','live') NOT NULL,
+  customer_user_id INT DEFAULT NULL,
+  customer_name VARCHAR(255) NOT NULL,
+  customer_phone VARCHAR(50) DEFAULT NULL,
+  guest_token_hash CHAR(64) NOT NULL,
+  status ENUM('waiting','active','closed') NOT NULL DEFAULT 'waiting',
+  assigned_agent_id INT DEFAULT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  KEY idx_chat_sessions_queue (mode, status, updated_at),
+  KEY idx_chat_sessions_agent (assigned_agent_id, status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE chat_messages (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  session_id BIGINT NOT NULL,
+  sender_type ENUM('customer','agent','bot') NOT NULL,
+  sender_id INT DEFAULT NULL,
+  message TEXT NOT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_chat_messages_session (session_id, id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 CREATE TABLE warehouses (
   id INT AUTO_INCREMENT PRIMARY KEY,
   warehouse_type ENUM('central','ward') NOT NULL,
@@ -139,9 +169,91 @@ CREATE TABLE cod_settlements (
   id BIGINT AUTO_INCREMENT PRIMARY KEY,
   shop_id INT NOT NULL,
   total_cod DECIMAL(12,2) NOT NULL DEFAULT 0,
+  total_shipping_fee DECIMAL(12,2) NOT NULL DEFAULT 0,
+  total_service_fee DECIMAL(12,2) NOT NULL DEFAULT 0,
+  total_insurance_fee DECIMAL(12,2) NOT NULL DEFAULT 0,
+  total_paid DECIMAL(12,2) NOT NULL DEFAULT 0,
   order_count INT NOT NULL DEFAULT 0,
   settled_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   KEY idx_cod_settlements_shop (shop_id, settled_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE shipment_bags (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  bag_code VARCHAR(40) NOT NULL UNIQUE,
+  source_warehouse_id INT NOT NULL,
+  destination_warehouse_id INT NOT NULL,
+  status ENUM('open','sealed','in_transit','received') NOT NULL DEFAULT 'open',
+  created_by INT DEFAULT NULL,
+  sealed_at DATETIME DEFAULT NULL,
+  received_at DATETIME DEFAULT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_shipment_bags_route (source_warehouse_id, destination_warehouse_id, status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE shipment_bag_orders (
+  bag_id BIGINT NOT NULL,
+  order_id INT NOT NULL,
+  added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (bag_id, order_id),
+  KEY idx_shipment_bag_orders_order (order_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE linehaul_trips (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  trip_code VARCHAR(40) NOT NULL UNIQUE,
+  vehicle_plate VARCHAR(30) NOT NULL,
+  driver_id INT DEFAULT NULL,
+  source_warehouse_id INT NOT NULL,
+  destination_warehouse_id INT NOT NULL,
+  status ENUM('planned','loading','in_transit','completed','cancelled') NOT NULL DEFAULT 'planned',
+  departed_at DATETIME DEFAULT NULL,
+  arrived_at DATETIME DEFAULT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_linehaul_trip_status (status, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE linehaul_trip_bags (
+  trip_id BIGINT NOT NULL,
+  bag_id BIGINT NOT NULL,
+  assigned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  driver_scanned_at DATETIME DEFAULT NULL,
+  PRIMARY KEY (trip_id, bag_id),
+  UNIQUE KEY uq_linehaul_bag_trip (bag_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE driver_cash_remittances (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  driver_id INT NOT NULL,
+  amount DECIMAL(12,2) NOT NULL,
+  status ENUM('pending','received') NOT NULL DEFAULT 'pending',
+  received_by INT DEFAULT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  received_at DATETIME DEFAULT NULL,
+  KEY idx_driver_cash_remittance (driver_id, status, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE driver_incidents (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  driver_id INT NOT NULL,
+  incident_type ENUM('accident','vehicle_breakdown','traffic','other') NOT NULL,
+  description TEXT NOT NULL,
+  lat DOUBLE DEFAULT NULL,
+  lng DOUBLE DEFAULT NULL,
+  status ENUM('open','acknowledged','resolved') NOT NULL DEFAULT 'open',
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_driver_incidents_status (status, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE employee_payroll_adjustments (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  user_id INT NOT NULL,
+  payroll_month CHAR(7) NOT NULL,
+  adjustment_type ENUM('bonus','deduction') NOT NULL,
+  amount DECIMAL(12,2) NOT NULL,
+  reason VARCHAR(255) NOT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_payroll_adjustment_user_month (user_id, payroll_month)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE service_requests (
@@ -242,6 +354,7 @@ CREATE TABLE employee_salaries (
   user_id INT PRIMARY KEY,
   monthly_salary DECIMAL(12,2) NOT NULL DEFAULT 0,
   allowance DECIMAL(12,2) NOT NULL DEFAULT 0,
+  bonus_per_delivery DECIMAL(12,2) NOT NULL DEFAULT 0,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 

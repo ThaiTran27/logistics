@@ -1,6 +1,26 @@
 import { useEffect, useState } from 'react';
+import { io } from 'socket.io-client';
+import { MapContainer, Marker, Popup, TileLayer, useMap } from 'react-leaflet';
+import L from 'leaflet';
+import 'leaflet/dist/leaflet.css';
 import { Search, Package, MapPin, Truck, CheckCircle, Clock, User, Phone, XCircle, AlertCircle, Box, Camera, Navigation, Calculator, Store, Globe, Headphones, ChevronRight, FileText, Download, Play, MessageCircle, Users, ShieldCheck, PackageSearch } from 'lucide-react';
 import { Link, useNavigate } from 'react-router-dom';
+
+const trackingSocket = io('http://localhost:5000');
+const movingTruckIcon = L.divIcon({
+  className: 'live-tracking-truck',
+  html: '<span style="display:block;font-size:28px;line-height:32px">🚚</span>',
+  iconSize: [36, 36],
+  iconAnchor: [18, 18]
+});
+
+function FollowDriver({ location }) {
+  const map = useMap();
+  useEffect(() => {
+    if (location) map.flyTo([Number(location.lat), Number(location.lng)], Math.max(map.getZoom(), 14), { duration: 0.6 });
+  }, [location, map]);
+  return null;
+}
 
 export default function TraCuuHanhTrinh() {
   const [maVanDon, setMaVanDon] = useState('');
@@ -14,6 +34,20 @@ export default function TraCuuHanhTrinh() {
   const [danhMucTin, setDanhMucTin] = useState('all');
   
   const navigate = useNavigate();
+
+  useEffect(() => {
+    const orderId = thongTinDon?.id;
+    if (!orderId) return undefined;
+    const updateDriverPosition = (position) => {
+      if (String(position.order_id) !== String(orderId)) return;
+      setThongTinDon((current) => current && ({
+        ...current,
+        driver_location: { lat: position.lat, lng: position.lng, updated_at: position.timestamp }
+      }));
+    };
+    trackingSocket.on('driver_location_changed', updateDriverPosition);
+    return () => trackingSocket.off('driver_location_changed', updateDriverPosition);
+  }, [thongTinDon?.id]);
 
   useEffect(() => {
     const taiTinTuc = async () => {
@@ -92,9 +126,10 @@ export default function TraCuuHanhTrinh() {
     { id: 'completed', ten: 'Giao Thành Công', desc: 'Đơn hàng đã được giao tận tay người nhận.', icon: CheckCircle }
   ];
 
-  const mapTarget = thongTinDon?.driver_location || thongTinDon?.warehouse || { lat: 10.762622, lng: 106.660172 };
-  const mapQuery = `${mapTarget.lat},${mapTarget.lng}`;
-  const mapUrl = `https://www.google.com/maps?q=${mapQuery}&z=12&output=embed`;
+  const mapTarget = thongTinDon?.driver_location;
+  const mapCenter = mapTarget
+    ? [Number(mapTarget.lat), Number(mapTarget.lng)]
+    : [10.762622, 106.660172];
 
   const layTrangThaiBuoc = (trangThaiHienTai, idBuoc) => {
     const thuTu = cacBuocHanhTrinh.map((step) => step.id);
@@ -269,11 +304,15 @@ export default function TraCuuHanhTrinh() {
           <div className="w-full bg-white rounded-xl shadow-lg border border-slate-200 overflow-hidden animate-in fade-in slide-in-from-bottom-8 duration-700">
             <div className="p-6 md:p-8 border-b border-slate-200 bg-slate-50/50">
               <div className="mb-8 h-72 rounded-2xl overflow-hidden border border-slate-200 bg-slate-100">
-                <iframe
-                  title="Customer tracking map"
-                  className="h-full w-full border-0"
-                  src={mapUrl}
-                />
+                <MapContainer center={mapCenter} zoom={mapTarget ? 14 : 11} className="h-full w-full">
+                  <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
+                  <FollowDriver location={mapTarget} />
+                  {mapTarget && (
+                    <Marker position={mapCenter} icon={movingTruckIcon}>
+                      <Popup>Tài xế đang di chuyển theo thời gian thực</Popup>
+                    </Marker>
+                  )}
+                </MapContainer>
               </div>
               <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-8">
                 <div>

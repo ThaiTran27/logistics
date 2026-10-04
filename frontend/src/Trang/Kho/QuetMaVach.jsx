@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { ScanLine, Barcode, LogOut, Box, ArrowRightLeft, CheckCircle, AlertCircle, PackageSearch, Camera, ImagePlus, X, MapPin, Save, Plus } from 'lucide-react';
+import { ScanLine, Barcode, LogOut, Box, ArrowRightLeft, CheckCircle, AlertCircle, PackageSearch, Camera, ImagePlus, X, MapPin, Save, Plus, Truck } from 'lucide-react';
 import { Html5Qrcode, Html5QrcodeScanner, Html5QrcodeSupportedFormats } from 'html5-qrcode';
 
 const supportedBarcodeFormats = [
@@ -26,10 +26,25 @@ export default function QuetMaVach() {
   const [trangThaiCamera, setTrangThaiCamera] = useState('');
   const [dangXuLy, setDangXuLy] = useState(false);
   const [tabKho, setTabKho] = useState('scan');
+  const [wrongWarehouseAlarm, setWrongWarehouseAlarm] = useState(false);
   const [danhSachKho, setDanhSachKho] = useState([]);
   const [khoDrafts, setKhoDrafts] = useState({});
   const [phuongMoi, setPhuongMoi] = useState('');
   const [warehouseId, setWarehouseId] = useState('');
+  const [dispatchCode, setDispatchCode] = useState('');
+  const [dispatchType, setDispatchType] = useState('');
+  const [dispatchDrivers, setDispatchDrivers] = useState([]);
+  const [dispatchDriverId, setDispatchDriverId] = useState('');
+  const [dispatchBusy, setDispatchBusy] = useState(false);
+  const [bags, setBags] = useState([]);
+  const [linehaulTrips, setLinehaulTrips] = useState([]);
+  const [bagDestinationId, setBagDestinationId] = useState('');
+  const [selectedBagId, setSelectedBagId] = useState('');
+  const [bagScanCode, setBagScanCode] = useState('');
+  const [tripDraft, setTripDraft] = useState({ vehicle_plate: '', driver_id: '', source_warehouse_id: '', destination_warehouse_id: '' });
+  const [tripBagCode, setTripBagCode] = useState('');
+  const [tripIdForBag, setTripIdForBag] = useState('');
+  const [linehaulScanCode, setLinehaulScanCode] = useState('');
   
   // State quản lý việc bật/tắt Camera
   const [moCamera, setMoCamera] = useState(false);
@@ -37,6 +52,7 @@ export default function QuetMaVach() {
   const inputRef = useRef(null);
   const imageInputRef = useRef(null);
   const warehouseName = localStorage.getItem('full_name') || 'Thủ Kho';
+  const selectedWarehouse = danhSachKho.find((warehouse) => String(warehouse.id) === String(warehouseId));
 
   const taiTonKho = async (selectedWarehouseId = warehouseId) => {
     try {
@@ -74,6 +90,157 @@ export default function QuetMaVach() {
   useEffect(() => {
     taiTonKho(warehouseId);
   }, [warehouseId]);
+
+  useEffect(() => {
+    if (tabKho !== 'outbound' || !selectedWarehouse) return;
+    setDispatchType(selectedWarehouse.warehouse_type === 'central' ? 'destination_transfer' : 'central_transfer');
+  }, [tabKho, selectedWarehouse?.id, selectedWarehouse?.warehouse_type]);
+
+  useEffect(() => {
+    if (tabKho !== 'outbound' || !dispatchType) return;
+    fetch(`http://localhost:5000/api/shippers?type=${dispatchType}`)
+      .then((response) => response.json())
+      .then((data) => {
+        if (!data.success) throw new Error(data.message || 'Không tải được danh sách tài xế.');
+        setDispatchDrivers(data.data || []);
+        setDispatchDriverId((current) => data.data?.some((driver) => String(driver.id) === current)
+          ? current : String(data.data?.[0]?.id || ''));
+      })
+      .catch((error) => setThongBao({ loai: 'loi', thongDiep: error.message || 'Không tải được tài xế.' }));
+  }, [tabKho, dispatchType]);
+
+  const taiDuLieuLinehaul = async () => {
+    try {
+      const [bagsResponse, tripsResponse] = await Promise.all([
+        fetch(`http://localhost:5000/api/warehouse/bags?warehouse_id=${warehouseId}`),
+        fetch('http://localhost:5000/api/linehaul/trips')
+      ]);
+      const [bagsData, tripsData] = await Promise.all([bagsResponse.json(), tripsResponse.json()]);
+      if (!bagsResponse.ok || !bagsData.success) throw new Error(bagsData.message || 'Không tải được danh sách bao.');
+      if (!tripsResponse.ok || !tripsData.success) throw new Error(tripsData.message || 'Không tải được chuyến xe.');
+      setBags(bagsData.data || []);
+      setLinehaulTrips(tripsData.data || []);
+    } catch (error) {
+      setThongBao({ loai: 'loi', thongDiep: error.message || 'Không thể tải dữ liệu trung chuyển.' });
+    }
+  };
+
+  useEffect(() => {
+    if (tabKho === 'linehaul' && warehouseId) taiDuLieuLinehaul();
+  }, [tabKho, warehouseId]);
+
+  const taoBaoHang = async (event) => {
+    event.preventDefault();
+    if (!warehouseId || !bagDestinationId) return setThongBao({ loai: 'loi', thongDiep: 'Chọn kho nguồn và kho đích cho bao.' });
+    try {
+      const response = await fetch('http://localhost:5000/api/warehouse/bags', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source_warehouse_id: Number(warehouseId), destination_warehouse_id: Number(bagDestinationId), created_by: localStorage.getItem('user_id') })
+      });
+      const data = await response.json();
+      if (!response.ok || !data.success) throw new Error(data.message || 'Không tạo được bao hàng.');
+      setSelectedBagId(String(data.data.id));
+      setThongBao({ loai: 'thanhcong', thongDiep: `Đã tạo bao ${data.data.bag_code}.` });
+      await taiDuLieuLinehaul();
+    } catch (error) {
+      setThongBao({ loai: 'loi', thongDiep: error.message || 'Không thể tạo bao hàng.' });
+    }
+  };
+
+  const quetDonVaoBao = async (event) => {
+    event.preventDefault();
+    const selectedBag = bags.find((bag) => String(bag.id) === selectedBagId);
+    if (!selectedBag || !bagScanCode.trim()) return;
+    try {
+      const response = await fetch(`http://localhost:5000/api/warehouse/bags/${selectedBag.id}/scan`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tracking_code: bagScanCode })
+      });
+      const data = await response.json();
+      if (!response.ok || !data.success) throw new Error(data.message || 'Không thể thêm đơn vào bao.');
+      setBagScanCode('');
+      setThongBao({ loai: 'thanhcong', thongDiep: `${data.message} Bao có ${data.data.order_count} đơn.` });
+      await taiDuLieuLinehaul();
+    } catch (error) {
+      setThongBao({ loai: 'loi', thongDiep: error.message || 'Không thể quét đơn vào bao.' });
+    }
+  };
+
+  const niemPhongBao = async (bag) => {
+    try {
+      const response = await fetch(`http://localhost:5000/api/warehouse/bags/${bag.id}/seal`, { method: 'PUT' });
+      const data = await response.json();
+      if (!response.ok || !data.success) throw new Error(data.message || 'Không thể niêm phong bao.');
+      setThongBao({ loai: 'thanhcong', thongDiep: data.message });
+      await taiDuLieuLinehaul();
+    } catch (error) {
+      setThongBao({ loai: 'loi', thongDiep: error.message || 'Không thể niêm phong bao.' });
+    }
+  };
+
+  const taoChuyenXe = async (event) => {
+    event.preventDefault();
+    try {
+      const response = await fetch('http://localhost:5000/api/linehaul/trips', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...tripDraft,
+          source_warehouse_id: Number(tripDraft.source_warehouse_id),
+          destination_warehouse_id: Number(tripDraft.destination_warehouse_id),
+          driver_id: tripDraft.driver_id ? Number(tripDraft.driver_id) : null
+        })
+      });
+      const data = await response.json();
+      if (!response.ok || !data.success) throw new Error(data.message || 'Không tạo được chuyến xe.');
+      setTripIdForBag(String(data.data.id));
+      setTripDraft({ vehicle_plate: '', driver_id: '', source_warehouse_id: '', destination_warehouse_id: '' });
+      setThongBao({ loai: 'thanhcong', thongDiep: `Đã tạo chuyến ${data.data.trip_code}.` });
+      await taiDuLieuLinehaul();
+    } catch (error) {
+      setThongBao({ loai: 'loi', thongDiep: error.message || 'Không thể tạo chuyến xe.' });
+    }
+  };
+
+  const ganBaoVaoChuyen = async (event) => {
+    event.preventDefault();
+    if (!tripIdForBag || !tripBagCode.trim()) return;
+    try {
+      const response = await fetch(`http://localhost:5000/api/linehaul/trips/${tripIdForBag}/bags`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ bag_code: tripBagCode })
+      });
+      const data = await response.json();
+      if (!response.ok || !data.success) throw new Error(data.message || 'Không thể gán bao vào chuyến.');
+      setTripBagCode('');
+      setThongBao({ loai: 'thanhcong', thongDiep: data.message });
+      await taiDuLieuLinehaul();
+    } catch (error) {
+      setThongBao({ loai: 'loi', thongDiep: error.message || 'Không thể gán bao vào chuyến.' });
+    }
+  };
+
+  const nhapBaoTrungChuyen = async (event) => {
+    event.preventDefault();
+    try {
+      const response = await fetch('http://localhost:5000/api/warehouse/linehaul/scan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ bag_code: linehaulScanCode, warehouse_id: Number(warehouseId) })
+      });
+      const data = await response.json();
+      if (!response.ok || !data.success) throw new Error(data.message || 'Không thể nhập bao vào kho.');
+      setLinehaulScanCode('');
+      setThongBao({ loai: 'thanhcong', thongDiep: data.message });
+      await taiDuLieuLinehaul();
+      await taiTonKho();
+    } catch (error) {
+      setThongBao({ loai: 'loi', thongDiep: error.message || 'Không thể nhập bao trung chuyển.' });
+    }
+  };
 
   const taoKhoPhuong = async (event) => {
     event.preventDefault();
@@ -128,12 +295,37 @@ export default function QuetMaVach() {
       const data = await res.json();
 
       if (data.success) {
+        setWrongWarehouseAlarm(false);
         setThongBao({ loai: 'thanhcong', thongDiep: data.message });
         taiTonKho(); 
       } else {
+        if (res.status === 409) {
+          setWrongWarehouseAlarm(true);
+          try {
+            const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+            if (AudioContextClass) {
+              const audioContext = new AudioContextClass();
+              [0, 0.22].forEach((delay) => {
+                const oscillator = audioContext.createOscillator();
+                const gain = audioContext.createGain();
+                oscillator.frequency.value = 880;
+                gain.gain.setValueAtTime(0.15, audioContext.currentTime + delay);
+                gain.gain.exponentialRampToValueAtTime(0.001, audioContext.currentTime + delay + 0.12);
+                oscillator.connect(gain);
+                gain.connect(audioContext.destination);
+                oscillator.start(audioContext.currentTime + delay);
+                oscillator.stop(audioContext.currentTime + delay + 0.12);
+              });
+              window.setTimeout(() => audioContext.close(), 600);
+            }
+          } catch (audioError) {
+            console.warn('Trình duyệt không phát được âm báo quét sai kho:', audioError);
+          }
+          window.setTimeout(() => setWrongWarehouseAlarm(false), 2500);
+        }
         setThongBao({ loai: 'loi', thongDiep: data.message });
       }
-    } catch (error) {
+    } catch {
       setThongBao({ loai: 'loi', thongDiep: 'Lỗi kết nối đến máy chủ!' });
     } finally {
       setDangXuLy(false);
@@ -142,6 +334,47 @@ export default function QuetMaVach() {
       
       // Ẩn thông báo sau 3 giây
       setTimeout(() => setThongBao({ loai: '', thongDiep: '' }), 3000);
+    }
+  };
+
+  const xuLyXuatKho = async (event) => {
+    event.preventDefault();
+    const code = dispatchCode.trim().toUpperCase();
+    const order = anToanTonKho.find((item) => String(item.tracking_code).toUpperCase() === code);
+    if (!order) {
+      setThongBao({ loai: 'loi', thongDiep: 'Đơn hàng chưa có trong tồn kho của kho này. Hãy quét mã đơn đã nhập kho.' });
+      return;
+    }
+    if (!dispatchDriverId) {
+      setThongBao({ loai: 'loi', thongDiep: 'Vui lòng chọn tài xế trung chuyển hoặc giao hàng.' });
+      return;
+    }
+    const taskByStatus = {
+      at_origin_warehouse: 'central_transfer',
+      at_central_warehouse: 'destination_transfer',
+      at_destination_warehouse: 'delivery'
+    };
+    const taskType = taskByStatus[order.status];
+    if (!taskType || taskType !== dispatchType) {
+      setThongBao({ loai: 'loi', thongDiep: 'Đơn hàng không thuộc luồng xuất kho đang chọn.' });
+      return;
+    }
+    setDispatchBusy(true);
+    try {
+      const response = await fetch(`http://localhost:5000/api/orders/${order.id}/assign`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ shipper_id: Number(dispatchDriverId), task_type: dispatchType })
+      });
+      const data = await response.json();
+      if (!response.ok || !data.success) throw new Error(data.message || 'Không thể gán đơn lên xe.');
+      setThongBao({ loai: 'thanhcong', thongDiep: data.message });
+      setDispatchCode('');
+      await taiTonKho();
+    } catch (error) {
+      setThongBao({ loai: 'loi', thongDiep: error.message || 'Lỗi kết nối khi xuất kho.' });
+    } finally {
+      setDispatchBusy(false);
     }
   };
 
@@ -246,7 +479,7 @@ export default function QuetMaVach() {
   const anToanTonKho = Array.isArray(tonKho) ? tonKho : [];
 
   return (
-    <div className="flex min-h-screen bg-[#F1F5F9] font-sans text-slate-800">
+    <div className={`flex min-h-screen font-sans text-slate-800 transition-colors ${wrongWarehouseAlarm ? 'bg-red-100' : 'bg-[#F1F5F9]'}`}>
       <div id="barcode-image-reader" className="fixed left-[-10000px] top-0 h-px w-px overflow-hidden" aria-hidden="true" />
       
       {/* SIDEBAR */}
@@ -265,6 +498,12 @@ export default function QuetMaVach() {
           <div className="p-5 mt-2 space-y-2">
             <button onClick={() => setTabKho('scan')} className={`w-full px-5 py-4 rounded-2xl font-bold flex items-center gap-4 transition-all ${tabKho === 'scan' ? 'bg-indigo-500/10 text-indigo-400 border border-indigo-500/20' : 'text-slate-500 hover:bg-slate-800 hover:text-slate-300'}`}>
               <ScanLine size={20} /> Máy Quét Mã Vạch
+            </button>
+            <button onClick={() => setTabKho('outbound')} className={`w-full px-5 py-4 rounded-2xl font-bold flex items-center gap-4 transition-all ${tabKho === 'outbound' ? 'bg-indigo-500/10 text-indigo-400 border border-indigo-500/20' : 'text-slate-500 hover:bg-slate-800 hover:text-slate-300'}`}>
+              <Truck size={20} /> Xuất Kho / Gán Xe
+            </button>
+            <button onClick={() => setTabKho('linehaul')} className={`w-full px-5 py-4 rounded-2xl font-bold flex items-center gap-4 transition-all ${tabKho === 'linehaul' ? 'bg-indigo-500/10 text-indigo-400 border border-indigo-500/20' : 'text-slate-500 hover:bg-slate-800 hover:text-slate-300'}`}>
+              <ArrowRightLeft size={20} /> Đóng Bao / Trung Chuyển
             </button>
             <button onClick={() => setTabKho('kiem-ke')} className={`w-full px-5 py-4 rounded-2xl font-bold flex items-center gap-4 transition-all ${tabKho === 'kiem-ke' ? 'bg-indigo-500/10 text-indigo-400 border border-indigo-500/20' : 'text-slate-500 hover:bg-slate-800 hover:text-slate-300'}`}>
               <Box size={20} /> Kiểm Kê Định Kỳ
@@ -329,6 +568,155 @@ export default function QuetMaVach() {
               })}
               {danhSachKho.filter((warehouse) => warehouse.warehouse_type === 'ward').length === 0 && <p className="rounded-xl border border-dashed border-slate-300 p-8 text-center text-sm text-slate-500">Chưa tạo kho con nào. Thêm từng phường và nhập vị trí thật để kích hoạt.</p>}
             </div>
+          </div>
+        ) : tabKho === 'outbound' ? (
+          <div className="flex-1 p-6 md:p-10">
+            <div className="mx-auto max-w-4xl">
+              <p className="text-xs font-black uppercase tracking-[0.22em] text-indigo-600">Bàn giao vận tải</p>
+              <h1 className="mt-3 text-3xl font-black text-slate-800">Xuất kho và gán đơn lên xe</h1>
+              <p className="mt-2 text-sm text-slate-500">Quét mã vận đơn đang tồn tại tại kho, chọn đúng chặng và tài xế để chuyển trạng thái vận chuyển.</p>
+              {!warehouseId ? (
+                <p className="mt-6 rounded-xl border border-amber-200 bg-amber-50 p-4 font-bold text-amber-800">Chọn kho đang thao tác trước khi xuất hàng.</p>
+              ) : (
+                <form onSubmit={xuLyXuatKho} className="mt-6 space-y-5 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+                  <p className="font-bold text-slate-700">Kho hiện tại: {selectedWarehouse?.name}</p>
+                  <label className="block text-sm font-bold text-slate-600">Luồng xuất kho
+                    <select value={dispatchType} onChange={(event) => setDispatchType(event.target.value)} className="mt-2 w-full rounded-lg border border-slate-200 bg-white p-3">
+                      {selectedWarehouse?.warehouse_type === 'central'
+                        ? <option value="destination_transfer">Kho tổng → Kho phường đích (xe tải trung chuyển)</option>
+                        : <option value="central_transfer">Kho phường nguồn → Kho tổng (xe tải trung chuyển)</option>}
+                      {selectedWarehouse?.warehouse_type === 'ward' && <option value="delivery">Kho phường đích → Người nhận (xe máy giao hàng)</option>}
+                    </select>
+                  </label>
+                  <label className="block text-sm font-bold text-slate-600">Mã vận đơn (quét bằng máy đọc mã vạch)
+                    <input autoFocus value={dispatchCode} onChange={(event) => setDispatchCode(event.target.value)} placeholder="Đặt con trỏ vào đây rồi quét mã" className="mt-2 w-full rounded-lg border border-slate-200 p-3 font-mono text-lg uppercase tracking-wider" />
+                  </label>
+                  <label className="block text-sm font-bold text-slate-600">Tài xế
+                    <select value={dispatchDriverId} onChange={(event) => setDispatchDriverId(event.target.value)} required className="mt-2 w-full rounded-lg border border-slate-200 bg-white p-3">
+                      {dispatchDrivers.map((driver) => <option key={driver.id} value={driver.id}>{driver.full_name}</option>)}
+                    </select>
+                  </label>
+                  <button type="submit" disabled={dispatchBusy || !dispatchDrivers.length} className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-indigo-600 px-5 py-3 font-black text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50">
+                    <Truck size={18} /> {dispatchBusy ? 'Đang xuất kho...' : 'Xác nhận bàn giao lên xe'}
+                  </button>
+                  {!dispatchDrivers.length && <p className="text-sm font-semibold text-amber-700">Không có tài xế đang hoạt động thuộc nhóm chặng này.</p>}
+                  <div className="border-t border-slate-100 pt-4">
+                    <h2 className="font-black text-slate-800">Đơn đang nằm tại kho ({anToanTonKho.length})</h2>
+                    <div className="mt-3 max-h-72 space-y-2 overflow-y-auto">
+                      {anToanTonKho.map((order) => <button key={order.id} type="button" onClick={() => setDispatchCode(order.tracking_code)} className="flex w-full items-center justify-between rounded-lg border border-slate-100 p-3 text-left hover:border-indigo-200 hover:bg-indigo-50"><span className="font-mono font-bold">{order.tracking_code}</span><span className="text-xs text-slate-500">{order.status}</span></button>)}
+                      {!anToanTonKho.length && <p className="text-sm text-slate-500">Kho hiện chưa có đơn chờ xuất.</p>}
+                    </div>
+                  </div>
+                </form>
+              )}
+            </div>
+          </div>
+        ) : tabKho === 'linehaul' ? (
+          <div className="flex-1 space-y-8 p-6 md:p-10">
+            <header>
+              <p className="text-xs font-black uppercase tracking-[0.22em] text-indigo-600">Hub & spoke · Line-haul</p>
+              <h1 className="mt-3 text-3xl font-black text-slate-800">Đóng bao và trung chuyển liên kho</h1>
+              <p className="mt-2 text-sm text-slate-500">Gom nhiều vận đơn vào bao niêm phong; xe tải chỉ cần quét mã bao khi nhận hàng và nhập kho.</p>
+            </header>
+            {!warehouseId ? (
+              <p className="rounded-xl border border-amber-200 bg-amber-50 p-4 font-bold text-amber-800">Chọn kho đang thao tác để đóng hoặc nhận bao.</p>
+            ) : (
+              <>
+                <section className="grid gap-6 xl:grid-cols-2">
+                  <form onSubmit={taoBaoHang} className="space-y-4 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+                    <h2 className="text-lg font-black">1. Tạo bao và quét đơn</h2>
+                    <p className="text-sm text-slate-500">Kho nguồn: <strong>{selectedWarehouse?.name}</strong></p>
+                    <label className="block text-sm font-bold text-slate-600">Kho đích
+                      <select required value={bagDestinationId} onChange={(event) => setBagDestinationId(event.target.value)} className="mt-2 w-full rounded-lg border border-slate-200 bg-white p-3">
+                        <option value="">Chọn kho đích</option>
+                        {danhSachKho.filter((warehouse) => warehouse.is_active && String(warehouse.id) !== String(warehouseId)
+                          && (selectedWarehouse?.warehouse_type === 'central' ? warehouse.warehouse_type === 'ward' : warehouse.warehouse_type === 'central'))
+                          .map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}
+                      </select>
+                    </label>
+                    <button type="submit" className="w-full rounded-xl bg-indigo-600 px-4 py-3 font-black text-white hover:bg-indigo-700">Tạo mã bao niêm phong</button>
+                    <label className="block text-sm font-bold text-slate-600">Bao đang đóng
+                      <select value={selectedBagId} onChange={(event) => setSelectedBagId(event.target.value)} className="mt-2 w-full rounded-lg border border-slate-200 bg-white p-3">
+                        <option value="">Chọn bao mở</option>
+                        {bags.filter((bag) => bag.status === 'open' && Number(bag.source_warehouse_id) === Number(warehouseId))
+                          .map((bag) => <option key={bag.id} value={bag.id}>{bag.bag_code} · {bag.order_count} đơn</option>)}
+                      </select>
+                    </label>
+                    <div className="flex gap-2">
+                      <input value={bagScanCode} onChange={(event) => setBagScanCode(event.target.value)} placeholder="Quét hoặc nhập mã vận đơn" className="min-w-0 flex-1 rounded-lg border border-slate-200 p-3 font-mono uppercase" />
+                      <button type="button" onClick={(event) => quetDonVaoBao(event)} disabled={!selectedBagId || !bagScanCode.trim()} className="rounded-lg bg-slate-900 px-4 font-bold text-white disabled:opacity-50">Quét đơn</button>
+                    </div>
+                    {selectedBagId && <button type="button" onClick={() => {
+                      const bag = bags.find((item) => String(item.id) === selectedBagId);
+                      if (bag) niemPhongBao(bag);
+                    }} className="w-full rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 font-black text-emerald-800">Niêm phong bao đã quét đủ</button>}
+                  </form>
+
+                  <form onSubmit={taoChuyenXe} className="space-y-4 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+                    <h2 className="text-lg font-black">2. Tạo chuyến và gán bao</h2>
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <label className="text-sm font-bold text-slate-600">Biển số xe
+                        <input required maxLength={30} value={tripDraft.vehicle_plate} onChange={(event) => setTripDraft((current) => ({ ...current, vehicle_plate: event.target.value }))} placeholder="51C-889.99" className="mt-2 w-full rounded-lg border border-slate-200 p-3 uppercase" />
+                      </label>
+                      <label className="text-sm font-bold text-slate-600">Mã tài xế trung chuyển
+                        <input type="number" min="1" value={tripDraft.driver_id} onChange={(event) => setTripDraft((current) => ({ ...current, driver_id: event.target.value }))} placeholder="ID nhân viên" className="mt-2 w-full rounded-lg border border-slate-200 p-3" />
+                      </label>
+                      <label className="text-sm font-bold text-slate-600">Kho đi
+                        <select required value={tripDraft.source_warehouse_id} onChange={(event) => setTripDraft((current) => ({ ...current, source_warehouse_id: event.target.value }))} className="mt-2 w-full rounded-lg border border-slate-200 bg-white p-3">
+                          <option value="">Chọn kho đi</option>{danhSachKho.filter((warehouse) => warehouse.is_active).map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}
+                        </select>
+                      </label>
+                      <label className="text-sm font-bold text-slate-600">Kho đến
+                        <select required value={tripDraft.destination_warehouse_id} onChange={(event) => setTripDraft((current) => ({ ...current, destination_warehouse_id: event.target.value }))} className="mt-2 w-full rounded-lg border border-slate-200 bg-white p-3">
+                          <option value="">Chọn kho đến</option>{danhSachKho.filter((warehouse) => warehouse.is_active).map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}
+                        </select>
+                      </label>
+                    </div>
+                    <button type="submit" className="w-full rounded-xl bg-blue-600 px-4 py-3 font-black text-white hover:bg-blue-700">Tạo chuyến xe</button>
+                    <label className="block text-sm font-bold text-slate-600">Chuyến xe nhận bao
+                      <select value={tripIdForBag} onChange={(event) => setTripIdForBag(event.target.value)} className="mt-2 w-full rounded-lg border border-slate-200 bg-white p-3">
+                        <option value="">Chọn chuyến đang xếp hàng</option>{linehaulTrips.filter((trip) => ['planned', 'loading'].includes(trip.status)).map((trip) => <option key={trip.id} value={trip.id}>{trip.trip_code} · {trip.vehicle_plate} · {trip.source_warehouse_name} → {trip.destination_warehouse_name}</option>)}
+                      </select>
+                    </label>
+                    <div className="flex gap-2">
+                      <input value={tripBagCode} onChange={(event) => setTripBagCode(event.target.value)} placeholder="Mã bao đã niêm phong" className="min-w-0 flex-1 rounded-lg border border-slate-200 p-3 font-mono uppercase" />
+                      <button type="button" onClick={(event) => ganBaoVaoChuyen(event)} disabled={!tripIdForBag || !tripBagCode.trim()} className="rounded-lg bg-slate-900 px-4 font-bold text-white disabled:opacity-50">Gán bao</button>
+                    </div>
+                  </form>
+                </section>
+
+                <form onSubmit={nhapBaoTrungChuyen} className="flex flex-col gap-3 rounded-2xl border border-emerald-200 bg-emerald-50 p-5 sm:flex-row sm:items-end">
+                  <label className="flex-1 text-sm font-bold text-emerald-900">3. Nhập bao đến kho hiện tại ({selectedWarehouse?.name})
+                    <input value={linehaulScanCode} onChange={(event) => setLinehaulScanCode(event.target.value)} placeholder="Quét mã bao tải" className="mt-2 w-full rounded-lg border border-emerald-200 bg-white p-3 font-mono uppercase" />
+                  </label>
+                  <button type="submit" disabled={!linehaulScanCode.trim()} className="rounded-xl bg-emerald-700 px-5 py-3 font-black text-white disabled:opacity-50">Quét nhập kho</button>
+                </form>
+
+                <section className="grid gap-6 xl:grid-cols-2">
+                  <div className="rounded-2xl border border-slate-200 bg-white p-5">
+                    <h2 className="mb-3 font-black">Bao hàng ({bags.length})</h2>
+                    <div className="space-y-2">
+                      {bags.map((bag) => <button key={bag.id} type="button" onClick={() => setSelectedBagId(String(bag.id))} className="flex w-full items-center justify-between gap-3 rounded-xl border border-slate-100 p-3 text-left hover:border-indigo-200">
+                        <span><strong className="font-mono">{bag.bag_code}</strong><small className="mt-1 block text-slate-500">{bag.source_warehouse_name} → {bag.destination_warehouse_name} · {bag.order_count} đơn</small></span>
+                        <span className={`rounded-full px-2 py-1 text-xs font-black ${bag.status === 'received' ? 'bg-emerald-100 text-emerald-700' : bag.status === 'in_transit' ? 'bg-blue-100 text-blue-700' : bag.status === 'sealed' ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-600'}`}>{bag.status}</span>
+                      </button>)}
+                      {!bags.length && <p className="text-sm text-slate-500">Chưa có bao hàng ở kho này.</p>}
+                    </div>
+                  </div>
+                  <div className="rounded-2xl border border-slate-200 bg-white p-5">
+                    <h2 className="mb-3 font-black">Chuyến xe trung chuyển ({linehaulTrips.length})</h2>
+                    <div className="space-y-2">
+                      {linehaulTrips.map((trip) => <article key={trip.id} className="rounded-xl border border-slate-100 p-3">
+                        <div className="flex justify-between gap-2"><strong>{trip.trip_code} · {trip.vehicle_plate}</strong><span className="text-xs font-bold text-slate-500">{trip.status}</span></div>
+                        <p className="mt-1 text-sm text-slate-500">{trip.source_warehouse_name} → {trip.destination_warehouse_name}</p>
+                        <p className="mt-1 text-xs text-slate-400">Tài xế: {trip.driver_name || 'Chưa gán'} · {trip.scanned_bag_count}/{trip.bag_count} bao đã quét</p>
+                      </article>)}
+                      {!linehaulTrips.length && <p className="text-sm text-slate-500">Chưa có chuyến xe.</p>}
+                    </div>
+                  </div>
+                </section>
+              </>
+            )}
           </div>
         ) : tabKho === 'kiem-ke' ? (
           <div className="flex-1 p-10">

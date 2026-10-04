@@ -1,9 +1,9 @@
 import { NavLink, Outlet } from 'react-router-dom';
 import {
   Package, User, Phone, Headphones, FileText, Calculator,
-  Search, Download, MapPin, Globe, CheckCircle, Play, Users,
-  Box
+  Search, Download, MapPin, Globe, CheckCircle
 } from 'lucide-react';
+import FloatingChatWidget from './FloatingChatWidget';
 
 const navItems = [
   { label: 'Trang chủ', to: '/' },
@@ -30,6 +30,9 @@ const normalizeRole = (value) => {
     kho: 'warehouse_manager',
     content: 'content_manager',
     content_manager: 'content_manager',
+    cskh: 'customer_service',
+    customer_support: 'customer_service',
+    support: 'customer_service',
     content_team: 'content_manager',
     phong_ban_noi_dung: 'content_manager',
     marketing: 'content_manager',
@@ -56,7 +59,8 @@ export default function PublicLayout() {
     accountant: '/ke-toan',
     director: '/admin',
     hr_manager: '/nhan-su',
-    content_manager: '/phong-ban-noi-dung'
+    content_manager: '/phong-ban-noi-dung',
+    customer_service: '/ho-tro'
   };
 
   const dashboardLink = role ? roleMap[role] || '/' : '/dang-nhap';
@@ -210,6 +214,7 @@ export default function PublicLayout() {
           © 2026 SmartLogistics. Mọi thông tin chỉ mang tính chất minh họa học thuật.
         </div>
       </footer>
+      <FloatingChatWidget />
     </div>
   );
 }

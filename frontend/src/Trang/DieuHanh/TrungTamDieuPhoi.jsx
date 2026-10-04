@@ -33,12 +33,14 @@ const UpdateMapSize = () => {
 
 export default function TrungTamDieuPhoi() {
   const [donHang, setDonHang] = useState([]);
+  const [allOrders, setAllOrders] = useState([]);
   const [taiXeList, setTaiXeList] = useState([]);
   const [tuKhoa, setTuKhoa] = useState('');
   const [modalMo, setModalMo] = useState(false);
   const [donDangChon, setDonDangChon] = useState(null);
   const [taiXeDuocChon, setTaiXeDuocChon] = useState('');
   const [loaiNhiemVu, setLoaiNhiemVu] = useState('pickup');
+  const [driverTaskTab, setDriverTaskTab] = useState('pickup');
   
   const [viTriTaiXeMap, setViTriTaiXeMap] = useState({});
   const [tabHienTai, setTabHienTai] = useState('dieuphoan'); 
@@ -55,6 +57,7 @@ export default function TrungTamDieuPhoi() {
       const res = await fetch('http://localhost:5000/api/orders');
       const data = await res.json();
       if (data.success && Array.isArray(data.data)) {
+        setAllOrders(data.data);
         const donCanDieuPhoi = data.data.filter(d =>
           (d?.status === 'pending' && !d?.pickup_shipper_id) ||
           (d?.status === 'at_origin_warehouse' && !d?.central_transfer_shipper_id) ||
@@ -85,14 +88,29 @@ export default function TrungTamDieuPhoi() {
   useEffect(() => {
     taiDuLieu();
     taiDanhSachTaiXe();
+    fetch('http://localhost:5000/api/driver/live')
+      .then((response) => response.json())
+      .then((data) => {
+        if (!data.success || !Array.isArray(data.data)) return;
+        setViTriTaiXeMap((current) => {
+          const next = { ...current };
+          data.data.forEach((position) => {
+            const previous = next[position.shipper_id];
+            if (!previous || new Date(position.created_at) > new Date(previous.timestamp)) {
+              next[position.shipper_id] = { lat: Number(position.lat), lng: Number(position.lng), timestamp: position.created_at };
+            }
+          });
+          return next;
+        });
+      })
+      .catch((error) => console.error('Lỗi tải vị trí tài xế:', error));
 
     socket.on('driver_location_changed', (data) => {
       setViTriTaiXeMap(prev => ({
         ...prev,
-        [data.order_id]: {
+        [data.shipper_id]: {
           lat: data.lat,
           lng: data.lng,
-          tracking_code: data.tracking_code,
           timestamp: data.timestamp
         }
       }));
@@ -117,11 +135,11 @@ export default function TrungTamDieuPhoi() {
     const taiXeTheoNhiemVu = await taiDanhSachTaiXe(driverGroup);
     setDonDangChon(don);
     setLoaiNhiemVu(taskType);
+    setDriverTaskTab(taskType === 'delivery' ? 'delivery' : taskType === 'pickup' ? 'pickup' : 'transfer');
     setTaiXeDuocChon(taiXeTheoNhiemVu.length > 0 ? String(taiXeTheoNhiemVu[0].id) : '');
     setModalMo(true);
   };
 
-  const danhSachTaiXeHienThi = taiXeList;
 
   const phanCongTaiXe = async (e) => {
     e.preventDefault();
@@ -194,10 +212,35 @@ export default function TrungTamDieuPhoi() {
   const safeTaiXeList = Array.isArray(taiXeList) ? taiXeList : [];
   const safeUserName = userName || 'Điều Phối Viên';
 
+  const donChoGom = allOrders.filter((order) => order.status === 'pending' && !order.pickup_shipper_id);
   const donDaLoc = safeDonHang.filter(d => {
+    if (d.status === 'pending') return false;
     const kw = tuKhoa.toLowerCase();
     return (d?.tracking_code || '').toLowerCase().includes(kw) || (d?.receiver_address || '').toLowerCase().includes(kw);
   });
+  const soDonTaiXeDangGiu = (driverId) => allOrders.filter((order) => (
+    String(order.pickup_shipper_id) === String(driverId) && ['picking', 'picked_up'].includes(order.status)
+    || String(order.central_transfer_shipper_id) === String(driverId) && order.status === 'transferring_to_central'
+    || String(order.destination_transfer_shipper_id) === String(driverId) && order.status === 'transferring_to_destination'
+    || String(order.delivery_shipper_id) === String(driverId) && ['at_destination_warehouse', 'delivering'].includes(order.status)
+  )).length;
+  const tinhKhoangCachKm = (lat1, lng1, lat2, lng2) => {
+    const toRad = (value) => value * Math.PI / 180;
+    const dLat = toRad(Number(lat2) - Number(lat1));
+    const dLng = toRad(Number(lng2) - Number(lng1));
+    const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(Number(lat1))) * Math.cos(toRad(Number(lat2))) * Math.sin(dLng / 2) ** 2;
+    return 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  };
+  const driverDistance = (driver) => {
+    const position = viTriTaiXeMap[driver.id];
+    const target = donDangChon;
+    if (!position || !target || !Number.isFinite(Number(target.shop_lat)) || !Number.isFinite(Number(target.shop_lng))) return null;
+    return tinhKhoangCachKm(position.lat, position.lng, target.shop_lat, target.shop_lng);
+  };
+  const danhSachTaiXeHienThi = [...safeTaiXeList].sort((a, b) => (
+    (driverDistance(a) ?? Number.POSITIVE_INFINITY) - (driverDistance(b) ?? Number.POSITIVE_INFINITY)
+  ));
+  const driverNearest = danhSachTaiXeHienThi.find((driver) => driverDistance(driver) !== null);
 
   const donChoLay = safeDonHang.filter(d => d.status === 'pending').length;
   const donChoGiao = safeDonHang.filter(d => d.status === 'at_destination_warehouse').length;
@@ -262,6 +305,45 @@ export default function TrungTamDieuPhoi() {
                 </div>
               </div>
             </div>
+
+            <section className="mb-8 overflow-hidden rounded-[24px] border-2 border-amber-300 bg-amber-50 shadow-sm">
+              <div className="flex items-center justify-between border-b border-amber-200 px-6 py-4">
+                <div><p className="text-xs font-black uppercase tracking-widest text-amber-700">Ưu tiên gom hàng</p><h2 className="mt-1 text-xl font-black text-slate-800">Đơn hàng chờ gom · {donChoGom.length}</h2></div>
+                <Package size={28} className="text-amber-600" />
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[780px] text-left text-sm">
+                  <thead className="bg-white/70 text-xs uppercase text-slate-500"><tr><th className="p-4">Mã vận đơn</th><th className="p-4">Điểm lấy hàng</th><th className="p-4">Người nhận</th><th className="p-4">COD</th><th className="p-4">Thao tác</th></tr></thead>
+                  <tbody className="divide-y divide-amber-100">
+                    {donChoGom.map((order) => <tr key={order.id}><td className="p-4 font-mono font-black">{order.tracking_code}</td><td className="p-4">{order.shop_address}</td><td className="p-4">{order.receiver_name}</td><td className="p-4 font-bold">{Number(order.cod_amount || 0).toLocaleString()} đ</td><td className="p-4"><button onClick={() => moModalPhanCong(order)} className="rounded-lg bg-amber-600 px-3 py-2 font-bold text-white hover:bg-amber-700">Phân tài xế lấy hàng</button></td></tr>)}
+                    {!donChoGom.length && <tr><td colSpan="5" className="p-6 text-center text-slate-500">Không có đơn pending chờ gom.</td></tr>}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+
+            <section className="mb-8 rounded-[24px] border border-slate-200 bg-white p-5 shadow-sm">
+              <h2 className="mb-4 text-lg font-black text-slate-800">Đội tài xế theo nhiệm vụ</h2>
+              <div className="mb-4 flex flex-wrap gap-2">
+                {[
+                  { id: 'pickup', label: 'Xe máy lấy hàng' },
+                  { id: 'transfer', label: 'Xe tải trung chuyển' },
+                  { id: 'delivery', label: 'Xe máy giao hàng' }
+                ].map((task) => <button key={task.id} onClick={async () => { setDriverTaskTab(task.id); await taiDanhSachTaiXe(task.id === 'delivery' ? 'delivery' : task.id === 'transfer' ? 'central_transfer' : 'pickup'); }} className={`rounded-lg px-4 py-2 text-sm font-bold ${driverTaskTab === task.id ? 'bg-emerald-600 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>{task.label}</button>)}
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                {safeTaiXeList.map((driver) => {
+                  const position = viTriTaiXeMap[driver.id];
+                  const closestDistance = donChoGom.reduce((best, order) => {
+                    if (!position || !Number.isFinite(Number(order.shop_lat)) || !Number.isFinite(Number(order.shop_lng))) return best;
+                    const distance = tinhKhoangCachKm(position.lat, position.lng, order.shop_lat, order.shop_lng);
+                    return !best || distance < best.distance ? { order, distance } : best;
+                  }, null);
+                  return <article key={driver.id} className="rounded-xl border border-slate-100 bg-slate-50 p-4"><p className="font-black text-slate-800">{driver.full_name}</p><p className="mt-1 text-xs text-slate-500">Đang giữ {soDonTaiXeDangGiu(driver.id)} đơn</p>{closestDistance && <p className="mt-2 text-xs font-bold text-emerald-700">Phù hợp nhất: {closestDistance.order.tracking_code} · {closestDistance.distance.toFixed(1)} km đến Shop</p>}</article>;
+                })}
+                {!safeTaiXeList.length && <p className="text-sm text-slate-500">Không có tài xế đang hoạt động trong nhóm này.</p>}
+              </div>
+            </section>
 
             <div className="mb-8 flex justify-between items-end">
               <div>
@@ -386,7 +468,7 @@ export default function TrungTamDieuPhoi() {
             <h3 className="text-2xl font-black text-slate-800 mb-2 mt-4 text-center">{{ pickup: 'Shop → Kho con', central_transfer: 'Kho con → Kho tổng', destination_transfer: 'Kho tổng → Kho con đích', delivery: 'Kho con → Người nhận' }[loaiNhiemVu]}</h3>
             <p className="text-slate-500 text-sm mb-4 text-center">Đơn hàng: <span className="font-bold text-slate-700">{donDangChon?.tracking_code}</span></p>
 
-            <p className="mb-5 rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">Danh sách chỉ gồm tài xế thuộc nhóm phù hợp với chặng này.</p>
+            <p className="mb-5 rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">Danh sách chỉ gồm tài xế thuộc nhóm phù hợp. Đơn phù hợp nhất được xếp đầu theo khoảng cách GPS tới Shop.</p>
 
             <form onSubmit={phanCongTaiXe} className="space-y-4">
               <label className="block text-sm font-bold text-slate-700 mb-1">{loaiNhiemVu === 'delivery' ? 'Nhóm tài xế giao hàng' : 'Nhóm tài xế lấy hàng / trung chuyển'}:</label>
@@ -415,7 +497,8 @@ export default function TrungTamDieuPhoi() {
                       </div>
                       <div className="flex-1">
                         <p className="font-bold text-slate-800">{tx?.full_name}</p>
-                        <p className="text-xs text-slate-500 mt-0.5">{tx.role === 'delivery_driver' ? 'Tài xế giao hàng' : 'Tài xế lấy hàng / trung chuyển'}</p>
+                        <p className="text-xs text-slate-500 mt-0.5">{tx.role === 'delivery_driver' ? 'Tài xế giao hàng' : 'Tài xế lấy hàng / trung chuyển'} · đang giữ {soDonTaiXeDangGiu(tx.id)} đơn</p>
+                        {tx.id === driverNearest?.id && <p className="mt-1 text-xs font-black text-emerald-700">✓ Phù hợp nhất · {driverDistance(tx).toFixed(1)} km tới Shop</p>}
                       </div>
                       {String(taiXeDuocChon) === String(tx.id) && <CheckCircle className="ml-auto text-emerald-500" size={20} />}
                     </label>

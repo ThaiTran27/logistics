@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { MapContainer, TileLayer, Marker, Popup, Polyline, useMap, useMapEvents } from 'react-leaflet';
+import { MapContainer, TileLayer, Marker, Popup, Polyline, GeoJSON, useMap, useMapEvents } from 'react-leaflet';
 import { io } from 'socket.io-client';
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
@@ -8,6 +8,51 @@ import Barcode from 'react-barcode';
 
 import iconMarkerUrl from 'leaflet/dist/images/marker-icon.png';
 import iconShadowUrl from 'leaflet/dist/images/marker-shadow.png';
+import hcmcLegacyBoundaryRaw from '../../../../shared/hcmc-legacy-boundary.geojson?raw';
+
+const HCMC_BOUNDARY = JSON.parse(hcmcLegacyBoundaryRaw).features[0].geometry;
+const HCMC_MAP_BOUNDS = L.geoJSON(HCMC_BOUNDARY).getBounds();
+const HCMC_NOMINATIM_VIEWBOX = `${HCMC_MAP_BOUNDS.getWest()},${HCMC_MAP_BOUNDS.getNorth()},${HCMC_MAP_BOUNDS.getEast()},${HCMC_MAP_BOUNDS.getSouth()}`;
+const HCMC_BOUNDARY_STYLE = { color: '#2563eb', weight: 2, fillOpacity: 0.03 };
+const HCMC_DISTRICTS = [
+  'Quận 1', 'Quận 3', 'Quận 4', 'Quận 5', 'Quận 6', 'Quận 7',
+  'Quận 8', 'Quận 10', 'Quận 11', 'Quận 12', 'Quận Bình Tân',
+  'Quận Bình Thạnh', 'Quận Gò Vấp', 'Quận Phú Nhuận', 'Quận Tân Bình',
+  'Quận Tân Phú', 'Thành phố Thủ Đức', 'Huyện Bình Chánh', 'Huyện Cần Giờ',
+  'Huyện Củ Chi', 'Huyện Hóc Môn', 'Huyện Nhà Bè', 'Quận 2', 'Quận 9'
+];
+
+const isPointInRing = (longitude, latitude, ring) => {
+  let isInside = false;
+  for (let currentIndex = 0, previousIndex = ring.length - 1; currentIndex < ring.length; previousIndex = currentIndex++) {
+    const [currentLongitude, currentLatitude] = ring[currentIndex];
+    const [previousLongitude, previousLatitude] = ring[previousIndex];
+    const crossProduct = (longitude - currentLongitude) * (previousLatitude - currentLatitude)
+      - (latitude - currentLatitude) * (previousLongitude - currentLongitude);
+    if (Math.abs(crossProduct) < 1e-10
+      && longitude >= Math.min(currentLongitude, previousLongitude)
+      && longitude <= Math.max(currentLongitude, previousLongitude)
+      && latitude >= Math.min(currentLatitude, previousLatitude)
+      && latitude <= Math.max(currentLatitude, previousLatitude)) {
+      return true;
+    }
+    if ((currentLatitude > latitude) !== (previousLatitude > latitude)
+      && longitude < ((previousLongitude - currentLongitude) * (latitude - currentLatitude))
+        / (previousLatitude - currentLatitude) + currentLongitude) {
+      isInside = !isInside;
+    }
+  }
+  return isInside;
+};
+const isWithinHcmcBoundary = (lat, lng) => {
+  const latitude = Number(lat);
+  const longitude = Number(lng);
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return false;
+  return HCMC_BOUNDARY.coordinates.some(([outerRing, ...innerRings]) => (
+    isPointInRing(longitude, latitude, outerRing)
+      && !innerRings.some((innerRing) => isPointInRing(longitude, latitude, innerRing))
+  ));
+};
 
 const shopMarkerIcon = new L.Icon({
   iconUrl: iconMarkerUrl,
@@ -61,32 +106,39 @@ function LiveTrackingMap({ route, driverLocation }) {
   );
 }
 
-function ShopMapPicker({ value, onSelect }) {
-  const MapClickHandler = () => {
-    useMapEvents({
-      click: (event) => {
+function MapClickHandler({ onSelect }) {
+  useMapEvents({
+    click: (event) => {
+      if (isWithinHcmcBoundary(event.latlng.lat, event.latlng.lng)) {
         onSelect(event.latlng.lat, event.latlng.lng);
       }
-    });
-    return null;
-  };
+    }
+  });
+  return null;
+}
 
-  const RecenterMap = () => {
-    const map = useMap();
-    useEffect(() => {
-      map.flyTo([value.lat, value.lng], 13, { duration: 1.2 });
-    }, [value.lat, value.lng, map]);
-    return null;
-  };
+function HcmcBoundaryOverlay() {
+  return <GeoJSON data={HCMC_BOUNDARY} style={HCMC_BOUNDARY_STYLE} interactive={false} />;
+}
 
+function RecenterMap({ value }) {
+  const map = useMap();
+  useEffect(() => {
+    map.flyTo([value.lat, value.lng], 13, { duration: 1.2 });
+  }, [value.lat, value.lng, map]);
+  return null;
+}
+
+function ShopMapPicker({ value, onSelect }) {
   return (
-    <MapContainer center={[value.lat, value.lng]} zoom={13} scrollWheelZoom={true} className="h-64 w-full rounded-xl border border-slate-200">
+    <MapContainer center={[value.lat, value.lng]} zoom={13} maxBounds={HCMC_MAP_BOUNDS} maxBoundsViscosity={1} scrollWheelZoom={true} className="h-64 w-full rounded-xl border border-slate-200">
       <TileLayer
         attribution='&copy; OpenStreetMap contributors'
         url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
       />
-      <RecenterMap />
-      <MapClickHandler />
+      <HcmcBoundaryOverlay />
+      <RecenterMap value={value} />
+      <MapClickHandler onSelect={onSelect} />
       <Marker position={[value.lat, value.lng]} icon={shopMarkerIcon} />
     </MapContainer>
   );
@@ -95,7 +147,9 @@ function ShopMapPicker({ value, onSelect }) {
 function MapClickHandlerReceiver({ onSelect }) {
   useMapEvents({
     click: (event) => {
-      onSelect(event.latlng.lat, event.latlng.lng);
+      if (isWithinHcmcBoundary(event.latlng.lat, event.latlng.lng)) {
+        onSelect(event.latlng.lat, event.latlng.lng);
+      }
     }
   });
 
@@ -104,52 +158,6 @@ function MapClickHandlerReceiver({ onSelect }) {
 
 export default function QuanLyDonHang() {
   const [donHang, setDonHang] = useState([]);
-  const vietnamProvinces = [
-    'Thành phố Hà Nội', 'Thành phố Hải Phòng', 'Tỉnh Tuyên Quang', 'Tỉnh Lào Cai', 'Tỉnh Thái Nguyên',
-    'Tỉnh Phú Thọ', 'Tỉnh Bắc Ninh', 'Tỉnh Hưng Yên', 'Tỉnh Ninh Bình', 'Tỉnh Thanh Hóa', 'Tỉnh Nghệ An',
-    'Tỉnh Hà Tĩnh', 'Tỉnh Quảng Trị', 'Thành phố Huế', 'Thành phố Đà Nẵng', 'Tỉnh Quảng Ngãi', 'Tỉnh Gia Lai',
-    'Tỉnh Khánh Hòa', 'Tỉnh Lâm Đồng', 'Tỉnh Đắk Lắk', 'Thành phố Hồ Chí Minh', 'Tỉnh Đồng Nai', 'Tỉnh Tây Ninh',
-    'Thành phố Cần Thơ', 'Tỉnh Vĩnh Long', 'Tỉnh Đồng Tháp', 'Tỉnh Cà Mau', 'Tỉnh An Giang', 'Tỉnh Lai Châu',
-    'Tỉnh Điện Biên', 'Tỉnh Sơn La', 'Tỉnh Lạng Sơn', 'Tỉnh Quảng Ninh', 'Tỉnh Cao Bằng'
-  ];
-
-  const provinceCoordinates = {
-    'Thành phố Hà Nội': { lat: 21.0278, lng: 105.8342 },
-    'Thành phố Hải Phòng': { lat: 20.8449, lng: 106.6881 },
-    'Tỉnh Tuyên Quang': { lat: 21.8231, lng: 105.2144 },
-    'Tỉnh Lào Cai': { lat: 22.4856, lng: 103.9704 },
-    'Tỉnh Thái Nguyên': { lat: 21.5942, lng: 105.8482 },
-    'Tỉnh Phú Thọ': { lat: 21.3984, lng: 105.2271 },
-    'Tỉnh Bắc Ninh': { lat: 21.1861, lng: 106.0763 },
-    'Tỉnh Hưng Yên': { lat: 20.646, lng: 106.051 },
-    'Tỉnh Ninh Bình': { lat: 20.2506, lng: 105.9729 },
-    'Tỉnh Thanh Hóa': { lat: 19.8067, lng: 105.7765 },
-    'Tỉnh Nghệ An': { lat: 19.2342, lng: 104.9200 },
-    'Tỉnh Hà Tĩnh': { lat: 18.3427, lng: 105.9055 },
-    'Tỉnh Quảng Trị': { lat: 16.7448, lng: 107.1718 },
-    'Thành phố Huế': { lat: 16.4637, lng: 107.5909 },
-    'Thành phố Đà Nẵng': { lat: 16.0544, lng: 108.2022 },
-    'Tỉnh Quảng Ngãi': { lat: 15.1205, lng: 108.8044 },
-    'Tỉnh Gia Lai': { lat: 13.8073, lng: 108.1093 },
-    'Tỉnh Khánh Hòa': { lat: 12.2388, lng: 109.1967 },
-    'Tỉnh Lâm Đồng': { lat: 11.9404, lng: 108.4583 },
-    'Tỉnh Đắk Lắk': { lat: 12.7100, lng: 108.2378 },
-    'Thành phố Hồ Chí Minh': { lat: 10.7769, lng: 106.7009 },
-    'Tỉnh Đồng Nai': { lat: 10.9487, lng: 106.8246 },
-    'Tỉnh Tây Ninh': { lat: 11.3564, lng: 106.1296 },
-    'Thành phố Cần Thơ': { lat: 10.0452, lng: 105.7469 },
-    'Tỉnh Vĩnh Long': { lat: 10.2531, lng: 105.9721 },
-    'Tỉnh Đồng Tháp': { lat: 10.5409, lng: 105.6328 },
-    'Tỉnh Cà Mau': { lat: 9.1764, lng: 105.1523 },
-    'Tỉnh An Giang': { lat: 10.5216, lng: 105.1255 },
-    'Tỉnh Lai Châu': { lat: 22.3964, lng: 103.4586 },
-    'Tỉnh Điện Biên': { lat: 21.3832, lng: 103.0165 },
-    'Tỉnh Sơn La': { lat: 21.3274, lng: 103.9187 },
-    'Tỉnh Lạng Sơn': { lat: 21.8557, lng: 106.7611 },
-    'Tỉnh Quảng Ninh': { lat: 21.0065, lng: 107.2925 },
-    'Tỉnh Cao Bằng': { lat: 22.6633, lng: 105.8304 }
-  };
-
   const [form, setForm] = useState({ 
     shop_address: '',
     shop_province: 'Thành phố Hồ Chí Minh',
@@ -163,17 +171,19 @@ export default function QuanLyDonHang() {
     receiver_lat: null,
     receiver_lng: null,
     receiver_location_verified: false,
-    destination_province: 'Thành phố Hồ Chí Minh',
+    destination_province: 'Quận 1',
     cod_amount: '',
     weight_kg: '1',
     length: '10',
     width: '10',
     height: '10',
     item_value: '0',
+    service_fee: '0',
     distance_km: '5',
     is_remote_area: false,
     service_type: 'standard',
     vehicle_type: 'motorbike',
+    fee_payer: 'sender',
     is_fragile: false
   });
   const [vehicleSelectionMode, setVehicleSelectionMode] = useState('automatic');
@@ -196,6 +206,9 @@ export default function QuanLyDonHang() {
   
   // State quản lý việc in phiếu
   const [phieuIn, setPhieuIn] = useState(null);
+  const [selectedOrderIds, setSelectedOrderIds] = useState([]);
+  const requiresTruck = Number(form.weight_kg) > 100
+    || (Number(form.length) * Number(form.width) * Number(form.height)) > 1000000;
   
   const shopId = localStorage.getItem('user_id');
   const shopName = localStorage.getItem('full_name') || 'Cửa Hàng Đối Tác';
@@ -282,8 +295,8 @@ export default function QuanLyDonHang() {
     const volume = Number(length) * Number(width) * Number(height);
     const dist = Number(distance_km) || 0;
 
-    if (dist > 180 || actualWeight > 25 || volume > 60000) return 'truck';
-    if (dist > 80 || actualWeight > 8 || volume > 30000) return 'van';
+    if (dist > 180 || actualWeight > 100 || volume > 1000000) return 'truck';
+    if (dist > 80 || actualWeight > 25 || volume > 300000) return 'van';
     return 'motorbike';
   };
 
@@ -320,15 +333,13 @@ export default function QuanLyDonHang() {
     const l = parseFloat(form.length) || 0;
     const w = parseFloat(form.width) || 0;
     const h = parseFloat(form.height) || 0;
-    const value = parseFloat(form.item_value) || 0;
-    const provinceName = form.destination_province || 'Thành phố Hồ Chí Minh';
     const isRemote = Boolean(form.is_remote_area);
     const isFragile = form.is_fragile;
 
     const destinationCenter =
       form.receiver_lat && form.receiver_lng
         ? { lat: Number(form.receiver_lat), lng: Number(form.receiver_lng) }
-        : provinceCoordinates[provinceName] || provinceCoordinates['Thành phố Hồ Chí Minh'];
+        : { lat: 10.762622, lng: 106.660172 };
 
     const autoDistance = Math.max(
       1,
@@ -344,16 +355,18 @@ export default function QuanLyDonHang() {
       height: h,
       distance_km: autoDistance
     });
-    const selectedVehicleType = vehicleSelectionMode === 'automatic' ? autoVehicleType : form.vehicle_type;
+    const effectiveVehicleType = requiresTruck ? 'truck' : vehicleSelectionMode === 'automatic' ? autoVehicleType : form.vehicle_type;
+    const selectedVehicleType = effectiveVehicleType;
 
     setForm(prev => {
       const nextDistance = String(autoDistance);
-      const shouldUpdate = Number(prev.distance_km) !== autoDistance || (vehicleSelectionMode === 'automatic' && prev.vehicle_type !== autoVehicleType) || prev.is_remote_area !== isRemote;
+      const nextVehicle = requiresTruck ? 'truck' : vehicleSelectionMode === 'automatic' ? autoVehicleType : prev.vehicle_type;
+      const shouldUpdate = Number(prev.distance_km) !== autoDistance || prev.vehicle_type !== nextVehicle || prev.is_remote_area !== isRemote;
       if (!shouldUpdate) return prev;
       return {
         ...prev,
         distance_km: nextDistance,
-        vehicle_type: vehicleSelectionMode === 'automatic' ? autoVehicleType : prev.vehicle_type,
+        vehicle_type: nextVehicle,
         is_remote_area: isRemote
       };
     });
@@ -366,18 +379,10 @@ export default function QuanLyDonHang() {
     const serviceFactor = { economy: 0.88, standard: 1, express: 1.5 }[form.service_type] || 1;
     const distanceFee = Math.max(0, autoDistance - 5) * 1700;
     const weightFee = finalWeight > 2 ? Math.ceil((finalWeight - 2) / 0.5) * 4500 : 0;
-    const insuranceFee = value > 1000000 ? value * 0.005 : 0;
     const remoteFee = isRemote ? 22000 : 0;
     const fragileFee = isFragile ? 12000 : 0;
-    const vehicleFactor = selectedVehicleType === 'truck' ? 1.4 : selectedVehicleType === 'van' ? 1.2 : 1;
-    const regionOf = (province = '') => {
-      const name = province.toLowerCase();
-      if (/hà nội|bắc|phú thọ|thái nguyên|quảng ninh|hải phòng|nam định|ninh bình|tuyên quang|lào cai|sơn la|điện biên|lai châu|cao bằng|lạng sơn|bắc giang|bắc ninh|hưng yên|thái bình|vĩnh phúc/.test(name)) return 'north';
-      if (/đà nẵng|huế|thừa thiên|quảng|nghệ an|hà tĩnh|thanh hóa|bình định|gia lai|kon tum|đắk|phú yên|khánh hòa|ninh thuận|bình thuận/.test(name)) return 'central';
-      return 'south';
-    };
-    const regionalFactor = regionOf(form.shop_province) === regionOf(provinceName) ? 1 : 1.25;
-    const total = Math.round((baseFee + distanceFee + weightFee + insuranceFee + remoteFee + fragileFee) * serviceFactor * vehicleFactor * regionalFactor / 1000) * 1000;
+    const vehicleFactor = { motorbike: 1, van: 1.5, truck: 2.5 }[selectedVehicleType] || 1;
+    const total = Math.round((baseFee + distanceFee + weightFee + remoteFee + fragileFee) * serviceFactor * vehicleFactor / 1000) * 1000;
     setShippingFee(total);
   }, [
     form.shop_lat,
@@ -386,6 +391,7 @@ export default function QuanLyDonHang() {
     form.receiver_lng,
     form.shop_province,
     form.destination_province,
+    form.fee_payer,
     form.weight_kg,
     form.length,
     form.width,
@@ -396,6 +402,7 @@ export default function QuanLyDonHang() {
     form.is_remote_area,
     form.is_fragile,
     vehicleSelectionMode,
+    requiresTruck,
   ]);
 
   const layCuocPhiChuan = (don) => {
@@ -421,38 +428,6 @@ export default function QuanLyDonHang() {
     }
   };
 
-  const buildGeocodeFallbackSuggestions = (query, provinceName, limit = 5) => {
-    const trimmed = query.trim();
-    if (!trimmed) return [];
-
-    const normalizedQuery = trimmed.toLowerCase();
-    const provinceMatches = vietnamProvinces.filter((province) => {
-      const provinceText = province.toLowerCase();
-      return provinceText.includes(normalizedQuery) || normalizedQuery.includes(provinceText.replace('thành phố ', '').replace('tỉnh ', '').slice(0, 3));
-    });
-
-    const baseProvince = provinceCoordinates[provinceName] || provinceCoordinates['Thành phố Hồ Chí Minh'];
-    const fallback = [
-      {
-        place_id: 'fallback-main',
-        display_name: `${trimmed}, ${provinceName || 'Việt Nam'}`,
-        lat: baseProvince.lat,
-        lon: baseProvince.lng,
-      }
-    ];
-
-    if (provinceMatches.length > 0) {
-      return provinceMatches.slice(0, limit).map((province) => ({
-        place_id: `fallback-${province}`,
-        display_name: `${province} - ${trimmed}`,
-        lat: (provinceCoordinates[province] || baseProvince).lat,
-        lon: (provinceCoordinates[province] || baseProvince).lng,
-      }));
-    }
-
-    return fallback;
-  };
-
   const searchShopLocation = async (query) => {
     const cleanQuery = query.trim();
     setShopMapSearch(query);
@@ -462,24 +437,28 @@ export default function QuanLyDonHang() {
     }
 
     try {
-      const res = await fetch(`https://nominatim.openstreetmap.org/search?format=jsonv2&limit=5&countrycodes=vn&q=${encodeURIComponent(`${cleanQuery}, Việt Nam`)}`, {
+      const res = await fetch(`https://nominatim.openstreetmap.org/search?format=jsonv2&limit=5&countrycodes=vn&viewbox=${HCMC_NOMINATIM_VIEWBOX}&bounded=1&q=${encodeURIComponent(`${cleanQuery}, TP. Hồ Chí Minh, Việt Nam`)}`, {
         headers: { 'Accept-Language': 'vi' }
       });
       if (!res.ok) {
         throw new Error(`HTTP ${res.status}`);
       }
       const data = await res.json();
-      const options = Array.isArray(data) && data.length > 0 ? data : buildGeocodeFallbackSuggestions(cleanQuery, form.shop_province, 5);
+      const options = Array.isArray(data) ? data.filter((place) => isWithinHcmcBoundary(place.lat, place.lon)) : [];
       setShopSuggestions(options);
     } catch (error) {
       console.error('Lỗi tìm kiếm địa điểm:', error);
-      setShopSuggestions(buildGeocodeFallbackSuggestions(cleanQuery, form.shop_province, 5));
+      setShopSuggestions([]);
     }
   };
 
   const selectSuggestedLocation = (place) => {
     const lat = Number(place.lat);
     const lng = Number(place.lon);
+    if (!isWithinHcmcBoundary(lat, lng)) {
+      setShopSuggestions([]);
+      return alert('Chỉ được chọn vị trí trong phạm vi TP. Hồ Chí Minh.');
+    }
     const displayName = place.display_name || 'Địa điểm đã chọn';
     setForm((prev) => ({ ...prev, shop_address: displayName, shop_lat: lat, shop_lng: lng, shop_location_verified: !String(place.place_id).startsWith('fallback-') }));
     setShopMapSearch(displayName);
@@ -512,24 +491,28 @@ export default function QuanLyDonHang() {
     }
 
     try {
-      const res = await fetch(`https://nominatim.openstreetmap.org/search?format=jsonv2&limit=5&countrycodes=vn&q=${encodeURIComponent(`${cleanQuery}, Việt Nam`)}`, {
+      const res = await fetch(`https://nominatim.openstreetmap.org/search?format=jsonv2&limit=5&countrycodes=vn&viewbox=${HCMC_NOMINATIM_VIEWBOX}&bounded=1&q=${encodeURIComponent(`${cleanQuery}, ${form.destination_province}, TP. Hồ Chí Minh, Việt Nam`)}`, {
         headers: { 'Accept-Language': 'vi' }
       });
       if (!res.ok) {
         throw new Error(`HTTP ${res.status}`);
       }
       const data = await res.json();
-      const options = Array.isArray(data) && data.length > 0 ? data : buildGeocodeFallbackSuggestions(cleanQuery, form.destination_province, 5);
+      const options = Array.isArray(data) ? data.filter((place) => isWithinHcmcBoundary(place.lat, place.lon)) : [];
       setReceiverSuggestions(options);
     } catch (error) {
       console.error('Lỗi tìm kiếm địa chỉ giao hàng:', error);
-      setReceiverSuggestions(buildGeocodeFallbackSuggestions(cleanQuery, form.destination_province, 5));
+      setReceiverSuggestions([]);
     }
   };
 
   const selectSuggestedReceiverLocation = (place) => {
     const lat = Number(place.lat);
     const lng = Number(place.lon);
+    if (!isWithinHcmcBoundary(lat, lng)) {
+      setReceiverSuggestions([]);
+      return alert('Chỉ được chọn vị trí trong phạm vi TP. Hồ Chí Minh.');
+    }
     const displayName = place.display_name || 'Địa điểm giao hàng đã chọn';
     setForm((prev) => ({ ...prev, receiver_address: displayName, receiver_lat: lat, receiver_lng: lng, receiver_location_verified: !String(place.place_id).startsWith('fallback-') }));
     setReceiverMapSearch(displayName);
@@ -542,8 +525,6 @@ export default function QuanLyDonHang() {
     if (!form.shop_location_verified || !form.receiver_location_verified) {
       return alert('Vui lòng chọn đúng vị trí Shop và điểm giao trên bản đồ để hệ thống định tuyến qua kho con.');
     }
-    const tracking_code = 'VTP' + Math.floor(100000 + Math.random() * 900000) + 'VN'; // Dùng VTP cho chuẩn style
-    
     try {
       const res = await fetch('http://localhost:5000/api/orders', {
         method: 'POST',
@@ -567,10 +548,12 @@ export default function QuanLyDonHang() {
           width: form.width,
           height: form.height,
           item_value: form.item_value,
+          service_fee: form.service_fee,
           distance_km: form.distance_km,
           is_remote_area: form.is_remote_area,
           service_type: form.service_type,
           is_fragile: form.is_fragile,
+          fee_payer: form.fee_payer,
           vehicle_type: vehicleSelectionMode === 'automatic' ? determineVehicleType({
             weight_kg: chargeableWeight,
             length: form.length,
@@ -578,28 +561,29 @@ export default function QuanLyDonHang() {
             height: form.height,
             distance_km: form.distance_km
           }) : form.vehicle_type,
-          tracking_code,
           shop_id: shopId
         })
       });
       const data = await res.json();
       
       if (data.success) {
+        const trackingCode = data.tracking_code;
         const confirmedFee = Number(data.shipping_fee ?? shippingFee);
         setShippingFee(confirmedFee);
-        alert(`Tạo đơn thành công! Mã vận đơn: ${tracking_code} | Cước phí: ${confirmedFee.toLocaleString()} đ`);
+        alert(`Tạo đơn thành công! Mã vận đơn: ${trackingCode} | Cước phí: ${confirmedFee.toLocaleString()} đ`);
         setForm({ 
-          shop_address: '', shop_province: 'Thành phố Hồ Chí Minh', shop_lat: 10.762622, shop_lng: 106.660172, shop_location_verified: false, receiver_name: '', receiver_phone: '', receiver_address: '', receiver_lat: null, receiver_lng: null, receiver_location_verified: false, destination_province: 'Thành phố Hồ Chí Minh', cod_amount: '', 
+          shop_address: '', shop_province: 'Thành phố Hồ Chí Minh', shop_lat: 10.762622, shop_lng: 106.660172, shop_location_verified: false, receiver_name: '', receiver_phone: '', receiver_address: '', receiver_lat: null, receiver_lng: null, receiver_location_verified: false, destination_province: 'Quận 1', cod_amount: '',
           customer_email: '',
-          weight_kg: '1', length: '10', width: '10', height: '10', item_value: '0', 
-          distance_km: '5', is_remote_area: false, service_type: 'standard', vehicle_type: 'motorbike', is_fragile: false 
+          weight_kg: '1', length: '10', width: '10', height: '10', item_value: '0', service_fee: '0',
+          distance_km: '5', is_remote_area: false, service_type: 'standard', vehicle_type: 'motorbike', fee_payer: 'sender', is_fragile: false
         });
+        setSelectedOrderIds([]);
         taiDuLieu();
         setTabHienTai('danhsach');
       } else {
         alert("Lỗi: " + (data.message || 'Không thể tạo đơn hàng.'));
       }
-    } catch (error) {
+    } catch {
       alert("Lỗi kết nối máy chủ!");
     }
   };
@@ -826,17 +810,19 @@ export default function QuanLyDonHang() {
                         key={vehicle.value}
                         type="button"
                         aria-pressed={form.vehicle_type === vehicle.value}
+                        disabled={requiresTruck && vehicle.value !== 'truck'}
                         onClick={() => {
                           setVehicleSelectionMode('manual');
                           setForm((currentForm) => ({ ...currentForm, vehicle_type: vehicle.value }));
                         }}
-                        className={`w-full rounded-xl border-2 p-3 text-left transition-all focus:outline-none focus:ring-2 focus:ring-blue-400 ${form.vehicle_type === vehicle.value ? 'border-blue-500 bg-blue-50' : 'border-slate-100 bg-slate-50 hover:border-blue-200'}`}
+                        className={`w-full rounded-xl border-2 p-3 text-left transition-all focus:outline-none focus:ring-2 focus:ring-blue-400 disabled:cursor-not-allowed disabled:opacity-40 ${form.vehicle_type === vehicle.value ? 'border-blue-500 bg-blue-50' : 'border-slate-100 bg-slate-50 hover:border-blue-200'}`}
                       >
                         <p className="font-black text-slate-800 mb-1">{vehicle.label}</p>
                         <p className="text-[11px] text-slate-500">{vehicle.note}</p>
                       </button>
                     ))}
                   </div>
+                  {requiresTruck && <p role="status" className="mt-3 rounded-lg bg-amber-50 p-3 text-sm font-bold text-amber-800">Hàng vượt 100 kg hoặc 1 m³: hệ thống bắt buộc chọn xe tải.</p>}
                 </div>
 
                 {/* BLOCK 2: FORM THÔNG TIN */}
@@ -940,17 +926,9 @@ export default function QuanLyDonHang() {
                       )}
                     </div>
 
-                    <div>
-                      <label className="block text-sm font-bold text-slate-600 mb-2">Tỉnh / thành cửa hàng</label>
-                      <select
-                        value={form.shop_province}
-                        onChange={(e) => setForm({ ...form, shop_province: e.target.value, shop_location_verified: false })}
-                        className="w-full px-4 py-3.5 bg-slate-50 border-2 border-transparent rounded-xl outline-none focus:bg-white focus:border-blue-400 transition-all font-medium"
-                      >
-                        {vietnamProvinces.map((province) => (
-                          <option key={province} value={province}>{province}</option>
-                        ))}
-                      </select>
+                    <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3.5">
+                      <p className="text-xs font-bold uppercase tracking-wide text-slate-500">Khu vực lấy hàng</p>
+                      <p className="mt-1 font-semibold text-slate-700">TP. Hồ Chí Minh</p>
                     </div>
                   </div>
 
@@ -1013,11 +991,12 @@ export default function QuanLyDonHang() {
 
                     {showReceiverMap && (
                       <div className="mt-4 rounded-2xl border border-slate-200 overflow-hidden bg-slate-50 p-2">
-                        <MapContainer center={[(form.receiver_lat ?? form.shop_lat ?? 10.762622), (form.receiver_lng ?? form.shop_lng ?? 106.660172)]} zoom={13} scrollWheelZoom={true} className="h-64 w-full rounded-xl border border-slate-200">
+                        <MapContainer center={[(form.receiver_lat ?? form.shop_lat ?? 10.762622), (form.receiver_lng ?? form.shop_lng ?? 106.660172)]} zoom={13} maxBounds={HCMC_MAP_BOUNDS} maxBoundsViscosity={1} scrollWheelZoom={true} className="h-64 w-full rounded-xl border border-slate-200">
                           <TileLayer
                             attribution='&copy; OpenStreetMap contributors'
                             url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
                           />
+                          <HcmcBoundaryOverlay />
                           <Marker position={[(form.receiver_lat ?? form.shop_lat ?? 10.762622), (form.receiver_lng ?? form.shop_lng ?? 106.660172)]} icon={shopMarkerIcon} />
                           <MapClickHandlerReceiver onSelect={updateReceiverLocationFromMap} />
                         </MapContainer>
@@ -1026,14 +1005,14 @@ export default function QuanLyDonHang() {
                   </div>
 
                   <div>
-                    <label className="block text-sm font-bold text-slate-600 mb-2">Tỉnh / thành giao hàng</label>
+                    <label className="block text-sm font-bold text-slate-600 mb-2">Quận / huyện TP. Hồ Chí Minh</label>
                     <select
                       value={form.destination_province}
                       onChange={(e) => setForm({ ...form, destination_province: e.target.value, receiver_location_verified: false })}
                       className="w-full px-4 py-3.5 bg-slate-50 border-2 border-transparent rounded-xl outline-none focus:bg-white focus:border-blue-400 transition-all font-medium"
                     >
-                      {vietnamProvinces.map((province) => (
-                        <option key={province} value={province}>{province}</option>
+                      {HCMC_DISTRICTS.map((district) => (
+                        <option key={district} value={district}>{district}</option>
                       ))}
                     </select>
                   </div>
@@ -1062,6 +1041,28 @@ export default function QuanLyDonHang() {
                           value={form.weight_kg} onChange={e => setForm({...form, weight_kg: e.target.value})} 
                         />
                       </div>
+
+                      <fieldset>
+                        <legend className="mb-2 text-sm font-bold text-slate-600">Người trả cước vận chuyển</legend>
+                        <div className="grid gap-3 sm:grid-cols-2">
+                          {[
+                            { value: 'sender', label: 'Người gửi trả cước' },
+                            { value: 'receiver', label: 'Người nhận trả cước' }
+                          ].map((payer) => (
+                            <label key={payer.value} className={`flex cursor-pointer items-center gap-3 rounded-xl border-2 p-4 font-bold ${form.fee_payer === payer.value ? 'border-blue-500 bg-blue-50 text-blue-800' : 'border-slate-100 bg-slate-50 text-slate-600'}`}>
+                              <input
+                                type="radio"
+                                name="fee_payer"
+                                value={payer.value}
+                                checked={form.fee_payer === payer.value}
+                                onChange={() => setForm((current) => ({ ...current, fee_payer: payer.value }))}
+                                className="accent-blue-600"
+                              />
+                              {payer.label}
+                            </label>
+                          ))}
+                        </div>
+                      </fieldset>
                     </div>
                     <div>
                       <label className="block text-sm font-bold text-slate-600 mb-2">Khoảng cách tự tính (km)</label>
@@ -1080,6 +1081,7 @@ export default function QuanLyDonHang() {
                         placeholder="0"
                         value={form.item_value} onChange={e => setForm({...form, item_value: e.target.value})} 
                       />
+                      <p className="mt-1 text-xs font-semibold text-slate-500">Phí bảo hiểm tách riêng: {(Number(form.item_value) > 1000000 ? Number(form.item_value) * 0.005 : 0).toLocaleString()} đ (0,5% giá trị từ trên 1 triệu đồng).</p>
                     </div>
                     <div>
                       <label className="block text-sm font-black text-red-600 mb-2">Tiền thu hộ (COD) đ</label>
@@ -1092,6 +1094,11 @@ export default function QuanLyDonHang() {
                         />
                       </div>
                     </div>
+
+                    <label className="block text-sm font-bold text-slate-600">Phí dịch vụ thu từ COD (đ)
+                      <input type="number" min="0" step="1000" value={form.service_fee} onChange={(event) => setForm((current) => ({ ...current, service_fee: event.target.value }))} className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-3" />
+                      <span className="mt-1 block text-xs font-medium text-slate-500">Phí dịch vụ và bảo hiểm sẽ được khấu trừ minh bạch khi đối soát với Shop.</span>
+                    </label>
                   </div>
 
                   {/* THÊM 2 CHECKBOX CẢNH BÁO */}
@@ -1160,6 +1167,10 @@ export default function QuanLyDonHang() {
                         {(form.item_value > 1000000 ? form.item_value * 0.005 : 0).toLocaleString()} đ
                       </span>
                     </div>
+                    <div className="flex justify-between pb-2 border-b border-slate-50">
+                      <span>Phí dịch vụ:</span>
+                      <span className="font-bold text-slate-800">{Number(form.service_fee || 0).toLocaleString()} đ</span>
+                    </div>
                     {form.is_fragile && (
                       <div className="flex justify-between pb-2 border-b border-slate-50">
                         <span className="text-orange-600">Phí bọc hàng dễ vỡ:</span>
@@ -1189,6 +1200,25 @@ export default function QuanLyDonHang() {
 
           {tabHienTai === 'danhsach' && (
             <div className="space-y-6">
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-indigo-100 bg-white p-4">
+                <label className="inline-flex items-center gap-2 text-sm font-bold text-slate-700">
+                  <input
+                    type="checkbox"
+                    checked={safeDonHang.length > 0 && safeDonHang.every((order) => selectedOrderIds.includes(order.id))}
+                    onChange={(event) => setSelectedOrderIds(event.target.checked ? safeDonHang.map((order) => order.id) : [])}
+                    className="h-4 w-4 accent-indigo-600"
+                  />
+                  Chọn tất cả ({selectedOrderIds.length} đã chọn)
+                </label>
+                <button
+                  type="button"
+                  disabled={!selectedOrderIds.length}
+                  onClick={() => setPhieuIn(safeDonHang.filter((order) => selectedOrderIds.includes(order.id)))}
+                  className="inline-flex items-center gap-2 rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-bold text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  <Printer size={17} /> In nhãn hàng loạt
+                </button>
+              </div>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                 <div className="bg-white p-6 rounded-[24px] shadow-[0_8px_30px_rgb(0,0,0,0.04)] border border-blue-50 flex items-center gap-4">
                   <div className="bg-blue-50 p-4 rounded-2xl text-blue-600"><ListOrdered size={28}/></div>
@@ -1239,6 +1269,18 @@ export default function QuanLyDonHang() {
                       safeDonHang.map((don) => (
                         <tr key={don?.id} className="hover:bg-slate-50/50 transition-colors">
                           <td className="p-6">
+                            <label className="mb-2 flex items-center gap-2 text-xs font-bold text-slate-500">
+                              <input
+                                type="checkbox"
+                                checked={selectedOrderIds.includes(don.id)}
+                                onChange={(event) => setSelectedOrderIds((current) => event.target.checked
+                                  ? [...current, don.id]
+                                  : current.filter((id) => id !== don.id))}
+                                className="h-4 w-4 accent-indigo-600"
+                                aria-label={`Chọn nhãn ${don.tracking_code}`}
+                              />
+                              Chọn nhãn
+                            </label>
                             <span className="bg-blue-50 text-blue-700 px-3 py-1.5 rounded-lg font-black tracking-wide">
                               {don?.tracking_code}
                             </span>
@@ -1263,7 +1305,7 @@ export default function QuanLyDonHang() {
                               <Eye size={16} /> Xem
                             </button>
                             <button 
-                              onClick={() => setPhieuIn(don)} 
+                              onClick={() => setPhieuIn([don])}
                               className="bg-indigo-50 hover:bg-indigo-100 text-indigo-600 px-4 py-2 rounded-xl font-bold text-xs flex items-center gap-1.5 transition-colors"
                             >
                               <Printer size={16} /> In Phiếu
@@ -1448,22 +1490,23 @@ export default function QuanLyDonHang() {
           GIAO DIỆN DÀNH RIÊNG CHO MÁY IN (Chỉ hiển thị lên mặt giấy)
           ================================================================= */}
       {phieuIn && (
-        <div className="hidden print:flex fixed inset-0 bg-white z-[99999] flex-col items-center p-8 text-black">
-          <div className="w-[10cm] h-[15cm] border-2 border-black p-4 flex flex-col justify-between relative">
-            <div className="flex justify-between items-start border-b-2 border-black pb-4 mb-4">
-              <h1 className="text-2xl font-black uppercase">SmartLogistics</h1>
-              <div className="text-right">
-                <p className="font-bold text-lg">{new Date().toLocaleDateString('vi-VN')}</p>
-                <p className="text-sm font-bold border border-black px-2 mt-1 rounded">{phieuIn.weight_kg || 1} KG</p>
-              </div>
+      <div className="thermal-print-root hidden print:block fixed inset-0 bg-white z-[99999] overflow-auto p-4 text-black">
+        {phieuIn.map((labelOrder) => (
+        <div key={labelOrder.id} className="thermal-label mx-auto mb-4 break-after-page border-2 border-black p-3 flex flex-col justify-between relative">
+          <div className="flex justify-between items-start border-b-2 border-black pb-4 mb-4">
+            <h1 className="text-2xl font-black uppercase">SmartLogistics</h1>
+            <div className="text-right">
+              <p className="font-bold text-lg">{new Date().toLocaleDateString('vi-VN')}</p>
+              <p className="text-sm font-bold border border-black px-2 mt-1 rounded">{labelOrder.weight_kg || 1} KG</p>
             </div>
+          </div>
 
-            <div className="flex justify-center mb-6 py-4">
-              <Barcode value={phieuIn.tracking_code} format="CODE128" width={3} height={80} displayValue={true} fontSize={20} />
-            </div>
+          <div className="flex justify-center mb-6 py-4">
+            <Barcode value={labelOrder.tracking_code} format="CODE128" width={3} height={80} displayValue={true} fontSize={20} />
+          </div>
 
-            {/* Chữ HÀNG DỄ VỠ in to trên máy in nhiệt */}
-            {phieuIn.is_fragile === 1 && (
+          {/* Chữ HÀNG DỄ VỠ in to trên máy in nhiệt */}
+          {labelOrder.is_fragile === 1 && (
               <div className="absolute top-[35%] left-1/2 -translate-x-1/2 border-4 border-black p-2 bg-white -rotate-12 opacity-80">
                 <h2 className="text-2xl font-black uppercase tracking-widest">Hàng Dễ Vỡ</h2>
               </div>
@@ -1477,21 +1520,22 @@ export default function QuanLyDonHang() {
               </div>
               <div className="border border-black p-3 rounded bg-gray-100">
                 <p className="font-bold text-xs mb-1">ĐẾN:</p>
-                <p className="font-black text-xl">{phieuIn.receiver_name}</p>
-                <p className="font-bold text-lg">{phieuIn.receiver_phone}</p>
-                <p className="text-base font-medium leading-tight mt-1">{phieuIn.receiver_address}</p>
+                <p className="font-black text-xl">{labelOrder.receiver_name}</p>
+                <p className="font-bold text-lg">{labelOrder.receiver_phone}</p>
+                <p className="text-base font-medium leading-tight mt-1">{labelOrder.receiver_address}</p>
               </div>
             </div>
 
             <div className="mt-auto border-t-2 border-black pt-4">
               <p className="text-center font-bold text-lg uppercase tracking-widest mb-1">Tiền Thu Hộ (COD)</p>
               <p className="text-center font-black text-4xl">
-                {Number(phieuIn.cod_amount).toLocaleString()} VNĐ
+                {Number(labelOrder.cod_amount).toLocaleString()} VNĐ
               </p>
             </div>
             
             <p className="text-center text-xs mt-4 italic font-medium">Lưu ý: Chỉ giao hàng giờ hành chính.</p>
           </div>
+          ))}
         </div>
       )}
     </>

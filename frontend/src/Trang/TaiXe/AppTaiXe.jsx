@@ -1,6 +1,7 @@
-import { useState, useEffect } from 'react';
+import { useCallback, useEffect, useState } from 'react';
+import { Html5QrcodeScanner, Html5QrcodeSupportedFormats } from 'html5-qrcode';
 import { io } from 'socket.io-client';
-import { MapPin, Package, CheckCircle, XCircle, LogOut, Navigation, Wallet, UserCircle, Bike, Map, Send, CalendarOff, Camera, AlertTriangle, X, ShieldCheck } from 'lucide-react';
+import { MapPin, Package, CheckCircle, XCircle, LogOut, Navigation, Wallet, UserCircle, Bike, Map, Send, CalendarOff, Camera, AlertTriangle, X, ShieldCheck, House, PackageCheck, Banknote, Siren, Wifi, WifiOff, ScanLine } from 'lucide-react';
 import { MapContainer, TileLayer, Marker, Popup } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
@@ -14,14 +15,34 @@ const truckIcon = new L.Icon({
   iconAnchor: [12, 41]
 });
 
-const tinhTongTienCanThu = (order) => Number(order?.cod_amount || 0) + Number(order?.shipping_fee || 0);
+const tinhTongTienCanThu = (order) => Number(order?.cod_amount || 0)
+  + (order?.fee_payer === 'receiver' ? Number(order?.shipping_fee || 0) : 0);
+const distanceBetween = (first, second) => {
+  const toRadians = (degrees) => (degrees * Math.PI) / 180;
+  const deltaLatitude = toRadians(Number(second.lat) - Number(first.lat));
+  const deltaLongitude = toRadians(Number(second.lng) - Number(first.lng));
+  const value = Math.sin(deltaLatitude / 2) ** 2
+    + Math.cos(toRadians(Number(first.lat))) * Math.cos(toRadians(Number(second.lat)))
+    * Math.sin(deltaLongitude / 2) ** 2;
+  return 6371 * 2 * Math.atan2(Math.sqrt(value), Math.sqrt(1 - value));
+};
 
 const socket = io('http://localhost:5000');
 
 export default function AppTaiXe() {
   const [donHang, setDonHang] = useState([]);
-  const [tabHienTai, setTabHienTai] = useState('donhang'); 
-  const [viTien, setViTien] = useState(5000000); 
+  const [tabHienTai, setTabHienTai] = useState('dashboard');
+  const [viTien, setViTien] = useState(0);
+  const [tienChoNop, setTienChoNop] = useState(0);
+  const [dangOnline, setDangOnline] = useState(navigator.onLine);
+  const [offlineSyncNotice, setOfflineSyncNotice] = useState('');
+  const [showSos, setShowSos] = useState(false);
+  const [sosType, setSosType] = useState('vehicle_breakdown');
+  const [sosDescription, setSosDescription] = useState('');
+  const [sendingSos, setSendingSos] = useState(false);
+  const [scanningTripBags, setScanningTripBags] = useState(false);
+  const [tripBagNotice, setTripBagNotice] = useState('');
+  const [cashSubmitting, setCashSubmitting] = useState(false);
   const [viTriHienTai, setViTriHienTai] = useState({ lat: 10.762622, lng: 106.660172 }); 
   const [routeInfo, setRouteInfo] = useState(null);
   
@@ -37,6 +58,9 @@ export default function AppTaiXe() {
   const [xacNhanTien, setXacNhanTien] = useState(false);
   const [phuongThucCOD, setPhuongThucCOD] = useState('');
   const [dangCapNhat, setDangCapNhat] = useState(false);
+  const [donCanQuet, setDonCanQuet] = useState(null);
+  const [loiQuetMa, setLoiQuetMa] = useState('');
+  const [maOtpGiaoHang, setMaOtpGiaoHang] = useState('');
 
   const driverId = localStorage.getItem('user_id');
   const driverRole = localStorage.getItem('role') || localStorage.getItem('user_role');
@@ -50,7 +74,25 @@ export default function AppTaiXe() {
     ? `https://www.google.com/maps/dir/?api=1&${new URLSearchParams({ origin: diemDi, destination: diemDen, travelmode: 'driving' })}`
     : '';
 
-  const taiDuLieu = async () => {
+  const batDauPhatToaDo = useCallback((orderId, trackingCode) => {
+    if (!navigator.geolocation) return;
+    navigator.geolocation.watchPosition((position) => {
+      const lat = position.coords.latitude;
+      const lng = position.coords.longitude;
+      setViTriHienTai({ lat, lng });
+      socket.emit('driver_update_location', {
+        shipper_id: Number(driverId),
+        order_id: orderId,
+        tracking_code: trackingCode,
+        lat,
+        lng,
+        route_status: 'moving',
+        timestamp: new Date()
+      });
+    }, (error) => console.error('Lỗi GPS:', error), { enableHighAccuracy: true });
+  }, [driverId]);
+
+  const taiDuLieu = useCallback(async () => {
     if (!driverId) return;
     try {
       const res = await fetch(`http://localhost:5000/api/orders/shipper/${driverId}`);
@@ -75,10 +117,49 @@ export default function AppTaiXe() {
     } catch (error) {
       console.error("Lỗi tải dữ liệu:", error);
     }
-  };
+  }, [driverId, isPickupDriver, batDauPhatToaDo]);
+
+  const taiViTien = useCallback(async () => {
+    if (!driverId) return;
+    try {
+      const response = await fetch(`http://localhost:5000/api/driver/wallet/${driverId}`);
+      const data = await response.json();
+      if (!response.ok || !data.success) throw new Error(data.message || 'Không thể tải ví COD.');
+      setViTien(Number(data.data.cash_on_hand || 0));
+      setTienChoNop(Number(data.data.cash_pending_handover || 0));
+    } catch (error) {
+      console.error('Không tải được ví tài xế:', error);
+    }
+  }, [driverId]);
 
   useEffect(() => {
-    taiDuLieu();
+    const onlineHandler = () => {
+      setDangOnline(true);
+      navigator.serviceWorker?.controller?.postMessage({ type: 'SYNC_DRIVER_ACTIONS' });
+    };
+    const offlineHandler = () => setDangOnline(false);
+    const serviceWorkerMessage = (event) => {
+      if (event.data?.type !== 'DRIVER_ACTION_SYNCED') return;
+      setOfflineSyncNotice(event.data.success
+        ? 'Thao tác đã đồng bộ thành công.'
+        : event.data.message || 'Một thao tác offline cần được kiểm tra thủ công.');
+      if (event.data.success) taiDuLieu();
+    };
+    window.addEventListener('online', onlineHandler);
+    window.addEventListener('offline', offlineHandler);
+    navigator.serviceWorker?.addEventListener('message', serviceWorkerMessage);
+    return () => {
+      window.removeEventListener('online', onlineHandler);
+      window.removeEventListener('offline', offlineHandler);
+      navigator.serviceWorker?.removeEventListener('message', serviceWorkerMessage);
+    };
+  }, [taiDuLieu]);
+
+  useEffect(() => {
+    const initialLoad = window.setTimeout(() => {
+      taiViTien();
+      taiDuLieu();
+    }, 0);
     
     if (navigator.geolocation) {
       navigator.geolocation.getCurrentPosition((pos) => {
@@ -86,55 +167,112 @@ export default function AppTaiXe() {
       });
     }
 
-    socket.on(`new_order_assigned_${driverId}`, (data) => {
+    const orderAssigned = (data) => {
       alert(data.message);
       taiDuLieu(); 
-    });
+    };
+    socket.on(`new_order_assigned_${driverId}`, orderAssigned);
 
-    return () => socket.off(`new_order_assigned_${driverId}`);
-  }, [driverId, isPickupDriver]);
+    return () => {
+      window.clearTimeout(initialLoad);
+      socket.off(`new_order_assigned_${driverId}`, orderAssigned);
+    };
+  }, [driverId, isPickupDriver, taiDuLieu, taiViTien]);
 
-  const xacNhanDaLayHang = async (orderId) => {
-    if (!window.confirm('Xác nhận đã nhận kiện hàng từ Shop và mang về kho?')) return;
-    try {
-      const res = await fetch(`http://localhost:5000/api/orders/${orderId}/status`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: 'picked_up', user_id: driverId })
-      });
-      const data = await res.json();
-      if (!data.success) return alert(data.message || 'Không thể xác nhận lấy hàng.');
-      const order = donHang.find((item) => String(item.id) === String(orderId));
-      if (order) batDauPhatToaDo(orderId, order.tracking_code);
-      const routeRes = await fetch(`http://localhost:5000/api/orders/${orderId}/route`);
-      const routeData = await routeRes.json();
-      if (routeData.success) setRouteInfo(routeData.data);
-      alert('Đã xác nhận lấy hàng. Vui lòng bàn giao kiện hàng cho Thủ kho quét nhập.');
-      taiDuLieu();
-    } catch (error) {
-      alert('Lỗi kết nối!');
-    }
+  const xacNhanDaLayHang = (order) => {
+    setLoiQuetMa('');
+    setDonCanQuet(order);
   };
 
-  const batDauPhatToaDo = (orderId, trackingCode) => {
-    if (navigator.geolocation) {
-      navigator.geolocation.watchPosition((position) => {
-        const lat = position.coords.latitude;
-        const lng = position.coords.longitude;
-        setViTriHienTai({ lat, lng });
-
-        socket.emit('driver_update_location', {
-          shipper_id: Number(driverId),
-          order_id: orderId,
-          tracking_code: trackingCode,
-          lat: lat,
-          lng: lng,
-          route_status: 'moving',
-          timestamp: new Date()
+  useEffect(() => {
+    if (!donCanQuet) return undefined;
+    let scanned = false;
+    const scanner = new Html5QrcodeScanner('driver-pickup-barcode', {
+      fps: 10,
+      qrbox: { width: 240, height: 160 },
+      formatsToSupport: [
+        Html5QrcodeSupportedFormats.QR_CODE,
+        Html5QrcodeSupportedFormats.CODE_128,
+        Html5QrcodeSupportedFormats.CODE_39,
+        Html5QrcodeSupportedFormats.EAN_13
+      ],
+      rememberLastUsedCamera: false
+    }, false);
+    scanner.render(async (decodedText) => {
+      if (scanned) return;
+      if (decodedText.trim() !== String(donCanQuet.tracking_code).trim()) {
+        setLoiQuetMa('Mã quét không khớp với vận đơn đang nhận. Vui lòng quét lại đúng nhãn.');
+        return;
+      }
+      scanned = true;
+      try {
+        const response = await fetch(`http://localhost:5000/api/orders/${donCanQuet.id}/status`, {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+            'Idempotency-Key': `${driverId}-${donCanQuet.id}-picked_up`
+          },
+          body: JSON.stringify({ status: 'picked_up', user_id: driverId, tracking_code: donCanQuet.tracking_code })
         });
-      }, (error) => console.error("Lỗi GPS:", error), { enableHighAccuracy: true });
-    }
-  };
+        const result = await response.json();
+        if (!response.ok || !result.success) throw new Error(result.message || 'Không thể xác nhận nhận hàng.');
+        batDauPhatToaDo(donCanQuet.id, donCanQuet.tracking_code);
+        setDonCanQuet(null);
+        const routeResponse = await fetch(`http://localhost:5000/api/orders/${donCanQuet.id}/route`);
+        const routeResult = await routeResponse.json();
+        if (routeResult.success) setRouteInfo(routeResult.data);
+        alert(result.offline_queued
+          ? 'Đã lưu xác nhận lấy hàng trên thiết bị. Tự động đồng bộ khi mạng quay lại.'
+          : 'Đã quét đúng mã vận đơn. Vui lòng bàn giao kiện hàng cho Thủ kho quét nhập.');
+        taiDuLieu();
+      } catch (error) {
+        scanned = false;
+        setLoiQuetMa(error.message || 'Lỗi kết nối máy chủ.');
+      }
+    }, () => {});
+    return () => {
+      scanner.clear().catch((error) => console.warn('Không thể dừng camera quét mã:', error));
+    };
+  }, [donCanQuet, driverId, batDauPhatToaDo, taiDuLieu]);
+
+  useEffect(() => {
+    if (!scanningTripBags) return undefined;
+    let processing = false;
+    const scanner = new Html5QrcodeScanner('driver-linehaul-barcode', {
+      fps: 8,
+      qrbox: { width: 260, height: 150 },
+      formatsToSupport: [
+        Html5QrcodeSupportedFormats.QR_CODE,
+        Html5QrcodeSupportedFormats.CODE_128,
+        Html5QrcodeSupportedFormats.CODE_39
+      ],
+      rememberLastUsedCamera: false
+    }, false);
+    scanner.render(async (decodedText) => {
+      if (processing) return;
+      processing = true;
+      try {
+        const response = await fetch('http://localhost:5000/api/driver/trips/scan', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ driver_id: Number(driverId), bag_code: decodedText.trim() })
+        });
+        const data = await response.json();
+        if (!response.ok || !data.success) throw new Error(data.message || 'Không thể xác nhận bao hàng.');
+        setTripBagNotice(data.message);
+        if (data.trip_started) {
+          setScanningTripBags(false);
+          taiDuLieu();
+        } else {
+          window.setTimeout(() => { processing = false; }, 900);
+        }
+      } catch (error) {
+        setTripBagNotice(error.message || 'Lỗi kết nối máy chủ.');
+        window.setTimeout(() => { processing = false; }, 900);
+      }
+    }, () => {});
+    return () => scanner.clear().catch((error) => console.warn('Không thể dừng camera quét bao:', error));
+  }, [scanningTripBags, driverId, taiDuLieu]);
 
   const batDauGiaoHang = async (orderId, trackingCode) => {
     if (!window.confirm('Bắt đầu đi giao đơn này?')) return;
@@ -144,16 +282,67 @@ export default function AppTaiXe() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status: 'delivering', user_id: driverId })
       });
-      if ((await res.json()).success) {
+      const data = await res.json();
+      if (res.ok && data.success) {
         batDauPhatToaDo(orderId, trackingCode);
         const routeRes = await fetch(`http://localhost:5000/api/orders/${orderId}/route`);
         const routeData = await routeRes.json();
         if (routeData.success) setRouteInfo(routeData.data);
         alert("🚀 Đã bật GPS đồng bộ lộ trình!");
         taiDuLieu();
+      } else {
+        alert(data.message || 'Không thể bắt đầu giao hàng.');
       }
-    } catch (error) {
+    } catch {
       alert('Lỗi cập nhật!');
+    }
+  };
+
+  const nopTienMat = async () => {
+    if (viTien <= 0 || cashSubmitting) return;
+    if (!window.confirm(`Gửi yêu cầu nộp ${viTien.toLocaleString()} đ tiền mặt COD cho Kế toán xác nhận?`)) return;
+    setCashSubmitting(true);
+    try {
+      const response = await fetch('http://localhost:5000/api/driver/cash-remittances', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ driver_id: Number(driverId) })
+      });
+      const data = await response.json();
+      if (!response.ok || !data.success) throw new Error(data.message || 'Không thể tạo phiếu nộp tiền.');
+      alert(`${data.message} Số tiền: ${Number(data.data.amount).toLocaleString()} đ.`);
+      await taiViTien();
+    } catch (error) {
+      alert(error.message || 'Lỗi kết nối khi nộp tiền.');
+    } finally {
+      setCashSubmitting(false);
+    }
+  };
+
+  const guiBaoCaoSuCo = async (event) => {
+    event.preventDefault();
+    setSendingSos(true);
+    try {
+      const response = await fetch('http://localhost:5000/api/driver/incidents', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          driver_id: Number(driverId),
+          incident_type: sosType,
+          description: sosDescription.trim(),
+          lat: viTriHienTai.lat,
+          lng: viTriHienTai.lng
+        })
+      });
+      const data = await response.json();
+      if (!response.ok || !data.success) throw new Error(data.message || 'Không thể gửi báo cáo sự cố.');
+      alert(data.message);
+      setShowSos(false);
+      setSosDescription('');
+    } catch (error) {
+      alert(error.message || 'Lỗi kết nối khi gửi báo cáo.');
+    } finally {
+      setSendingSos(false);
     }
   };
 
@@ -183,6 +372,7 @@ export default function AppTaiXe() {
       if (tinhTongTienCanThu(don) > 0 && !['cash', 'bank_transfer'].includes(phuongThucCOD)) {
         return alert('Vui lòng chọn tiền mặt hoặc chuyển khoản.');
       }
+      if (!/^\d{4,6}$/.test(maOtpGiaoHang)) return alert('Vui lòng nhập mã OTP giao hàng gồm 4-6 chữ số.');
       if (!anhMinhChung) return alert("BẮT BUỘC: Vui lòng chụp ảnh minh chứng đã giao hàng!");
     }
 
@@ -197,6 +387,7 @@ export default function AppTaiXe() {
       }
 
       if (loai === 'completed') {
+        formData.append('delivery_otp', maOtpGiaoHang);
         formData.append('cod_collected', String(xacNhanTien));
         if (tinhTongTienCanThu(don) > 0) formData.append('cod_payment_method', phuongThucCOD);
       }
@@ -213,16 +404,14 @@ export default function AppTaiXe() {
       const data = await res.json();
       
       if (data.success) {
-        if (loai === 'completed') {
-          setViTien(prev => prev - tinhTongTienCanThu(don));
-        }
         alert(loai === 'completed' ? 'Đã xác nhận giao hàng và thu đủ COD + cước.' : 'Đã ghi nhận chuyển hoàn hàng!');
         dongModal();
         taiDuLieu();
+        taiViTien();
       } else {
         alert("Lỗi: " + data.message);
       }
-    } catch (error) {
+    } catch {
       alert('Lỗi kết nối máy chủ!');
     } finally {
       setDangCapNhat(false);
@@ -236,6 +425,7 @@ export default function AppTaiXe() {
     setLyDoHuy('');
     setXacNhanTien(false);
     setPhuongThucCOD('');
+    setMaOtpGiaoHang('');
   };
 
   const guiDonNghiPhep = async (e) => {
@@ -254,7 +444,7 @@ export default function AppTaiXe() {
         alert("✅ Đã gửi đơn xin nghỉ phép lên phòng Nhân sự chờ duyệt.");
         setLyDoNghi('');
       }
-    } catch (error) {
+    } catch {
       alert("Lỗi kết nối mạng!");
     } finally {
       setDangGuiNghiPhep(false);
@@ -269,11 +459,22 @@ export default function AppTaiXe() {
   };
 
   const donThanhCong = donHang.filter(d => d.status === 'completed');
-  const tongTienThuHo = donThanhCong.reduce((sum, item) => sum + tinhTongTienCanThu(item), 0);
   const donDangChay = donHang.filter(d => isPickupDriver
     ? ['picking', 'picked_up', 'transferring_to_central', 'transferring_to_destination'].includes(d.status)
     : ['at_destination_warehouse', 'delivering'].includes(d.status));
-
+  const tongTienThuHo = donThanhCong.reduce((sum, item) => sum + tinhTongTienCanThu(item), 0);
+  const donHoanTatHomNay = donThanhCong.filter((order) => new Date(order.updated_at).toDateString() === new Date().toDateString()).length;
+  const donTrongNgay = donDangChay.length + donHoanTatHomNay;
+  const tienDoHomNay = donTrongNgay ? Math.round((donHoanTatHomNay / donTrongNgay) * 100) : 0;
+  const nextMission = donDangChay
+    .map((order) => {
+      const target = isPickupDriver
+        ? { lat: order.shop_lat, lng: order.shop_lng }
+        : { lat: order.receiver_lat, lng: order.receiver_lng };
+      const hasTarget = Number.isFinite(Number(target.lat)) && Number.isFinite(Number(target.lng));
+      return { ...order, distance: hasTarget ? distanceBetween(viTriHienTai, target) : Number.POSITIVE_INFINITY };
+    })
+    .sort((first, second) => first.distance - second.distance)[0];
   return (
     <div className="bg-slate-100 min-h-screen flex justify-center font-sans text-slate-800">
       <div className="w-full max-w-md bg-white min-h-screen shadow-2xl relative overflow-hidden flex flex-col">
@@ -290,9 +491,13 @@ export default function AppTaiXe() {
                 <h2 className="font-black text-base">{driverName}</h2>
               </div>
             </div>
-            <button onClick={dangXuat} className="bg-white/10 hover:bg-white/20 p-2 rounded-full transition-colors">
-              <LogOut size={18} />
-            </button>
+            <div className="flex items-center gap-2">
+              <span className={`flex items-center gap-1 rounded-full px-2 py-1 text-[10px] font-black ${dangOnline ? 'bg-emerald-400/20 text-emerald-100' : 'bg-red-400/20 text-red-100'}`}>{dangOnline ? <Wifi size={13} /> : <WifiOff size={13} />}{dangOnline ? 'ONLINE' : 'OFFLINE'}</span>
+              <button type="button" onClick={() => setShowSos(true)} className="rounded-full bg-red-500 p-2 text-white shadow-lg shadow-red-900/20" aria-label="Báo cáo sự cố SOS"><Siren size={18} /></button>
+              <button onClick={dangXuat} className="bg-white/10 hover:bg-white/20 p-2 rounded-full transition-colors" aria-label="Đăng xuất">
+                <LogOut size={18} />
+              </button>
+            </div>
           </div>
 
           <div className="bg-white rounded-2xl p-4 shadow-sm flex items-center justify-between text-slate-800">
@@ -301,7 +506,7 @@ export default function AppTaiXe() {
                 <Wallet size={20} />
               </div>
               <div>
-                <p className="text-slate-400 text-[10px] font-bold uppercase">SỐ DƯ VÍ (KÝ QUỸ)</p>
+                <p className="text-slate-400 text-[10px] font-bold uppercase">COD TIỀN MẶT ĐANG GIỮ</p>
                 <h3 className="font-black text-lg text-slate-800">{viTien.toLocaleString()} đ</h3>
               </div>
             </div>
@@ -340,7 +545,32 @@ export default function AppTaiXe() {
             </div>
           )}
           
-          {tabHienTai === 'donhang' && (
+          {tabHienTai === 'dashboard' && (
+            <div className="space-y-5 p-5">
+              <section className="flex items-center gap-5 rounded-[28px] bg-slate-900 p-5 text-white shadow-lg">
+                <div className="grid h-28 w-28 shrink-0 place-items-center rounded-full" style={{ background: `conic-gradient(#34d399 ${tienDoHomNay * 3.6}deg, #334155 0deg)` }}>
+                  <div className="grid h-20 w-20 place-items-center rounded-full bg-slate-900 text-center">
+                    <span><strong className="block text-2xl">{tienDoHomNay}%</strong><small className="text-[9px] text-slate-400">HÔM NAY</small></span>
+                  </div>
+                </div>
+                <div><p className="text-xs font-black uppercase tracking-wider text-emerald-300">Tiến độ hoàn thành</p><h3 className="mt-2 text-xl font-black">{donHoanTatHomNay}/{donTrongNgay} đơn</h3><p className="mt-1 text-xs text-slate-400">Cố lên, hoàn thành các nhiệm vụ còn lại!</p></div>
+              </section>
+              <section className="rounded-2xl border border-blue-100 bg-blue-50 p-4">
+                <div className="flex items-center justify-between"><p className="text-xs font-black uppercase tracking-wider text-blue-800">Nhiệm vụ tiếp theo · Gần bạn nhất</p><Navigation size={16} className="text-blue-600" /></div>
+                {offlineSyncNotice && <p role="status" className="mb-3 rounded-lg bg-amber-100 p-3 text-xs font-bold text-amber-800">{offlineSyncNotice}</p>}
+                {nextMission ? <div className="mt-3">
+                  <h3 className="font-black text-slate-800">{nextMission.tracking_code}</h3>
+                  <p className="mt-1 text-sm text-slate-600">{isPickupDriver ? nextMission.shop_address : nextMission.receiver_address}</p>
+                  <p className="mt-1 text-xs font-bold text-blue-700">{Number.isFinite(nextMission.distance) ? `${nextMission.distance.toFixed(1)} km từ vị trí gần nhất` : 'Vị trí địa chỉ chưa có'}</p>
+                  <button type="button" onClick={() => setTabHienTai('thu-gom')} className="mt-3 rounded-lg bg-blue-600 px-4 py-2 text-sm font-bold text-white">Mở nhiệm vụ</button>
+                </div> : <p className="mt-3 text-sm text-slate-600">Chưa có nhiệm vụ đang chờ. Hệ thống sẽ cập nhật khi Điều phối giao đơn.</p>}
+              </section>
+              <button type="button" onClick={() => setShowSos(true)} className="flex w-full items-center justify-center gap-2 rounded-2xl bg-red-600 p-4 font-black text-white shadow-md"><Siren size={19} /> SOS · Báo sự cố khẩn cấp</button>
+              <button type="button" onClick={() => setTabHienTai('bando')} className="flex w-full items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white p-3 text-sm font-bold text-slate-700"><Map size={17} /> Mở bản đồ vị trí GPS</button>
+            </div>
+          )}
+
+          {tabHienTai === 'thu-gom' && (
             <div className="p-5 space-y-4">
               <h3 className="font-black text-base text-slate-800 flex items-center gap-2 mb-1">
                 <Navigation className="text-blue-600" size={18} /> {isPickupDriver ? 'Đơn cần lấy' : 'Đơn cần giao'} ({donDangChay.length})
@@ -390,8 +620,8 @@ export default function AppTaiXe() {
                       </div>
                       <div className="grid grid-cols-2 gap-2">
                         {don.status === 'picking' ? (
-                          <button onClick={() => xacNhanDaLayHang(don.id)} className="col-span-2 bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded-xl text-xs transition-all shadow-md shadow-blue-200">
-                            Xác nhận đã lấy hàng
+                          <button onClick={() => xacNhanDaLayHang(don)} className="col-span-2 bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded-xl text-xs transition-all shadow-md shadow-blue-200">
+                            Mở camera quét mã nhận hàng
                           </button>
                         ) : don.status === 'picked_up' || don.status === 'transferring_to_central' || don.status === 'transferring_to_destination' ? (
                           <p className="col-span-2 rounded-xl bg-amber-50 px-3 py-3 text-center text-xs font-bold text-amber-700">{don.status === 'picked_up' ? 'Đã lấy tại Shop, chờ kho con quét nhận.' : 'Đang trung chuyển, kho nhận sẽ quét khi hàng đến.'}</p>
@@ -430,6 +660,36 @@ export default function AppTaiXe() {
                 <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"/>
                 <Marker position={[viTriHienTai.lat, viTriHienTai.lng]} icon={truckIcon}><Popup><div className="font-bold">Bạn đang ở đây</div></Popup></Marker>
               </MapContainer>
+            </div>
+          )}
+
+          {tabHienTai === 'handover' && (
+            <div className="space-y-4 p-5">
+              <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+                <p className="text-xs font-black uppercase tracking-wider text-slate-400">Trung chuyển Line-haul</p>
+                <h2 className="mt-2 text-lg font-black text-slate-800">Quét mã bao nhận từ kho</h2>
+                <p className="mt-1 text-sm text-slate-500">Tài xế xác nhận từng bao đã xếp lên xe. Chuyến bắt đầu sau khi quét đủ toàn bộ bao.</p>
+                <button type="button" onClick={() => { setTripBagNotice(''); setScanningTripBags(true); }} className="mt-4 flex w-full items-center justify-center gap-2 rounded-xl bg-indigo-600 px-4 py-3 font-black text-white"><ScanLine size={18} /> Mở camera quét bao</button>
+                {tripBagNotice && <p role="status" className="mt-3 rounded-lg bg-indigo-50 p-3 text-sm font-bold text-indigo-800">{tripBagNotice}</p>}
+              </section>
+              {scanningTripBags && <div className="fixed inset-0 z-[120] flex items-center justify-center bg-slate-950/90 p-4"><section className="w-full max-w-md rounded-2xl bg-white p-5">
+                <div className="mb-4 flex items-center justify-between"><h3 className="font-black">Quét mã bao Line-haul</h3><button type="button" onClick={() => setScanningTripBags(false)} className="rounded-full bg-slate-100 p-2"><X size={18} /></button></div>
+                <div id="driver-linehaul-barcode" />
+                {tripBagNotice && <p role="alert" className="mt-3 rounded-lg bg-blue-50 p-3 text-sm font-bold text-blue-800">{tripBagNotice}</p>}
+              </section></div>}
+            </div>
+          )}
+
+          {tabHienTai === 'wallet' && (
+            <div className="space-y-4 p-5">
+              <section className="rounded-2xl border border-emerald-100 bg-white p-5 shadow-sm">
+                <p className="text-xs font-black uppercase tracking-wider text-slate-400">Ví COD tiền mặt</p>
+                <h2 className="mt-2 text-3xl font-black text-emerald-700">{viTien.toLocaleString()} đ</h2>
+                <p className="mt-2 text-sm text-slate-500">Đang chờ Kế toán xác nhận: {tienChoNop.toLocaleString()} đ</p>
+                <button type="button" disabled={cashSubmitting || viTien <= 0 || !dangOnline} onClick={nopTienMat} className="mt-5 flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-3 font-black text-white disabled:cursor-not-allowed disabled:opacity-50"><Banknote size={18} />{cashSubmitting ? 'Đang gửi yêu cầu...' : 'Yêu cầu nộp tiền mặt'}</button>
+                {!dangOnline && <p className="mt-2 text-xs font-semibold text-amber-700">Cần có kết nối mạng để lập phiếu nộp tiền.</p>}
+              </section>
+              <section className="rounded-2xl border border-slate-200 bg-white p-5"><p className="font-black text-slate-800">Tổng COD và cước đã thu hôm nay</p><p className="mt-2 text-2xl font-black text-red-600">{tongTienThuHo.toLocaleString()} đ</p></section>
             </div>
           )}
 
@@ -474,21 +734,56 @@ export default function AppTaiXe() {
         </div>
 
         {/* BOTTOM NAVIGATION */}
-        <div className="absolute bottom-0 left-0 w-full bg-white border-t border-slate-100 flex justify-around items-center py-3 px-2 z-50">
-          <button onClick={() => setTabHienTai('donhang')} className={`flex flex-col items-center gap-1 w-20 ${tabHienTai === 'donhang' ? 'text-blue-600 font-bold' : 'text-slate-400 font-medium'}`}>
-            <Navigation size={20} /><span className="text-[10px] uppercase">Đơn Hàng</span>
-          </button>
-          <button onClick={() => setTabHienTai('bando')} className={`flex flex-col items-center gap-1 w-20 ${tabHienTai === 'bando' ? 'text-blue-600 font-bold' : 'text-slate-400 font-medium'}`}>
-            <Map size={20} /><span className="text-[10px] uppercase">Bản Đồ</span>
-          </button>
-          <button onClick={() => setTabHienTai('canhan')} className={`flex flex-col items-center gap-1 w-20 ${tabHienTai === 'canhan' ? 'text-blue-600 font-bold' : 'text-slate-400 font-medium'}`}>
-            <UserCircle size={20} /><span className="text-[10px] uppercase">Cá Nhân</span>
-          </button>
+        <div className="absolute bottom-0 left-0 z-50 flex w-full items-center justify-around border-t border-slate-100 bg-white px-1 py-2 shadow-[0_-8px_30px_rgba(15,23,42,0.08)]">
+          {[
+            { id: 'dashboard', label: 'Trang chủ', Icon: House },
+            { id: 'thu-gom', label: 'Thu gom', Icon: Package },
+            { id: 'handover', label: 'Bàn giao', Icon: PackageCheck },
+            { id: 'wallet', label: 'Đối soát', Icon: Banknote },
+            { id: 'canhan', label: 'Cá nhân', Icon: UserCircle }
+          ].map(({ id, label, Icon }) => (
+            <button key={id} type="button" onClick={() => setTabHienTai(id)} className={`flex min-w-0 flex-1 flex-col items-center gap-1 py-1 ${tabHienTai === id ? 'font-bold text-blue-600' : 'font-medium text-slate-400'}`}>
+              <Icon size={20} /><span className="text-[9px] uppercase">{label}</span>
+            </button>
+          ))}
         </div>
 
         {/* ========================================================= 
             MODAL XỬ LÝ (CHỤP ẢNH & BÁO CÁO) DÀNH CHO APP TÀI XẾ 
             ========================================================= */}
+        {donCanQuet && (
+          <div className="fixed inset-0 z-[110] flex items-center justify-center bg-slate-950/90 p-4">
+            <div className="w-full max-w-md rounded-2xl bg-white p-5">
+              <div className="mb-4 flex items-center justify-between">
+                <div>
+                  <h3 className="font-black text-lg">Quét mã nhận hàng</h3>
+                  <p className="text-xs text-slate-500">Đơn {donCanQuet.tracking_code}</p>
+                </div>
+                <button onClick={() => setDonCanQuet(null)} className="rounded-full bg-slate-100 p-2 text-slate-600"><X size={18} /></button>
+              </div>
+              <div id="driver-pickup-barcode" />
+              {loiQuetMa && <p role="alert" className="mt-3 rounded-lg bg-red-50 p-3 text-sm font-bold text-red-700">{loiQuetMa}</p>}
+              <p className="mt-3 text-xs text-slate-500">Chỉ trạng thái vận đơn khớp mới được xác nhận nhận hàng.</p>
+            </div>
+          </div>
+        )}
+        {showSos && (
+          <div className="fixed inset-0 z-[130] flex items-center justify-center bg-slate-950/80 p-4">
+            <form onSubmit={guiBaoCaoSuCo} className="w-full max-w-md space-y-4 rounded-2xl bg-white p-5">
+              <div className="flex items-center justify-between"><h3 className="flex items-center gap-2 text-lg font-black text-red-700"><Siren size={20} /> Báo cáo sự cố</h3><button type="button" onClick={() => setShowSos(false)} className="rounded-full bg-slate-100 p-2"><X size={18} /></button></div>
+              <label className="block text-sm font-bold text-slate-600">Loại sự cố
+                <select value={sosType} onChange={(event) => setSosType(event.target.value)} className="mt-2 w-full rounded-lg border border-slate-200 bg-white p-3">
+                  <option value="accident">Tai nạn</option><option value="vehicle_breakdown">Hỏng xe</option><option value="traffic">Tắc đường</option><option value="other">Khác</option>
+                </select>
+              </label>
+              <label className="block text-sm font-bold text-slate-600">Mô tả và hỗ trợ cần thiết
+                <textarea required maxLength={2000} value={sosDescription} onChange={(event) => setSosDescription(event.target.value)} rows={3} placeholder="Mô tả ngắn gọn tình huống..." className="mt-2 w-full rounded-lg border border-slate-200 p-3" />
+              </label>
+              <p className="text-xs text-slate-500">Vị trí GPS hiện tại sẽ được gửi kèm khi báo cáo.</p>
+              <button type="submit" disabled={sendingSos} className="w-full rounded-xl bg-red-600 px-4 py-3 font-black text-white disabled:opacity-50">{sendingSos ? 'Đang gửi...' : 'Gửi SOS đến Trung tâm'}</button>
+            </form>
+          </div>
+        )}
         {modalXuLy.mo && (
           <div className="fixed inset-0 bg-slate-900/80 z-[100] flex flex-col justify-end">
             <div className="bg-white w-full rounded-t-3xl p-6 pb-10 animate-in slide-in-from-bottom-full duration-300">
@@ -524,6 +819,19 @@ export default function AppTaiXe() {
                 {/* 2. MỤC DÀNH CHO THÀNH CÔNG: XÁC NHẬN VÀ CHỌN HÌNH THỨC COD */}
                 {modalXuLy.loai === 'completed' && (
                   <div className="bg-emerald-50 border border-emerald-100 p-4 rounded-xl">
+                    <label className="mb-3 block text-xs font-black uppercase text-emerald-800" htmlFor="delivery-otp">Mã OTP khách hàng cung cấp (*)</label>
+                    <input
+                      id="delivery-otp"
+                      inputMode="numeric"
+                      autoComplete="one-time-code"
+                      maxLength={6}
+                      pattern="[0-9]{4,6}"
+                      required
+                      value={maOtpGiaoHang}
+                      onChange={(event) => setMaOtpGiaoHang(event.target.value.replace(/\D/g, '').slice(0, 6))}
+                      className="mb-4 w-full rounded-xl border border-emerald-200 bg-white p-3 text-center text-2xl font-black tracking-[0.5em]"
+                      placeholder="••••"
+                    />
                     <div className="flex items-start gap-3">
                       <input
                         type="checkbox"
@@ -533,13 +841,13 @@ export default function AppTaiXe() {
                         onChange={(e) => setXacNhanTien(e.target.checked)}
                       />
                       <label htmlFor="checkTien" className="text-sm">
-                        <p className="font-bold text-emerald-800">Xác nhận đã thu đủ COD</p>
-                        <p className="font-black text-red-600 text-lg">{Number(modalXuLy.don?.cod_amount || 0).toLocaleString()} VNĐ</p>
+                        <p className="font-bold text-emerald-800">Xác nhận đã thu đủ số tiền cần thu</p>
+                        <p className="font-black text-red-600 text-lg">{tinhTongTienCanThu(modalXuLy.don).toLocaleString()} VNĐ</p>
                       </label>
                     </div>
                     <div className="ml-9 mt-2 space-y-1 text-xs text-emerald-800">
                       <div className="flex justify-between"><span>COD hàng</span><span>{Number(modalXuLy.don?.cod_amount || 0).toLocaleString()} VNĐ</span></div>
-                      <div className="flex justify-between"><span>Phí vận chuyển</span><span>{Number(modalXuLy.don?.shipping_fee || 0).toLocaleString()} VNĐ</span></div>
+                      <div className="flex justify-between"><span>Phí vận chuyển ({modalXuLy.don?.fee_payer === 'receiver' ? 'người nhận trả' : 'người gửi trả'})</span><span>{modalXuLy.don?.fee_payer === 'receiver' ? Number(modalXuLy.don?.shipping_fee || 0).toLocaleString() : '0'} VNĐ</span></div>
                       <div className="flex justify-between border-t border-emerald-200 pt-1 font-black"><span>Tổng cần thu</span><span>{tinhTongTienCanThu(modalXuLy.don).toLocaleString()} VNĐ</span></div>
                     </div>
                     {tinhTongTienCanThu(modalXuLy.don) > 0 && (

@@ -21,6 +21,10 @@ const normalizeRole = (value) => {
     kho: 'warehouse_manager',
     content: 'content_manager',
     content_manager: 'content_manager',
+    cskh: 'customer_service',
+    customer_service: 'customer_service',
+    customer_support: 'customer_service',
+    support: 'customer_service',
     content_team: 'content_manager',
     phong_ban_noi_dung: 'content_manager',
     marketing: 'content_manager',
@@ -98,6 +102,10 @@ export default function DangNhap() {
           kho: 'warehouse_manager',
           content: 'content_manager',
           content_manager: 'content_manager',
+          cskh: 'customer_service',
+          customer_service: 'customer_service',
+          customer_support: 'customer_service',
+          support: 'customer_service',
           content_team: 'content_manager',
           phong_ban_noi_dung: 'content_manager',
           marketing: 'content_manager'
@@ -105,6 +113,7 @@ export default function DangNhap() {
         const normalizedRole = roleAliases[role] || role;
 
         localStorage.setItem('user_id', data.user.id);
+        localStorage.setItem('access_token', data.token);
         localStorage.setItem('full_name', data.user.full_name);
         localStorage.setItem('role', normalizedRole);
         localStorage.setItem('user_role', normalizedRole);
@@ -120,6 +129,7 @@ export default function DangNhap() {
           case 'director': navigate('/admin'); break;
           case 'hr_manager': navigate('/nhan-su'); break;
           case 'content_manager': navigate('/phong-ban-noi-dung'); break;
+          case 'customer_service': navigate('/ho-tro'); break;
           default: 
             setLoi(`Hệ thống không nhận diện được chức vụ: "${role}". Hãy kiểm tra lại Database.`);
         }

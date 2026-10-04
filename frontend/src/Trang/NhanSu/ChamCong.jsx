@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { ArrowLeft, CalendarCheck, Clock3, LogIn, LogOut } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { ArrowLeft, Camera, CalendarCheck, Clock3, LogIn, LogOut, RefreshCw, X } from 'lucide-react';
 import { Link } from 'react-router-dom';
 
 const API_URL = 'http://localhost:5000';
@@ -20,6 +20,13 @@ export default function ChamCong() {
   const [month, setMonth] = useState(thangHienTai);
   const [records, setRecords] = useState([]);
   const [busy, setBusy] = useState(false);
+  const [cameraAction, setCameraAction] = useState(null);
+  const [capturedImage, setCapturedImage] = useState(null);
+  const [cameraError, setCameraError] = useState('');
+  const [attendanceError, setAttendanceError] = useState('');
+  const [attendanceMessage, setAttendanceMessage] = useState('');
+  const videoRef = useRef(null);
+  const cameraStreamRef = useRef(null);
 
   const loadRecords = async () => {
     if (!userId) return;
@@ -45,19 +52,138 @@ export default function ChamCong() {
   const currentShift = todayRecords.find((record) => record.check_in && !record.check_out);
   const todayRecord = currentShift || todayRecords[0];
 
-  const markAttendance = async (action) => {
+  useEffect(() => {
+    if (!cameraAction || capturedImage) return undefined;
+    let active = true;
+
+    const startCamera = async () => {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        setCameraError('Trình duyệt này không hỗ trợ camera. Hãy mở trang bằng HTTPS hoặc localhost.');
+        return;
+      }
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: false,
+          video: { facingMode: 'user' },
+        });
+        if (!active) {
+          stream.getTracks().forEach((track) => track.stop());
+          return;
+        }
+        cameraStreamRef.current = stream;
+        if (videoRef.current) videoRef.current.srcObject = stream;
+        setCameraError('');
+      } catch (error) {
+        if (!active) return;
+        console.error('Không thể mở camera chấm công:', error);
+        setCameraError('Không thể truy cập camera. Vui lòng cấp quyền camera rồi thử lại.');
+      }
+    };
+
+    startCamera();
+    return () => {
+      active = false;
+      cameraStreamRef.current?.getTracks().forEach((track) => track.stop());
+      cameraStreamRef.current = null;
+    };
+  }, [cameraAction, capturedImage]);
+
+  const openCamera = (action) => {
+    setCapturedImage(null);
+    setCameraError('');
+    setAttendanceError('');
+    setAttendanceMessage('');
+    setCameraAction(action);
+  };
+
+  const closeCamera = () => {
+    if (capturedImage?.previewUrl) URL.revokeObjectURL(capturedImage.previewUrl);
+    setCameraAction(null);
+    setCapturedImage(null);
+    setCameraError('');
+    setAttendanceError('');
+    setAttendanceMessage('');
+  };
+
+  const capturePhoto = () => {
+    const video = videoRef.current;
+    if (!video?.videoWidth || !video.videoHeight) {
+      setCameraError('Camera chưa sẵn sàng. Vui lòng đợi rồi chụp lại.');
+      return;
+    }
+    const scale = Math.min(1, 1280 / video.videoWidth);
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(video.videoWidth * scale);
+    canvas.height = Math.round(video.videoHeight * scale);
+    const context = canvas.getContext('2d');
+    if (!context) {
+      setCameraError('Không thể xử lý ảnh chụp trên thiết bị này.');
+      return;
+    }
+    context.drawImage(video, 0, 0, canvas.width, canvas.height);
+    canvas.toBlob((blob) => {
+      if (!blob) {
+        setCameraError('Không thể tạo ảnh chụp. Vui lòng thử lại.');
+        return;
+      }
+      setCapturedImage({
+        file: new File([blob], `attendance-${Date.now()}.jpg`, { type: 'image/jpeg' }),
+        previewUrl: URL.createObjectURL(blob),
+      });
+      setCameraError('');
+    }, 'image/jpeg', 0.85);
+  };
+
+  const retakePhoto = () => {
+    if (capturedImage?.previewUrl) URL.revokeObjectURL(capturedImage.previewUrl);
+    setCapturedImage(null);
+    setAttendanceError('');
+    setAttendanceMessage('');
+  };
+
+  const markAttendance = async () => {
+    if (!cameraAction || !capturedImage || !userId) return;
     setBusy(true);
+    setAttendanceError('');
+    setAttendanceMessage('');
     try {
-      const response = await fetch(`${API_URL}/api/attendance/${action}`, {
+      const position = await new Promise((resolve, reject) => {
+        if (!navigator.geolocation) {
+          reject(new Error('Trình duyệt này không hỗ trợ xác định vị trí GPS.'));
+          return;
+        }
+        navigator.geolocation.getCurrentPosition(
+          resolve,
+          (error) => {
+            const messages = {
+              1: 'Bạn cần cấp quyền vị trí để chấm công.',
+              2: 'Không thể xác định vị trí hiện tại. Vui lòng bật GPS và thử lại.',
+              3: 'Lấy vị trí GPS quá thời gian chờ. Vui lòng thử lại.',
+            };
+            reject(new Error(messages[error.code] || 'Không thể lấy vị trí GPS.'));
+          },
+          { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 },
+        );
+      });
+      const formData = new FormData();
+      formData.append('user_id', userId);
+      formData.append('photo', capturedImage.file);
+      formData.append('lat', String(position.coords.latitude));
+      formData.append('lng', String(position.coords.longitude));
+
+      const response = await fetch(`${API_URL}/api/attendance/${cameraAction}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ user_id: userId }),
+        body: formData,
       });
       const data = await response.json();
       if (!response.ok || !data.success) throw new Error(data.message || 'Không thể ghi nhận chấm công.');
       await loadRecords();
+      setAttendanceMessage(data.message || 'Đã ghi nhận chấm công.');
+      if (capturedImage.previewUrl) URL.revokeObjectURL(capturedImage.previewUrl);
+      setCapturedImage(null);
+      setCameraAction(null);
     } catch (error) {
-      alert(error.message || 'Lỗi kết nối máy chủ.');
+      setAttendanceError(error.message || 'Lỗi kết nối máy chủ.');
     } finally {
       setBusy(false);
     }
@@ -96,19 +222,20 @@ export default function ChamCong() {
             <div className="mt-5 flex gap-3">
               <button
                 disabled={busy || Boolean(currentShift)}
-                onClick={() => markAttendance('check-in')}
+                onClick={() => openCamera('check-in')}
                 className="flex flex-1 items-center justify-center gap-2 bg-emerald-600 px-4 py-3 font-bold text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-500"
               >
-                <LogIn size={17} /> Vào ca
+                <Camera size={17} /> Vào ca
               </button>
               <button
                 disabled={busy || !currentShift}
-                onClick={() => markAttendance('check-out')}
+                onClick={() => openCamera('check-out')}
                 className="flex flex-1 items-center justify-center gap-2 border border-slate-300 px-4 py-3 font-bold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:text-slate-300"
               >
-                <LogOut size={17} /> Tan ca
+                <Camera size={17} /> Tan ca
               </button>
             </div>
+            {attendanceMessage && <p role="status" className="mt-4 text-sm font-bold text-emerald-700">{attendanceMessage}</p>}
           </div>
 
           <div className="bg-white p-6 shadow-sm">
@@ -141,6 +268,57 @@ export default function ChamCong() {
           </div>
         </section>
       </div>
+
+      {cameraAction && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-4">
+          <section role="dialog" aria-modal="true" aria-labelledby="attendance-camera-title" className="w-full max-w-lg overflow-hidden rounded-2xl bg-white shadow-2xl">
+            <header className="flex items-center justify-between border-b border-slate-100 p-5">
+              <div>
+                <p className="text-xs font-black uppercase tracking-wide text-emerald-700">Xác thực chấm công</p>
+                <h2 id="attendance-camera-title" className="mt-1 text-xl font-black text-slate-800">
+                  Chụp ảnh {cameraAction === 'check-in' ? 'vào ca' : 'tan ca'}
+                </h2>
+              </div>
+              <button type="button" aria-label="Đóng camera" onClick={closeCamera} disabled={busy} className="rounded-full bg-slate-100 p-2 text-slate-500 hover:bg-slate-200 disabled:opacity-50">
+                <X size={20} />
+              </button>
+            </header>
+            <div className="space-y-4 p-5">
+              <div className="overflow-hidden rounded-xl bg-slate-950">
+                {capturedImage ? (
+                  <img src={capturedImage.previewUrl} alt="Ảnh selfie chấm công" className="max-h-[55vh] w-full object-contain" />
+                ) : (
+                  <video ref={videoRef} autoPlay playsInline muted className="max-h-[55vh] min-h-64 w-full object-cover" />
+                )}
+              </div>
+              <p className="text-sm text-slate-600">Ảnh selfie và vị trí GPS sẽ được gửi cùng thời gian chấm công.</p>
+              {cameraError && <p role="alert" className="rounded-lg bg-rose-50 p-3 text-sm font-semibold text-rose-700">{cameraError}</p>}
+              {attendanceError && <p role="alert" className="rounded-lg bg-rose-50 p-3 text-sm font-semibold text-rose-700">{attendanceError}</p>}
+              {busy && <p role="status" className="text-sm font-semibold text-blue-700">Đang lấy vị trí GPS và lưu chấm công...</p>}
+              <div className="flex flex-wrap justify-end gap-3">
+                <button type="button" onClick={closeCamera} disabled={busy} className="border border-slate-200 px-4 py-2.5 font-bold text-slate-600 hover:bg-slate-50 disabled:opacity-50">
+                  Hủy
+                </button>
+                {capturedImage ? (
+                  <>
+                    <button type="button" onClick={retakePhoto} disabled={busy} className="inline-flex items-center gap-2 border border-slate-200 px-4 py-2.5 font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-50">
+                      <RefreshCw size={17} /> Chụp lại
+                    </button>
+                    <button type="button" onClick={markAttendance} disabled={busy} className="inline-flex items-center gap-2 bg-emerald-600 px-4 py-2.5 font-bold text-white hover:bg-emerald-700 disabled:cursor-wait disabled:opacity-60">
+                      {cameraAction === 'check-in' ? <LogIn size={17} /> : <LogOut size={17} />}
+                      {busy ? 'Đang lưu...' : 'Xác nhận chấm công'}
+                    </button>
+                  </>
+                ) : (
+                  <button type="button" onClick={capturePhoto} disabled={busy || Boolean(cameraError)} className="inline-flex items-center gap-2 bg-emerald-600 px-4 py-2.5 font-bold text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50">
+                    <Camera size={17} /> Chụp selfie
+                  </button>
+                )}
+              </div>
+            </div>
+          </section>
+        </div>
+      )}
     </main>
   );
 }

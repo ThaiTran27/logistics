@@ -19,7 +19,11 @@ import {
   PlusCircle,
   Pencil,
   Trash2,
+  MapPin,
 } from 'lucide-react';
+import * as XLSX from 'xlsx';
+
+const API_URL = 'http://localhost:5000';
 
 const defaultForm = {
   full_name: '',
@@ -46,8 +50,37 @@ export default function HoSoNhanVien() {
   const [chamCongList, setChamCongList] = useState([]);
   const [bangLuong, setBangLuong] = useState([]);
   const [luongChinhSua, setLuongChinhSua] = useState({});
+  const [anhChamCongDangXem, setAnhChamCongDangXem] = useState(null);
 
   const hrName = localStorage.getItem('full_name') || 'Phòng Nhân Sự';
+
+  const renderAttendanceEvidence = (photo, lat, lng, label) => {
+    const hasCoordinates = lat !== null && lat !== undefined && lng !== null && lng !== undefined
+      && Number.isFinite(Number(lat)) && Number.isFinite(Number(lng));
+    const photoUrl = photo
+      ? (/^https?:\/\//i.test(photo) ? photo : `${API_URL}${photo.startsWith('/') ? '' : '/'}${photo}`)
+      : null;
+
+    return (
+      <div className="flex min-w-32 flex-col items-start gap-2">
+        {photoUrl ? (
+          <button type="button" onClick={() => setAnhChamCongDangXem({ url: photoUrl, label })} className="group relative overflow-hidden rounded-lg border border-slate-200" aria-label={`Xem ảnh ${label}`}>
+            <img src={photoUrl} alt={`Ảnh xác thực ${label}`} className="h-16 w-20 object-cover transition-transform group-hover:scale-105" />
+          </button>
+        ) : <span className="text-xs text-slate-400">Chưa có ảnh</span>}
+        {hasCoordinates ? (
+          <a
+            href={`https://maps.google.com/?q=${encodeURIComponent(`${Number(lat)},${Number(lng)}`)}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1 text-xs font-bold text-blue-700 hover:underline"
+          >
+            <MapPin size={14} /> Bản đồ
+          </a>
+        ) : <span className="text-xs text-slate-400">Chưa có GPS</span>}
+      </div>
+    );
+  };
 
   const taiDuLieuNhanVien = async () => {
     try {
@@ -124,6 +157,7 @@ export default function HoSoNhanVien() {
         body: JSON.stringify({
           monthly_salary: draft.monthly_salary ?? person.monthly_salary,
           allowance: draft.allowance ?? person.allowance,
+          bonus_per_delivery: draft.bonus_per_delivery ?? person.bonus_per_delivery ?? 0,
         }),
       });
       const data = await response.json();
@@ -132,11 +166,59 @@ export default function HoSoNhanVien() {
         ...item,
         monthly_salary: draft.monthly_salary ?? item.monthly_salary,
         allowance: draft.allowance ?? item.allowance,
+        bonus_per_delivery: draft.bonus_per_delivery ?? item.bonus_per_delivery,
       } : item));
       setLuongChinhSua((current) => { const next = { ...current }; delete next[person.id]; return next; });
     } catch (error) {
       alert(error.message || 'Lỗi kết nối máy chủ.');
     }
+  };
+
+  const ghiDieuChinhLuong = async (person, adjustmentType) => {
+    const amountInput = window.prompt(`Nhập số tiền ${adjustmentType === 'bonus' ? 'thưởng' : 'khấu trừ'} cho ${person.full_name}:`);
+    if (amountInput === null) return;
+    const amount = Number(amountInput);
+    if (!Number.isFinite(amount) || amount <= 0) return alert('Số tiền phải lớn hơn 0.');
+    const reason = window.prompt('Nhập lý do điều chỉnh:');
+    if (!reason?.trim()) return alert('Cần nhập lý do điều chỉnh.');
+    try {
+      const response = await fetch(`http://localhost:5000/api/hr/payroll/${person.id}/adjustments`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ month: thangXem, adjustment_type: adjustmentType, amount, reason: reason.trim() })
+      });
+      const data = await response.json();
+      if (!response.ok || !data.success) throw new Error(data.message || 'Không lưu được điều chỉnh.');
+      const refresh = await fetch(`http://localhost:5000/api/hr/payroll?month=${thangXem}`);
+      const payroll = await refresh.json();
+      if (!refresh.ok || !payroll.success) throw new Error(payroll.message || 'Không tải lại bảng lương.');
+      setBangLuong(payroll.data || []);
+    } catch (error) {
+      alert(error.message || 'Lỗi kết nối máy chủ.');
+    }
+  };
+
+  const xuatBangLuong = () => {
+    const rows = bangLuong.map((person) => ({
+      'Nhân viên': person.full_name,
+      Email: person.email,
+      'Chức vụ': dichTenChucVu(person.role),
+      'Ngày công': Number(person.attendance_days || 0),
+      'Đơn giao thành công': Number(person.completed_deliveries || 0),
+      'Lương tháng': Number(person.monthly_salary || 0),
+      'Phụ cấp': Number(person.allowance || 0),
+      'Thưởng giao hàng': Number(person.completed_deliveries || 0) * Number(person.bonus_per_delivery || 0),
+      'Thưởng bổ sung': Number(person.manual_bonus || 0),
+      'Khấu trừ': Number(person.deductions || 0),
+      'Lương dự kiến': Number(person.monthly_salary || 0)
+        + Number(person.allowance || 0)
+        + Number(person.completed_deliveries || 0) * Number(person.bonus_per_delivery || 0)
+        + Number(person.manual_bonus || 0)
+        - Number(person.deductions || 0)
+    }));
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(rows), 'Bang luong');
+    XLSX.writeFile(workbook, `bang-luong-${thangXem}.xlsx`);
   };
 
   const capNhatTrangThaiWebsite = async (loai, id, status) => {
@@ -169,7 +251,7 @@ export default function HoSoNhanVien() {
       if (data.success) {
         taiDuLieuNhanVien();
       }
-    } catch (error) {
+    } catch {
       alert('Lỗi kết nối máy chủ!');
     }
   };
@@ -208,7 +290,7 @@ export default function HoSoNhanVien() {
       } else {
         alert(data.message || 'Có lỗi khi lưu nhân viên.');
       }
-    } catch (error) {
+    } catch {
       alert('Lỗi kết nối máy chủ!');
     } finally {
       setSubmitting(false);
@@ -243,7 +325,7 @@ export default function HoSoNhanVien() {
       } else {
         alert(data.message || 'Xóa nhân viên thất bại.');
       }
-    } catch (error) {
+    } catch {
       alert('Lỗi kết nối máy chủ!');
     }
   };
@@ -257,7 +339,7 @@ export default function HoSoNhanVien() {
         body: JSON.stringify({ status: 'rejected' }),
       });
       if ((await res.json()).success) taiDuLieuNghiPhep();
-    } catch (error) {
+    } catch {
       alert('Lỗi kết nối máy chủ!');
     }
   };
@@ -284,7 +366,7 @@ export default function HoSoNhanVien() {
         setNgayKetThuc('');
         taiDuLieuNghiPhep();
       }
-    } catch (error) {
+    } catch {
       alert('Lỗi kết nối máy chủ!');
     }
   };
@@ -699,8 +781,8 @@ export default function HoSoNhanVien() {
               <input type="month" value={thangXem} onChange={(event) => setThangXem(event.target.value)} className="border border-slate-200 bg-white p-2 font-bold text-slate-700" />
             </div>
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[700px] text-left">
-                <thead className="bg-[#FFF5F6] text-xs uppercase text-rose-500"><tr><th className="p-4">Nhân viên</th><th className="p-4">Chức vụ</th><th className="p-4">Ngày</th><th className="p-4">Vào ca</th><th className="p-4">Tan ca</th></tr></thead>
+              <table className="w-full min-w-[1000px] text-left">
+                <thead className="bg-[#FFF5F6] text-xs uppercase text-rose-500"><tr><th className="p-4">Nhân viên</th><th className="p-4">Chức vụ</th><th className="p-4">Ngày</th><th className="p-4">Vào ca</th><th className="p-4">Tan ca</th><th className="p-4">Xác thực</th></tr></thead>
                 <tbody className="divide-y divide-rose-50">
                   {chamCongList.length ? chamCongList.map((record) => (
                     <tr key={record.id}>
@@ -709,8 +791,14 @@ export default function HoSoNhanVien() {
                       <td className="p-4">{new Date(`${String(record.work_date).slice(0, 10)}T00:00:00`).toLocaleDateString('vi-VN')}</td>
                       <td className="p-4">{record.check_in ? new Date(record.check_in).toLocaleTimeString('vi-VN') : 'Chưa chấm công'}</td>
                       <td className="p-4">{record.check_out ? new Date(record.check_out).toLocaleTimeString('vi-VN') : 'Chưa chấm công'}</td>
+                      <td className="p-4">
+                        <div className="flex flex-wrap gap-4">
+                          <div><p className="mb-1 text-[10px] font-black uppercase text-slate-400">Vào ca</p>{renderAttendanceEvidence(record.check_in_photo, record.check_in_lat, record.check_in_lng, `vào ca - ${record.full_name}`)}</div>
+                          <div><p className="mb-1 text-[10px] font-black uppercase text-slate-400">Tan ca</p>{renderAttendanceEvidence(record.check_out_photo, record.check_out_lat, record.check_out_lng, `tan ca - ${record.full_name}`)}</div>
+                        </div>
+                      </td>
                     </tr>
-                  )) : <tr><td colSpan="5" className="p-12 text-center text-slate-400">Chưa có lượt chấm công trong tháng này.</td></tr>}
+                  )) : <tr><td colSpan="6" className="p-12 text-center text-slate-400">Chưa có lượt chấm công trong tháng này.</td></tr>}
                 </tbody>
               </table>
             </div>
@@ -720,29 +808,38 @@ export default function HoSoNhanVien() {
         {tabHienTai === 'bang-luong' && (
           <section className="overflow-hidden border border-rose-100 bg-white shadow-sm">
             <div className="flex flex-wrap items-center justify-between gap-4 border-b border-rose-100 p-5">
-              <div><h2 className="font-black text-slate-800">Bảng lương tháng</h2><p className="mt-1 text-sm text-slate-500">Tổng dự kiến = lương tháng + phụ cấp.</p></div>
-              <input type="month" value={thangXem} onChange={(event) => setThangXem(event.target.value)} className="border border-slate-200 bg-white p-2 font-bold text-slate-700" />
+              <div><h2 className="font-black text-slate-800">Bảng lương tháng</h2><p className="mt-1 text-sm text-slate-500">Lương + phụ cấp + thưởng theo đơn + thưởng bổ sung − khấu trừ.</p></div>
+              <div className="flex flex-wrap items-center gap-3"><input type="month" value={thangXem} onChange={(event) => setThangXem(event.target.value)} className="border border-slate-200 bg-white p-2 font-bold text-slate-700" /><button type="button" onClick={xuatBangLuong} className="rounded-lg bg-emerald-600 px-4 py-2 font-bold text-white">Xuất Excel</button></div>
             </div>
             <div className="overflow-x-auto">
               <table className="w-full min-w-[900px] text-left">
-                <thead className="bg-[#FFF5F6] text-xs uppercase text-rose-500"><tr><th className="p-4">Nhân viên</th><th className="p-4">Chức vụ</th><th className="p-4">Ngày công</th><th className="p-4">Lương tháng</th><th className="p-4">Phụ cấp</th><th className="p-4">Tổng dự kiến</th><th className="p-4">Lưu</th></tr></thead>
+                <thead className="bg-[#FFF5F6] text-xs uppercase text-rose-500"><tr><th className="p-4">Nhân viên</th><th className="p-4">Chức vụ</th><th className="p-4">Ngày công</th><th className="p-4">Đơn thành công</th><th className="p-4">Lương tháng</th><th className="p-4">Phụ cấp</th><th className="p-4">Thưởng / đơn</th><th className="p-4">Thưởng thêm</th><th className="p-4">Khấu trừ</th><th className="p-4">Tổng dự kiến</th><th className="p-4">Lưu</th></tr></thead>
                 <tbody className="divide-y divide-rose-50">
                   {bangLuong.length ? bangLuong.map((person) => {
                     const draft = luongChinhSua[person.id] || {};
-                    const salary = Number(draft.monthly_salary ?? person.monthly_salary);
-                    const allowance = Number(draft.allowance ?? person.allowance);
+                    const salary = Number(draft.monthly_salary ?? person.monthly_salary ?? 0);
+                    const allowance = Number(draft.allowance ?? person.allowance ?? 0);
+                    const bonusPerDelivery = Number(draft.bonus_per_delivery ?? person.bonus_per_delivery ?? 0);
+                    const estimatedSalary = salary + allowance
+                      + bonusPerDelivery * Number(person.completed_deliveries || 0)
+                      + Number(person.manual_bonus || 0)
+                      - Number(person.deductions || 0);
                     return (
                       <tr key={person.id}>
                         <td className="p-4"><p className="font-bold">{person.full_name}</p><p className="text-xs text-slate-500">{person.email}</p></td>
                         <td className="p-4">{dichTenChucVu(person.role)}</td>
                         <td className="p-4">{person.attendance_days}</td>
+                        <td className="p-4">{person.completed_deliveries}</td>
                         <td className="p-4"><input type="number" min="0" step="1000" aria-label={`Lương tháng ${person.full_name}`} value={draft.monthly_salary ?? person.monthly_salary} onChange={(event) => capNhatLuongNhap(person.id, 'monthly_salary', event.target.value)} className="w-36 border border-slate-200 p-2" /></td>
                         <td className="p-4"><input type="number" min="0" step="1000" aria-label={`Phụ cấp ${person.full_name}`} value={draft.allowance ?? person.allowance} onChange={(event) => capNhatLuongNhap(person.id, 'allowance', event.target.value)} className="w-32 border border-slate-200 p-2" /></td>
-                        <td className="p-4 font-black text-emerald-700">{(salary + allowance).toLocaleString('vi-VN')} đ</td>
+                        <td className="p-4"><input type="number" min="0" step="1000" aria-label={`Thưởng trên đơn ${person.full_name}`} value={draft.bonus_per_delivery ?? person.bonus_per_delivery ?? 0} onChange={(event) => capNhatLuongNhap(person.id, 'bonus_per_delivery', event.target.value)} className="w-32 border border-slate-200 p-2" /></td>
+                        <td className="p-4">{Number(person.manual_bonus || 0).toLocaleString('vi-VN')} đ<button type="button" onClick={() => ghiDieuChinhLuong(person, 'bonus')} className="ml-2 rounded bg-emerald-50 px-2 py-1 text-xs font-bold text-emerald-800">+</button></td>
+                        <td className="p-4">{Number(person.deductions || 0).toLocaleString('vi-VN')} đ<button type="button" onClick={() => ghiDieuChinhLuong(person, 'deduction')} className="ml-2 rounded bg-red-50 px-2 py-1 text-xs font-bold text-red-700">−</button></td>
+                        <td className="p-4 font-black text-emerald-700">{estimatedSalary.toLocaleString('vi-VN')} đ</td>
                         <td className="p-4"><button onClick={() => luuLuong(person)} title="Lưu mức lương" className="bg-emerald-50 p-2.5 text-emerald-700 hover:bg-emerald-100"><Save size={17} /></button></td>
                       </tr>
                     );
-                  }) : <tr><td colSpan="7" className="p-12 text-center text-slate-400">Chưa có nhân sự để hiển thị.</td></tr>}
+                  }) : <tr><td colSpan="11" className="p-12 text-center text-slate-400">Chưa có nhân sự để hiển thị.</td></tr>}
                 </tbody>
               </table>
             </div>
@@ -853,6 +950,18 @@ export default function HoSoNhanVien() {
               </button>
             </form>
           </div>
+        </div>
+      )}
+
+      {anhChamCongDangXem && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-950/80 p-4" onClick={() => setAnhChamCongDangXem(null)}>
+          <section role="dialog" aria-modal="true" aria-label={`Ảnh xác thực ${anhChamCongDangXem.label}`} className="relative max-h-[90vh] max-w-4xl rounded-xl bg-white p-3 shadow-2xl" onClick={(event) => event.stopPropagation()}>
+            <button type="button" aria-label="Đóng ảnh" onClick={() => setAnhChamCongDangXem(null)} className="absolute -right-3 -top-3 rounded-full bg-white p-2 text-slate-700 shadow-lg hover:bg-slate-100">
+              <X size={20} />
+            </button>
+            <p className="px-2 pb-2 text-sm font-bold text-slate-700">{anhChamCongDangXem.label}</p>
+            <img src={anhChamCongDangXem.url} alt={`Ảnh xác thực ${anhChamCongDangXem.label}`} className="max-h-[78vh] max-w-full object-contain" />
+          </section>
         </div>
       )}
     </div>

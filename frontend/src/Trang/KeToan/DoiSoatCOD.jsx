@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Calculator, Wallet, CheckCircle, Building2, Receipt, LogOut, Banknote, Search, ArrowRightLeft, History, Download } from 'lucide-react';
+import { Calculator, Wallet, Building2, Receipt, LogOut, Banknote, Search, ArrowRightLeft, History, Printer, X } from 'lucide-react';
 import * as XLSX from 'xlsx';
 
 export default function DoiSoatCOD() {
@@ -7,12 +7,15 @@ export default function DoiSoatCOD() {
   const [lichSuList, setLichSuList] = useState([]);
   const [tuKhoa, setTuKhoa] = useState('');
   const [tabHienTai, setTabHienTai] = useState('cho-duyet'); 
+  const [hoaDon, setHoaDon] = useState(null);
+  const [driverRemittances, setDriverRemittances] = useState([]);
+  const [settlementMonth, setSettlementMonth] = useState(() => new Date().toISOString().slice(0, 7));
   
   const accountantName = localStorage.getItem('full_name') || 'Phòng Kế Toán';
 
   const taiDuLieuCongNo = async () => {
     try {
-      const res = await fetch('http://localhost:5000/api/accountant/debt');
+      const res = await fetch(`http://localhost:5000/api/accountant/debt?month=${settlementMonth}`);
       const data = await res.json();
       if (data.success) setCongNoList(data.data || []);
     } catch (error) {
@@ -30,17 +33,39 @@ export default function DoiSoatCOD() {
     }
   };
 
+  const taiNopTienTaiXe = async () => {
+    try {
+      const response = await fetch('http://localhost:5000/api/accountant/driver-remittances?status=pending');
+      const data = await response.json();
+      if (!response.ok || !data.success) throw new Error(data.message || 'Không tải được phiếu nộp tiền.');
+      setDriverRemittances(data.data || []);
+    } catch (error) {
+      console.error('Lỗi tải phiếu nộp COD của tài xế:', error);
+    }
+  };
+
   useEffect(() => {
     taiDuLieuCongNo();
     taiLichSuDoiSoat();
   }, []);
+
+  useEffect(() => {
+    taiDuLieuCongNo();
+  }, [settlementMonth]);
+
+  const taiHoaDon = async (settlementId) => {
+    const response = await fetch(`http://localhost:5000/api/accountant/settlements/${settlementId}`);
+    const data = await response.json();
+    if (!response.ok || !data.success) throw new Error(data.message || 'Không tải được hóa đơn đối soát.');
+    setHoaDon(data.data);
+  };
 
   const xacNhanThanhToan = async (shopId, shopName, amount) => {
     const xacNhan = window.confirm(`Xác nhận bạn đã chuyển khoản ${Number(amount).toLocaleString()} đ cho shop [${shopName}]?`);
     if (!xacNhan) return;
 
     try {
-      const res = await fetch(`http://localhost:5000/api/accountant/pay/${shopId}`, {
+      const res = await fetch(`http://localhost:5000/api/accountant/pay/${shopId}?month=${settlementMonth}`, {
         method: 'PUT'
       });
       const data = await res.json();
@@ -49,10 +74,46 @@ export default function DoiSoatCOD() {
         alert(`✅ Đã đối soát thành công cho shop ${shopName}!`);
         taiDuLieuCongNo(); 
         taiLichSuDoiSoat();
+        await taiHoaDon(data.settlement_id);
       }
     } catch (error) {
-      alert("Lỗi kết nối đến hệ thống!");
+      alert(error.message || 'Lỗi kết nối đến hệ thống!');
     }
+  };
+
+  const xacNhanNopTienTaiXe = async (remittance) => {
+    if (!window.confirm(`Xác nhận đã nhận ${Number(remittance.amount).toLocaleString()} đ tiền mặt từ Shipper ${remittance.driver_name}?`)) return;
+    try {
+      const response = await fetch(`http://localhost:5000/api/accountant/driver-remittances/${remittance.id}/receive`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accountant_id: Number(localStorage.getItem('user_id')) })
+      });
+      const data = await response.json();
+      if (!response.ok || !data.success) throw new Error(data.message || 'Không xác nhận được phiếu nộp.');
+      await taiNopTienTaiXe();
+      alert(data.message);
+    } catch (error) {
+      alert(error.message || 'Lỗi kết nối máy chủ.');
+    }
+  };
+
+  const xuatExcel = () => {
+    const rows = anToanLichSu.map((item) => ({
+      'Mã đối soát': item.settlement_id,
+      'Cửa hàng': item.shop_name,
+      Email: item.email,
+      'Số đơn': item.total_orders,
+      'Tổng COD': Number(item.total_cod),
+      'Cước shop trả': Number(item.total_shipping_fee),
+      'Phí dịch vụ': Number(item.total_service_fee || 0),
+      'Phí bảo hiểm': Number(item.total_insurance_fee || 0),
+      'Shop nhận': Number(item.total_paid),
+      'Thời gian': new Date(item.settled_at).toLocaleString('vi-VN')
+    }));
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(rows), 'Doi soat COD');
+    XLSX.writeFile(workbook, `doi-soat-cod-${settlementMonth}.xlsx`);
   };
 
   const dangXuat = () => {
@@ -74,39 +135,10 @@ export default function DoiSoatCOD() {
            thuDienTu.toLowerCase().includes(kw.toLowerCase());
   });
 
-  const tongTienCanTra = anToanCongNo.reduce((sum, item) => sum + Number(item?.total_cod || 0), 0);
+  const tongTienCanTra = anToanCongNo.reduce((sum, item) => sum + Number(item?.total_payable || 0), 0);
   const tongTienDaTra = anToanLichSu.reduce((sum, item) => sum + Number(item?.total_paid || 0), 0);
 
-  // HÀM XUẤT FILE EXCEL
-  const xuatFileExcel = () => {
-    if (danhSachDaLoc.length === 0) {
-      alert('Không có dữ liệu để xuất Excel!');
-      return;
-    }
-
-    const duLieuExcel = danhSachDaLoc.map((item, index) => ({
-      'STT': index + 1,
-      'Tên Đối Tác': item?.shop_name || 'N/A',
-      'Email': item?.email || 'N/A',
-      'Số Lượng Đơn': item?.total_orders || 0,
-      'Tổng Tiền COD (VNĐ)': Number(item?.total_cod || item?.total_paid || 0),
-      'Trạng Thái': tabHienTai === 'cho-duyet' ? 'Chưa thanh toán' : 'Đã giải ngân'
-    }));
-
-    const worksheet = XLSX.utils.json_to_sheet(duLieuExcel);
-    
-    // Tự động căn chỉnh độ rộng cột
-    const wscols = [
-      {wch: 5}, {wch: 25}, {wch: 25}, {wch: 15}, {wch: 20}, {wch: 15}
-    ];
-    worksheet['!cols'] = wscols;
-
-    const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, "DanhSachDoiSoat");
-    
-    const tenFile = tabHienTai === 'cho-duyet' ? 'BaoCao_CongNo_COD.xlsx' : 'LichSu_DoiSoat_COD.xlsx';
-    XLSX.writeFile(workbook, tenFile);
-  };
+  const inHoaDonPDF = () => window.print();
 
   return (
     <div className="flex min-h-screen bg-[#F8FAFC] font-sans text-slate-700">
@@ -122,6 +154,70 @@ export default function DoiSoatCOD() {
               <h2 className="text-xl font-black text-slate-800 tracking-tight">Kế Toán</h2>
               <p className="text-xs font-bold text-teal-500 uppercase tracking-wider mt-0.5">Kiểm soát dòng tiền</p>
             </div>
+
+            {hoaDon && (
+              <>
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4 print:hidden">
+                  <section className="max-h-[90vh] w-full max-w-4xl overflow-y-auto rounded-2xl bg-white p-6 shadow-2xl">
+                    <header className="mb-5 flex items-center justify-between">
+                      <div><p className="text-xs font-black uppercase tracking-widest text-teal-600">Hóa đơn đối soát COD</p><h2 className="mt-1 text-2xl font-black text-slate-800">#{hoaDon.settlement_id} · {hoaDon.shop_name}</h2></div>
+                      <button type="button" aria-label="Đóng hóa đơn" onClick={() => setHoaDon(null)} className="rounded-full bg-slate-100 p-2 text-slate-600 hover:bg-slate-200"><X size={20} /></button>
+                    </header>
+                    <p className="mb-4 text-sm text-slate-500">{hoaDon.email} · {new Date(hoaDon.settled_at).toLocaleString('vi-VN')}</p>
+                    <div className="overflow-x-auto">
+                      <table className="w-full min-w-[650px] text-left text-sm">
+                        <thead className="border-b border-slate-200 bg-slate-50 text-xs uppercase text-slate-500"><tr><th className="p-3">Mã đơn</th><th className="p-3">Người nhận</th><th className="p-3">COD</th><th className="p-3">Cước</th><th className="p-3">Phí dịch vụ + bảo hiểm</th><th className="p-3">Shop nhận</th></tr></thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {hoaDon.orders.map((order) => {
+                            const shopReceives = Number(order.cod_amount || 0)
+                              - (order.fee_payer === 'sender' ? Number(order.shipping_fee || 0) : 0)
+                              - Number(order.service_fee || 0) - Number(order.insurance_fee || 0);
+                            return <tr key={order.id}><td className="p-3 font-bold">{order.tracking_code}</td><td className="p-3">{order.receiver_name}<br /><span className="text-xs text-slate-500">{order.receiver_phone}</span></td><td className="p-3">{Number(order.cod_amount || 0).toLocaleString()} đ</td><td className="p-3">{Number(order.shipping_fee || 0).toLocaleString()} đ · {order.fee_payer === 'sender' ? 'Shop' : 'Khách'}</td><td className="p-3">{(Number(order.service_fee || 0) + Number(order.insurance_fee || 0)).toLocaleString()} đ</td><td className="p-3 font-bold">{shopReceives.toLocaleString()} đ</td></tr>;
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                    <div className="ml-auto mt-6 max-w-sm space-y-2 border-t border-slate-200 pt-4 text-sm">
+                      <div className="flex justify-between"><span>Tổng COD</span><strong>{Number(hoaDon.total_cod).toLocaleString()} đ</strong></div>
+                      <div className="flex justify-between"><span>Cước trừ của Shop</span><strong>-{Number(hoaDon.total_shipping_fee).toLocaleString()} đ</strong></div>
+                      <div className="flex justify-between"><span>Phí dịch vụ</span><strong>-{Number(hoaDon.total_service_fee || 0).toLocaleString()} đ</strong></div>
+                      <div className="flex justify-between"><span>Phí bảo hiểm</span><strong>-{Number(hoaDon.total_insurance_fee || 0).toLocaleString()} đ</strong></div>
+                      <div className="flex justify-between border-t border-slate-200 pt-3 text-lg font-black text-teal-700"><span>Tiền trả Shop</span><span>{Number(hoaDon.total_paid).toLocaleString()} đ</span></div>
+                    </div>
+                    <div className="mt-6 flex flex-wrap gap-3">
+                      <button type="button" onClick={inHoaDonPDF} className="inline-flex items-center gap-2 rounded-xl bg-teal-600 px-5 py-3 font-bold text-white hover:bg-teal-700"><Printer size={18} /> In / Lưu PDF</button>
+                      <button type="button" onClick={async () => {
+                        try {
+                          const response = await fetch(`http://localhost:5000/api/accountant/settlements/${hoaDon.settlement_id}/email`, { method: 'POST' });
+                          const data = await response.json();
+                          if (!response.ok || !data.success) throw new Error(data.message || 'Không gửi được email.');
+                          alert(data.message);
+                        } catch (error) { alert(error.message || 'Lỗi kết nối máy chủ.'); }
+                      }} className="inline-flex items-center gap-2 rounded-xl border border-teal-200 bg-white px-5 py-3 font-bold text-teal-700">Gửi phiếu qua email Shop</button>
+                    </div>
+                  </section>
+                </div>
+                <article id="cod-settlement-invoice" className="hidden print:block bg-white p-10 text-slate-900">
+                  <header className="border-b-2 border-slate-900 pb-5">
+                    <h1 className="text-3xl font-black">SMART LOGISTICS</h1>
+                    <h2 className="mt-3 text-xl font-bold">HÓA ĐƠN ĐỐI SOÁT COD</h2>
+                    <p className="mt-2">Mã đối soát: {hoaDon.settlement_id} · Ngày: {new Date(hoaDon.settled_at).toLocaleString('vi-VN')}</p>
+                    <p>Đối tác: {hoaDon.shop_name} · {hoaDon.email}</p>
+                  </header>
+                  <table className="mt-6 w-full border-collapse text-left text-sm">
+                    <thead><tr>{['Mã đơn', 'Người nhận', 'COD', 'Cước', 'Người trả cước', 'Shop nhận'].map((heading) => <th key={heading} className="border border-slate-400 p-2">{heading}</th>)}</tr></thead>
+                    <tbody>{hoaDon.orders.map((order) => <tr key={order.id}><td className="border border-slate-400 p-2">{order.tracking_code}</td><td className="border border-slate-400 p-2">{order.receiver_name}<br />{order.receiver_phone}</td><td className="border border-slate-400 p-2">{Number(order.cod_amount || 0).toLocaleString()} đ</td><td className="border border-slate-400 p-2">{Number(order.shipping_fee || 0).toLocaleString()} đ</td><td className="border border-slate-400 p-2">{order.fee_payer === 'sender' ? 'Người gửi' : 'Người nhận'}</td><td className="border border-slate-400 p-2">{(Number(order.cod_amount || 0) - (order.fee_payer === 'sender' ? Number(order.shipping_fee || 0) : 0)).toLocaleString()} đ</td></tr>)}</tbody>
+                  </table>
+                  <div className="ml-auto mt-6 max-w-sm space-y-2 text-right">
+                    <p>Tổng COD: <strong>{Number(hoaDon.total_cod).toLocaleString()} đ</strong></p>
+                    <p>Cước trừ của Shop: <strong>-{Number(hoaDon.total_shipping_fee).toLocaleString()} đ</strong></p>
+                    <p>Phí dịch vụ: <strong>-{Number(hoaDon.total_service_fee || 0).toLocaleString()} đ</strong></p>
+                    <p>Bảo hiểm: <strong>-{Number(hoaDon.total_insurance_fee || 0).toLocaleString()} đ</strong></p>
+                    <p className="border-t border-slate-400 pt-3 text-xl font-black">Tiền trả Shop: {Number(hoaDon.total_paid).toLocaleString()} đ</p>
+                  </div>
+                </article>
+              </>
+            )}
           </div>
           
           <div className="p-5 mt-2 space-y-3">
@@ -136,6 +232,12 @@ export default function DoiSoatCOD() {
               className={`w-full px-5 py-4 rounded-2xl font-bold flex items-center gap-4 transition-all ${tabHienTai === 'lich-su' ? 'bg-teal-50 text-teal-600 border border-teal-100 shadow-sm' : 'text-slate-500 hover:bg-slate-50'}`}
             >
               <History size={20} /> Lịch Sử Giao Dịch
+            </button>
+            <button
+              onClick={() => { setTabHienTai('tai-xe'); taiNopTienTaiXe(); }}
+              className={`w-full px-5 py-4 rounded-2xl font-bold flex items-center gap-4 transition-all ${tabHienTai === 'tai-xe' ? 'bg-amber-50 text-amber-700 border border-amber-100 shadow-sm' : 'text-slate-500 hover:bg-slate-50'}`}
+            >
+              <Banknote size={20} /> Nộp Tiền Shipper
             </button>
           </div>
         </div>
@@ -157,12 +259,17 @@ export default function DoiSoatCOD() {
 
       {/* MAIN CONTENT */}
       <div className="flex-1 p-10 overflow-y-auto">
-        <div className="mb-8 flex justify-between items-end">
+        <div className="mb-8 flex flex-wrap items-end justify-between gap-4">
           <div>
-            <h1 className="text-3xl font-black text-slate-800 tracking-tight">Thanh Toán Thu Hộ (COD)</h1>
-            <p className="text-slate-500 mt-2 font-medium">Danh sách các đối tác (Shop) cần được thanh toán tiền hàng thu hộ.</p>
+            <h1 className="text-3xl font-black text-slate-800 tracking-tight">{tabHienTai === 'tai-xe' ? 'Xác nhận tiền COD từ Tài xế' : 'Thanh Toán Thu Hộ (COD)'}</h1>
+            <p className="text-slate-500 mt-2 font-medium">{tabHienTai === 'tai-xe' ? 'Đối chiếu số tiền mặt tài xế nộp và xác nhận đã nhận tại quầy.' : 'Tính khoản Shop nhận sau khi trừ cước Shop trả, phí dịch vụ và bảo hiểm.'}</p>
           </div>
           <div className="flex items-center gap-4">
+            {tabHienTai !== 'tai-xe' && (
+              <label className="text-xs font-bold text-slate-500">Tháng đối soát
+                <input type="month" value={settlementMonth} onChange={(event) => setSettlementMonth(event.target.value)} className="mt-1 block rounded-lg border border-slate-200 bg-white p-2 text-sm font-bold text-slate-700" />
+              </label>
+            )}
             <div className="relative w-80">
               <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
               <input 
@@ -173,15 +280,29 @@ export default function DoiSoatCOD() {
                 onChange={(e) => setTuKhoa(e.target.value)}
               />
             </div>
-            <button 
-              onClick={xuatFileExcel}
-              className="bg-blue-50 text-blue-600 hover:bg-blue-600 hover:text-white px-5 py-3 rounded-xl font-bold flex items-center gap-2 transition-colors border border-blue-100"
-            >
-              <Download size={20} /> Xuất Báo Cáo
-            </button>
+            {tabHienTai === 'lich-su' && danhSachDaLoc.length > 0 && (
+              <button type="button" onClick={xuatExcel} className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-bold text-emerald-800">Xuất Excel tháng</button>
+            )}
           </div>
         </div>
 
+        {tabHienTai === 'tai-xe' ? (
+          <section className="overflow-hidden rounded-2xl border border-amber-100 bg-white shadow-sm">
+            <header className="flex items-center justify-between border-b border-amber-100 bg-amber-50 p-5">
+              <div><h2 className="font-black text-slate-800">Phiếu chờ nhận tiền</h2><p className="mt-1 text-sm text-slate-500">Tài xế tạo phiếu từ ứng dụng; Kế toán xác nhận tiền mặt thực tế.</p></div>
+              <button type="button" onClick={taiNopTienTaiXe} className="rounded-lg border border-amber-200 bg-white px-3 py-2 text-sm font-bold text-amber-800">Làm mới</button>
+            </header>
+            <div className="divide-y divide-slate-100">
+              {driverRemittances.map((remittance) => <article key={remittance.id} className="flex flex-wrap items-center justify-between gap-4 p-5">
+                <div><p className="font-black text-slate-800">Shipper {remittance.driver_name}</p><p className="mt-1 text-xs text-slate-500">Phiếu #{remittance.id} · {new Date(remittance.created_at).toLocaleString('vi-VN')}</p></div>
+                <strong className="text-xl text-amber-700">{Number(remittance.amount).toLocaleString()} đ</strong>
+                <button type="button" onClick={() => xacNhanNopTienTaiXe(remittance)} className="rounded-xl bg-emerald-600 px-4 py-2.5 font-bold text-white">Đã nhận tiền mặt</button>
+              </article>)}
+              {!driverRemittances.length && <p className="p-10 text-center text-slate-500">Không có phiếu nộp tiền nào đang chờ.</p>}
+            </div>
+          </section>
+        ) : (
+          <>
         {/* THỐNG KÊ NHANH */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
           <div className="bg-white p-6 rounded-[24px] shadow-sm border border-slate-200 flex items-center gap-5">
@@ -216,14 +337,16 @@ export default function DoiSoatCOD() {
               <tr>
                 <th className="p-6 text-xs font-black text-slate-400 uppercase tracking-wider">Cửa Hàng (Shop)</th>
                 <th className="p-6 text-xs font-black text-slate-400 uppercase tracking-wider">Số Đơn</th>
-                <th className="p-6 text-xs font-black text-slate-400 uppercase tracking-wider">Tiền COD</th>
+                <th className="p-6 text-xs font-black text-slate-400 uppercase tracking-wider">Tổng COD</th>
+                <th className="p-6 text-xs font-black text-slate-400 uppercase tracking-wider">Cước shop trả</th>
+                <th className="p-6 text-xs font-black text-slate-400 uppercase tracking-wider">Tiền trả Shop</th>
                 <th className="p-6 text-xs font-black text-slate-400 uppercase tracking-wider text-right">Trạng Thái</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-50">
               {danhSachDaLoc.length === 0 ? (
                 <tr>
-                  <td colSpan="4" className="p-16 text-center text-slate-400 font-medium bg-white">
+                  <td colSpan="6" className="p-16 text-center text-slate-400 font-medium bg-white">
                     {tabHienTai === 'cho-duyet' ? 'Hiện không có khoản công nợ COD nào cần thanh toán.' : 'Chưa có dữ liệu lịch sử thanh toán.'}
                   </td>
                 </tr>
@@ -242,23 +365,25 @@ export default function DoiSoatCOD() {
                         {item?.total_orders || 0} đơn
                       </span>
                     </td>
+                    <td className="p-6 font-bold">{Number(item?.total_cod || 0).toLocaleString()} đ</td>
+                    <td className="p-6 font-bold text-amber-700">{Number(item?.total_shipping_fee || 0).toLocaleString()} đ</td>
                     <td className="p-6">
                       <span className={`font-black text-xl ${tabHienTai === 'cho-duyet' ? 'text-red-500' : 'text-slate-700'}`}>
-                        {Number(item?.total_cod || item?.total_paid || 0).toLocaleString()} đ
+                        {Number(item?.total_payable ?? item?.total_paid ?? 0).toLocaleString()} đ
                       </span>
                     </td>
                     <td className="p-6 text-right">
                       {tabHienTai === 'cho-duyet' ? (
                         <button 
-                          onClick={() => xacNhanThanhToan(item.shop_id, item.shop_name, item.total_cod)}
+                          onClick={() => xacNhanThanhToan(item.shop_id, item.shop_name, item.total_payable)}
                           className="bg-teal-50 hover:bg-teal-500 hover:text-white text-teal-600 px-5 py-2.5 rounded-xl font-bold text-sm transition-all flex items-center gap-2 inline-flex"
                         >
                           <Wallet size={18} /> Đã Chuyển Khoản
                         </button>
                       ) : (
-                        <span className="bg-emerald-50 text-emerald-600 px-4 py-2.5 rounded-xl font-bold text-sm inline-flex items-center gap-2 border border-emerald-100">
-                          <CheckCircle size={18} /> Hoàn Tất
-                        </span>
+                        <button onClick={() => taiHoaDon(item.settlement_id).catch((error) => alert(error.message))} className="bg-emerald-50 text-emerald-700 px-4 py-2.5 rounded-xl font-bold text-sm inline-flex items-center gap-2 border border-emerald-100 hover:bg-emerald-100">
+                          <Printer size={18} /> In hóa đơn PDF
+                        </button>
                       )}
                     </td>
                   </tr>
@@ -267,6 +392,8 @@ export default function DoiSoatCOD() {
             </tbody>
           </table>
         </div>
+          </>
+        )}
 
       </div>
     </div>

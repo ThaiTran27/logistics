@@ -19,6 +19,7 @@ import DoiSoatCOD from '../Trang/KeToan/DoiSoatCOD';
 import BanGiamDoc from '../Trang/Admin/BanGiamDoc';
 import HoSoNhanVien from '../Trang/NhanSu/HoSoNhanVien';
 import ChamCong from '../Trang/NhanSu/ChamCong';
+import TrungTamHoTro from '../Trang/HoTro/TrungTamHoTro';
 import { Link, useLocation } from 'react-router-dom';
 import { CalendarCheck } from 'lucide-react';
 
@@ -215,6 +216,9 @@ export default function DieuHuongChinh() {
 
       <Route path="/admin" element={
         <BaoVeTuyenDuong allowedRoles={['director']}><BanGiamDoc /></BaoVeTuyenDuong>
+      } />
+      <Route path="/ho-tro" element={
+        <BaoVeTuyenDuong allowedRoles={['admin', 'director', 'customer_service', 'cskh', 'fleet_manager', 'coordinator']}><TrungTamHoTro /></BaoVeTuyenDuong>
       } />
     </Routes>
     {showAttendanceShortcut && (

@@ -36,3 +36,32 @@
 	width: 100% !important;
 	border-radius: 0.75rem;
 }
+
+@page thermal-label-page {
+	size: 80mm 150mm;
+	margin: 0;
+}
+
+@media print {
+	.thermal-print-root {
+		position: absolute !important;
+		top: 0 !important;
+		right: auto !important;
+		bottom: auto !important;
+		left: 0 !important;
+		width: 80mm;
+		padding: 0 !important;
+		page: thermal-label-page;
+	}
+
+	.thermal-label {
+		box-sizing: border-box;
+		width: 80mm !important;
+		height: 150mm !important;
+		margin: 0 !important;
+		padding: 4mm !important;
+		break-after: page;
+		page-break-after: always;
+		overflow: hidden;
+	}
+}
