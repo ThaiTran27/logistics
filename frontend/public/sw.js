@@ -55,10 +55,11 @@ async function notifyClients(message) {
   clients.forEach((client) => client.postMessage(message));
 }
 
-async function syncDriverActions() {
+async function syncDriverActions(token) {
   const actions = await getOfflineActions();
   for (const action of actions) {
     try {
+      if (token) action.headers.Authorization = `Bearer ${token}`;
       const response = await fetch(action.url, {
         method: 'PUT',
         headers: action.headers,
@@ -68,6 +69,10 @@ async function syncDriverActions() {
       if (response.ok) {
         await deleteOfflineAction(action.id);
         await notifyClients({ type: 'DRIVER_ACTION_SYNCED', tracking_code: action.body.tracking_code, success: true });
+      } else if (response.status === 401 || response.status === 403) {
+        if (token) await saveOfflineAction(action);
+        await notifyClients({ type: 'DRIVER_ACTION_SYNCED', tracking_code: action.body.tracking_code, success: false, message: 'Hãy đăng nhập lại để đồng bộ thao tác offline.' });
+        return;
       } else if (response.status >= 400 && response.status < 500) {
         await deleteOfflineAction(action.id);
         await notifyClients({ type: 'DRIVER_ACTION_SYNCED', tracking_code: action.body.tracking_code, success: false, message: result.message || 'Máy chủ từ chối đồng bộ thao tác offline.' });
@@ -113,7 +118,12 @@ self.addEventListener('fetch', (event) => {
         await saveOfflineAction({
           id,
           url: request.url,
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            ...(request.headers.get('Authorization')
+              ? { Authorization: request.headers.get('Authorization') }
+              : {})
+          },
           body: { ...requestBody, tracking_code: requestBody.tracking_code || null },
           queued_at: new Date().toISOString()
         });
@@ -151,5 +161,5 @@ self.addEventListener('sync', (event) => {
 });
 
 self.addEventListener('message', (event) => {
-  if (event.data?.type === 'SYNC_DRIVER_ACTIONS') event.waitUntil(syncDriverActions());
+  if (event.data?.type === 'SYNC_DRIVER_ACTIONS') event.waitUntil(syncDriverActions(event.data.token));
 });

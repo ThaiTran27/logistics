@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { MapContainer, TileLayer, CircleMarker, Popup } from 'react-leaflet';
+import { apiFetch as fetch } from '../../utils/apiFetch.js';
 import { 
   BarChart3, TrendingUp, Package, Truck, Wallet, 
   FileText, CheckCircle, AlertCircle, LogOut, 

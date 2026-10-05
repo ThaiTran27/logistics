@@ -1,5 +1,6 @@
+import { apiFetch as fetch } from '../../utils/apiFetch.js';
 import { useState, useEffect } from 'react';
-import { Calculator, Wallet, Building2, Receipt, LogOut, Banknote, Search, ArrowRightLeft, History, Printer, X } from 'lucide-react';
+import { Calculator, Wallet, Building2, Receipt, LogOut, Banknote, Search, ArrowRightLeft, History, Printer, X, ShieldCheck } from 'lucide-react';
 import * as XLSX from 'xlsx';
 
 export default function DoiSoatCOD() {
@@ -9,6 +10,15 @@ export default function DoiSoatCOD() {
   const [tabHienTai, setTabHienTai] = useState('cho-duyet'); 
   const [hoaDon, setHoaDon] = useState(null);
   const [driverRemittances, setDriverRemittances] = useState([]);
+  const [driverWallets, setDriverWallets] = useState([]);
+  const [expenseClaims, setExpenseClaims] = useState([]);
+  const [expenseStatus, setExpenseStatus] = useState('pending');
+  const [expenseBusyId, setExpenseBusyId] = useState(null);
+  const [expenseError, setExpenseError] = useState('');
+  const [expenseMessage, setExpenseMessage] = useState('');
+  const [walletBusyDriverId, setWalletBusyDriverId] = useState(null);
+  const [walletMessage, setWalletMessage] = useState('');
+  const [walletError, setWalletError] = useState('');
   const [settlementMonth, setSettlementMonth] = useState(() => new Date().toISOString().slice(0, 7));
   
   const accountantName = localStorage.getItem('full_name') || 'Phòng Kế Toán';
@@ -41,6 +51,88 @@ export default function DoiSoatCOD() {
       setDriverRemittances(data.data || []);
     } catch (error) {
       console.error('Lỗi tải phiếu nộp COD của tài xế:', error);
+    }
+  };
+
+  const taiViKyQuyTaiXe = async () => {
+    setWalletError('');
+    try {
+      const response = await fetch('http://localhost:5000/api/accountant/driver-wallets');
+      const data = await response.json();
+      if (!response.ok || !data.success) throw new Error(data.message || 'Không tải được ví ký quỹ.');
+      setDriverWallets(data.data || []);
+    } catch (error) {
+      setWalletError(error.message || 'Không tải được ví ký quỹ.');
+    }
+  };
+
+  const taiYeuCauPhuPhi = async (status = expenseStatus) => {
+    setExpenseError('');
+    try {
+      const response = await fetch(`http://localhost:5000/api/accountant/expense-claims?status=${status}`);
+      const data = await response.json();
+      if (!response.ok || !data.success) throw new Error(data.message || 'Không tải được phụ phí tài xế.');
+      setExpenseClaims(data.data || []);
+    } catch (error) {
+      setExpenseError(error.message || 'Không tải được phụ phí tài xế.');
+    }
+  };
+
+  const xuLyYeuCauPhuPhi = async (claim, status) => {
+    const enteredNote = window.prompt(status === 'rejected'
+      ? 'Nhập lý do từ chối (ít nhất 5 ký tự):'
+      : 'Ghi chú duyệt (không bắt buộc):');
+    if (enteredNote === null) return;
+    const reviewNote = enteredNote.trim();
+    if (status === 'rejected' && reviewNote.length < 5) {
+      setExpenseError('Lý do từ chối cần tối thiểu 5 ký tự.');
+      return;
+    }
+    if (status === 'approved' && !window.confirm(`Duyệt hoàn ${Number(claim.amount).toLocaleString()} đ cho ${claim.driver_name} và cộng vào bảng lương?`)) return;
+    setExpenseBusyId(claim.id);
+    setExpenseError('');
+    setExpenseMessage('');
+    try {
+      const response = await fetch(`http://localhost:5000/api/accountant/expense-claims/${claim.id}/review`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status, review_note: reviewNote })
+      });
+      const data = await response.json();
+      if (!response.ok || !data.success) throw new Error(data.message || 'Không xử lý được yêu cầu phụ phí.');
+      setExpenseMessage(data.message);
+      await taiYeuCauPhuPhi();
+    } catch (error) {
+      setExpenseError(error.message || 'Không xử lý được yêu cầu phụ phí.');
+    } finally {
+      setExpenseBusyId(null);
+    }
+  };
+
+  const napKyQuyTaiXe = async (event, driver) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const formData = new FormData(form);
+    const amount = Number(formData.get('amount'));
+    if (!window.confirm(`Xác nhận đã nhận thực tế ${amount.toLocaleString('vi-VN')} đ ký quỹ từ tài xế ${driver.full_name}?`)) return;
+    setWalletBusyDriverId(driver.driver_id);
+    setWalletError('');
+    setWalletMessage('');
+    try {
+      const response = await fetch(`http://localhost:5000/api/accountant/driver-wallets/${driver.driver_id}/deposits`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ amount: formData.get('amount'), note: formData.get('note') })
+      });
+      const data = await response.json();
+      if (!response.ok || !data.success) throw new Error(data.message || 'Không cập nhật được ký quỹ.');
+      setWalletMessage(`${data.message} · ${driver.full_name}`);
+      form.reset();
+      await taiViKyQuyTaiXe();
+    } catch (error) {
+      setWalletError(error.message || 'Không cập nhật được ký quỹ.');
+    } finally {
+      setWalletBusyDriverId(null);
     }
   };
 
@@ -239,6 +331,18 @@ export default function DoiSoatCOD() {
             >
               <Banknote size={20} /> Nộp Tiền Shipper
             </button>
+            <button
+              onClick={() => { setTabHienTai('ky-quy'); taiViKyQuyTaiXe(); }}
+              className={`w-full px-5 py-4 rounded-2xl font-bold flex items-center gap-4 transition-all ${tabHienTai === 'ky-quy' ? 'bg-indigo-50 text-indigo-700 border border-indigo-100 shadow-sm' : 'text-slate-500 hover:bg-slate-50'}`}
+            >
+              <ShieldCheck size={20} /> Ký Quỹ Tài Xế
+            </button>
+            <button
+              onClick={() => { setTabHienTai('phu-phi'); taiYeuCauPhuPhi(); }}
+              className={`w-full px-5 py-4 rounded-2xl font-bold flex items-center gap-4 transition-all ${tabHienTai === 'phu-phi' ? 'bg-orange-50 text-orange-700 border border-orange-100 shadow-sm' : 'text-slate-500 hover:bg-slate-50'}`}
+            >
+              <Receipt size={20} /> Phụ Phí Tài Xế
+            </button>
           </div>
         </div>
 
@@ -261,16 +365,16 @@ export default function DoiSoatCOD() {
       <div className="flex-1 p-10 overflow-y-auto">
         <div className="mb-8 flex flex-wrap items-end justify-between gap-4">
           <div>
-            <h1 className="text-3xl font-black text-slate-800 tracking-tight">{tabHienTai === 'tai-xe' ? 'Xác nhận tiền COD từ Tài xế' : 'Thanh Toán Thu Hộ (COD)'}</h1>
-            <p className="text-slate-500 mt-2 font-medium">{tabHienTai === 'tai-xe' ? 'Đối chiếu số tiền mặt tài xế nộp và xác nhận đã nhận tại quầy.' : 'Tính khoản Shop nhận sau khi trừ cước Shop trả, phí dịch vụ và bảo hiểm.'}</p>
+            <h1 className="text-3xl font-black text-slate-800 tracking-tight">{tabHienTai === 'tai-xe' ? 'Xác nhận tiền COD từ Tài xế' : tabHienTai === 'ky-quy' ? 'Quản lý ký quỹ tài xế' : tabHienTai === 'phu-phi' ? 'Duyệt phụ phí tài xế' : 'Thanh Toán Thu Hộ (COD)'}</h1>
+            <p className="text-slate-500 mt-2 font-medium">{tabHienTai === 'tai-xe' ? 'Đối chiếu số tiền mặt tài xế nộp và xác nhận đã nhận tại quầy.' : tabHienTai === 'ky-quy' ? 'Ghi nhận tiền ký quỹ sau khi Kế toán đã xác minh nhận tiền thực tế.' : tabHienTai === 'phu-phi' ? 'Kiểm tra biên lai; khoản được duyệt sẽ cộng vào bảng lương tháng phát sinh.' : 'Tính khoản Shop nhận sau khi trừ cước Shop trả, phí dịch vụ và bảo hiểm.'}</p>
           </div>
           <div className="flex items-center gap-4">
-            {tabHienTai !== 'tai-xe' && (
+            {tabHienTai === 'cho-duyet' || tabHienTai === 'lich-su' ? (
               <label className="text-xs font-bold text-slate-500">Tháng đối soát
                 <input type="month" value={settlementMonth} onChange={(event) => setSettlementMonth(event.target.value)} className="mt-1 block rounded-lg border border-slate-200 bg-white p-2 text-sm font-bold text-slate-700" />
               </label>
-            )}
-            <div className="relative w-80">
+            ) : null}
+            {['cho-duyet', 'lich-su'].includes(tabHienTai) && <div className="relative w-80">
               <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
               <input 
                 type="text" 
@@ -279,14 +383,63 @@ export default function DoiSoatCOD() {
                 value={tuKhoa}
                 onChange={(e) => setTuKhoa(e.target.value)}
               />
-            </div>
+            </div>}
             {tabHienTai === 'lich-su' && danhSachDaLoc.length > 0 && (
               <button type="button" onClick={xuatExcel} className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-bold text-emerald-800">Xuất Excel tháng</button>
             )}
           </div>
         </div>
 
-        {tabHienTai === 'tai-xe' ? (
+        {tabHienTai === 'phu-phi' ? (
+          <section className="overflow-hidden rounded-2xl border border-orange-100 bg-white shadow-sm">
+            <header className="flex flex-wrap items-center justify-between gap-3 border-b border-orange-100 bg-orange-50 p-5">
+              <div><h2 className="font-black text-slate-800">Yêu cầu hoàn phụ phí</h2><p className="mt-1 text-sm text-slate-500">Duyệt sẽ ghi khoản hoàn vào bảng lương; từ chối cần nêu lý do.</p></div>
+              <div className="flex gap-2">
+                <select value={expenseStatus} onChange={(event) => { setExpenseStatus(event.target.value); taiYeuCauPhuPhi(event.target.value); }} className="rounded-lg border border-orange-200 bg-white px-3 py-2 text-sm font-bold">
+                  <option value="pending">Chờ duyệt</option><option value="approved">Đã duyệt</option><option value="rejected">Đã từ chối</option>
+                </select>
+                <button type="button" onClick={() => taiYeuCauPhuPhi()} className="rounded-lg border border-orange-200 bg-white px-3 py-2 text-sm font-bold text-orange-800">Làm mới</button>
+              </div>
+            </header>
+            {(expenseError || expenseMessage) && <p role={expenseError ? 'alert' : 'status'} className={`m-5 rounded-lg p-3 text-sm font-semibold ${expenseError ? 'bg-rose-50 text-rose-700' : 'bg-emerald-50 text-emerald-700'}`}>{expenseError || expenseMessage}</p>}
+            <div className="divide-y divide-slate-100">
+              {expenseClaims.map((claim) => <article key={claim.id} className="grid gap-4 p-5 lg:grid-cols-[1fr_1fr_1fr_auto] lg:items-center">
+                <div><p className="font-black text-slate-800">{claim.driver_name}</p><p className="mt-1 text-xs text-slate-500">Phiếu #{claim.id} · {new Date(claim.created_at).toLocaleString('vi-VN')}</p><p className="mt-2 text-sm text-slate-600">{claim.note}</p></div>
+                <div><p className="text-xs font-bold uppercase text-slate-400">Khoản chi</p><p className="mt-1 font-bold text-slate-800">{({ toll: 'Cầu đường', parking: 'Gửi xe', fuel: 'Nhiên liệu', other: 'Khác' })[claim.expense_type]}</p><p className="text-lg font-black text-orange-700">{Number(claim.amount).toLocaleString()} đ</p></div>
+                <div><a href={`http://localhost:5000${claim.receipt_image}`} target="_blank" rel="noreferrer" className="font-bold text-blue-700 underline">Xem ảnh biên lai</a>{claim.review_note && <p className="mt-2 text-sm text-slate-500">Ghi chú: {claim.review_note}</p>}</div>
+                {claim.status === 'pending' && <div className="flex gap-2">
+                  <button type="button" disabled={expenseBusyId === claim.id} onClick={() => xuLyYeuCauPhuPhi(claim, 'approved')} className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-bold text-white disabled:opacity-50">Duyệt</button>
+                  <button type="button" disabled={expenseBusyId === claim.id} onClick={() => xuLyYeuCauPhuPhi(claim, 'rejected')} className="rounded-lg bg-rose-600 px-3 py-2 text-sm font-bold text-white disabled:opacity-50">Từ chối</button>
+                </div>}
+              </article>)}
+              {!expenseClaims.length && !expenseError && <p className="p-10 text-center text-slate-500">Không có yêu cầu phụ phí trong trạng thái này.</p>}
+            </div>
+          </section>
+        ) : tabHienTai === 'ky-quy' ? (
+          <section className="overflow-hidden rounded-2xl border border-indigo-100 bg-white shadow-sm">
+            <header className="flex flex-wrap items-center justify-between gap-3 border-b border-indigo-100 bg-indigo-50 p-5">
+              <div><h2 className="font-black text-slate-800">Ký quỹ bảo đảm đơn COD</h2><p className="mt-1 text-sm text-slate-500">Chỉ ghi nhận nạp sau khi đã đối chiếu tiền nhận từ tài xế. Ký quỹ khả dụng = số dư - số đang giữ.</p></div>
+              <button type="button" onClick={taiViKyQuyTaiXe} className="rounded-lg border border-indigo-200 bg-white px-3 py-2 text-sm font-bold text-indigo-800">Làm mới</button>
+            </header>
+            {(walletError || walletMessage) && <p role={walletError ? 'alert' : 'status'} className={`m-5 rounded-lg p-3 text-sm font-semibold ${walletError ? 'bg-rose-50 text-rose-700' : 'bg-emerald-50 text-emerald-700'}`}>{walletError || walletMessage}</p>}
+            <div className="divide-y divide-slate-100">
+              {driverWallets.map((driver) => <article key={driver.driver_id} className="grid gap-4 p-5 lg:grid-cols-[1fr_1fr_2fr] lg:items-center">
+                <div><p className="font-black text-slate-800">{driver.full_name}</p><p className="mt-1 text-xs text-slate-500">Tài xế giao hàng · #{driver.driver_id}</p></div>
+                <div className="grid grid-cols-3 gap-2 text-center text-xs">
+                  <p className="rounded-lg bg-indigo-50 p-2 text-indigo-800">Số dư<strong className="mt-1 block">{Number(driver.deposit_balance).toLocaleString()} đ</strong></p>
+                  <p className="rounded-lg bg-amber-50 p-2 text-amber-800">Đang giữ<strong className="mt-1 block">{Number(driver.reserved_balance).toLocaleString()} đ</strong></p>
+                  <p className="rounded-lg bg-emerald-50 p-2 text-emerald-800">Khả dụng<strong className="mt-1 block">{Number(driver.available_balance).toLocaleString()} đ</strong></p>
+                </div>
+                <form onSubmit={(event) => napKyQuyTaiXe(event, driver)} className="grid gap-2 sm:grid-cols-[1fr_1fr_auto]">
+                  <input name="amount" type="number" required min="1" max="100000000" step="0.01" placeholder="Số tiền đã nhận (đ)" className="min-w-0 rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+                  <input name="note" maxLength={200} placeholder="Mã phiếu / ghi chú (tùy chọn)" className="min-w-0 rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+                  <button type="submit" disabled={walletBusyDriverId === driver.driver_id} className="rounded-lg bg-indigo-700 px-4 py-2 text-sm font-black text-white hover:bg-indigo-800 disabled:opacity-50">{walletBusyDriverId === driver.driver_id ? 'Đang lưu...' : 'Xác nhận nạp'}</button>
+                </form>
+              </article>)}
+              {!driverWallets.length && !walletError && <p className="p-10 text-center text-slate-500">Chưa có tài xế giao hàng đang hoạt động.</p>}
+            </div>
+          </section>
+        ) : tabHienTai === 'tai-xe' ? (
           <section className="overflow-hidden rounded-2xl border border-amber-100 bg-white shadow-sm">
             <header className="flex items-center justify-between border-b border-amber-100 bg-amber-50 p-5">
               <div><h2 className="font-black text-slate-800">Phiếu chờ nhận tiền</h2><p className="mt-1 text-sm text-slate-500">Tài xế tạo phiếu từ ứng dụng; Kế toán xác nhận tiền mặt thực tế.</p></div>

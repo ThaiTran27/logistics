@@ -18,6 +18,7 @@
     "react-barcode": "^1.6.1",
     "react-dom": "^19.2.8",
     "react-leaflet": "^5.0.0",
+    "react-qr-code": "^2.2.0",
     "react-router-dom": "^7.18.3",
     "recharts": "^3.10.1",
     "socket.io-client": "^4.8.3",

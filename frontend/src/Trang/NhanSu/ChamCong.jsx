@@ -1,8 +1,9 @@
+import { apiFetch as fetch } from '../../utils/apiFetch.js';
 import { useEffect, useRef, useState } from 'react';
-import { ArrowLeft, Camera, CalendarCheck, Clock3, LogIn, LogOut, RefreshCw, X } from 'lucide-react';
+import { ArrowLeft, Camera, CalendarCheck, Clock3, LogIn, LogOut, RefreshCw, X, MapPin, Users } from 'lucide-react';
 import { Link } from 'react-router-dom';
 
-const API_URL = 'http://localhost:5000';
+const API_URL = (import.meta.env.VITE_API_URL || 'http://localhost:5000').replace(/\/+$/, '');
 
 const thangHienTai = () => {
   const now = new Date();
@@ -14,11 +15,20 @@ const ngayHienTai = () => {
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
 };
 
+const hasCoordinates = (latitude, longitude) => latitude !== null && latitude !== undefined && latitude !== ''
+  && longitude !== null && longitude !== undefined && longitude !== ''
+  && Number.isFinite(Number(latitude)) && Number.isFinite(Number(longitude));
+
 export default function ChamCong() {
   const userId = localStorage.getItem('user_id');
   const fullName = localStorage.getItem('full_name') || 'Nhân viên';
+  const role = String(localStorage.getItem('role') || localStorage.getItem('user_role') || '').trim().toLowerCase();
+  const isHrViewer = ['hr_manager', 'hr', 'human_resources', 'nhan_su', 'director', 'admin'].includes(role);
   const [month, setMonth] = useState(thangHienTai);
+  const [selectedUserId, setSelectedUserId] = useState('');
   const [records, setRecords] = useState([]);
+  const [recordsLoading, setRecordsLoading] = useState(true);
+  const [selectedEvidence, setSelectedEvidence] = useState(null);
   const [busy, setBusy] = useState(false);
   const [cameraAction, setCameraAction] = useState(null);
   const [capturedImage, setCapturedImage] = useState(null);
@@ -29,28 +39,61 @@ export default function ChamCong() {
   const cameraStreamRef = useRef(null);
 
   const loadRecords = async () => {
-    if (!userId) return;
+    if (!userId && !isHrViewer) return;
+    setRecordsLoading(true);
     try {
-      const response = await fetch(`${API_URL}/api/attendance?user_id=${userId}&month=${month}`);
+      const query = new URLSearchParams({ month });
+      if (isHrViewer && selectedUserId) query.set('user_id', selectedUserId);
+      else if (!isHrViewer) query.set('user_id', userId);
+      const response = await fetch(`${API_URL}/api/attendance?${query}`);
       const data = await response.json();
-      if (data.success) setRecords(data.data || []);
+      if (!response.ok || !data.success) throw new Error(data.message || 'Không tải được lịch sử chấm công.');
+      setRecords(data.data || []);
+      setAttendanceError('');
     } catch (error) {
       console.error('Lỗi tải dữ liệu chấm công:', error);
+      setAttendanceError(error.message || 'Không tải được lịch sử chấm công.');
+    } finally {
+      setRecordsLoading(false);
     }
   };
 
   useEffect(() => {
     let cancelled = false;
-    fetch(`${API_URL}/api/attendance?user_id=${userId}&month=${month}`)
+    if (!userId && !isHrViewer) return undefined;
+    const query = new URLSearchParams({ month });
+    if (isHrViewer && selectedUserId) query.set('user_id', selectedUserId);
+    else if (!isHrViewer) query.set('user_id', userId);
+    fetch(`${API_URL}/api/attendance?${query}`)
       .then((response) => response.json())
-      .then((data) => { if (!cancelled && data.success) setRecords(data.data || []); })
-      .catch((error) => console.error('Lỗi tải dữ liệu chấm công:', error));
+      .then((data) => {
+        if (cancelled) return;
+        if (!data.success) throw new Error(data.message || 'Không tải được lịch sử chấm công.');
+        setRecords(data.data || []);
+        setAttendanceError('');
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        console.error('Lỗi tải dữ liệu chấm công:', error);
+        setAttendanceError(error.message || 'Không tải được lịch sử chấm công.');
+      })
+      .finally(() => { if (!cancelled) setRecordsLoading(false); });
     return () => { cancelled = true; };
-  }, [userId, month]);
+  }, [userId, month, isHrViewer, selectedUserId]);
 
   const todayRecords = records.filter((record) => String(record.work_date).slice(0, 10) === ngayHienTai());
   const currentShift = todayRecords.find((record) => record.check_in && !record.check_out);
   const todayRecord = currentShift || todayRecords[0];
+  const employees = [...new Map(records.map((record) => [String(record.user_id), {
+    id: String(record.user_id),
+    name: record.full_name || `Nhân viên ${record.user_id}`,
+    role: record.role,
+  }])).values()].sort((first, second) => first.name.localeCompare(second.name, 'vi'));
+  const attendanceSummary = records.reduce((summary, record) => ({
+    shifts: summary.shifts + 1,
+    openShifts: summary.openShifts + (record.check_in && !record.check_out ? 1 : 0),
+    missingCheckIn: summary.missingCheckIn + (!record.check_in ? 1 : 0),
+  }), { shifts: 0, openShifts: 0, missingCheckIn: 0 });
 
   useEffect(() => {
     if (!cameraAction || capturedImage) return undefined;
@@ -197,8 +240,8 @@ export default function ChamCong() {
         </Link>
         <header className="mt-8 flex flex-col justify-between gap-5 border-b border-slate-200 pb-6 sm:flex-row sm:items-end">
           <div>
-            <p className="text-sm font-black uppercase text-emerald-700">Chấm công cá nhân</p>
-            <h1 className="mt-2 text-3xl font-black">Xin chào, {fullName}</h1>
+            <p className="text-sm font-black uppercase text-emerald-700">{isHrViewer ? 'Quản lý chấm công' : 'Chấm công cá nhân'}</p>
+            <h1 className="mt-2 text-3xl font-black">{isHrViewer ? 'Theo dõi chấm công nhân viên' : `Xin chào, ${fullName}`}</h1>
           </div>
           <div className="flex items-center gap-2 text-sm font-bold text-slate-500">
             <CalendarCheck size={18} className="text-emerald-600" />
@@ -206,8 +249,27 @@ export default function ChamCong() {
           </div>
         </header>
 
-        <section className="mt-6 grid gap-5 md:grid-cols-[1fr_1.3fr]">
-          <div className="border-l-4 border-emerald-500 bg-white p-6 shadow-sm">
+        {attendanceError && <p role="alert" className="mt-5 rounded-lg bg-rose-50 p-3 text-sm font-semibold text-rose-700">{attendanceError}</p>}
+
+        {isHrViewer && (
+          <section className="mt-6 grid gap-4 sm:grid-cols-3">
+            <div className="border-l-4 border-emerald-500 bg-white p-5 shadow-sm">
+              <p className="text-sm font-bold text-slate-500">Tổng ca trong tháng</p>
+              <p className="mt-2 text-3xl font-black">{attendanceSummary.shifts}</p>
+            </div>
+            <div className="border-l-4 border-amber-500 bg-white p-5 shadow-sm">
+              <p className="text-sm font-bold text-slate-500">Ca chưa chấm tan</p>
+              <p className="mt-2 text-3xl font-black">{attendanceSummary.openShifts}</p>
+            </div>
+            <div className="border-l-4 border-rose-500 bg-white p-5 shadow-sm">
+              <p className="text-sm font-bold text-slate-500">Bản ghi thiếu giờ vào</p>
+              <p className="mt-2 text-3xl font-black">{attendanceSummary.missingCheckIn}</p>
+            </div>
+          </section>
+        )}
+
+        <section className={`mt-6 grid gap-5 ${isHrViewer ? '' : 'md:grid-cols-[1fr_1.3fr]'}`}>
+          {!isHrViewer && <div className="border-l-4 border-emerald-500 bg-white p-6 shadow-sm">
             <h2 className="text-lg font-black">Ca làm hôm nay</h2>
             <div className="mt-5 grid grid-cols-2 gap-3">
               <div className="bg-slate-50 p-4">
@@ -236,38 +298,90 @@ export default function ChamCong() {
               </button>
             </div>
             {attendanceMessage && <p role="status" className="mt-4 text-sm font-bold text-emerald-700">{attendanceMessage}</p>}
-          </div>
+          </div>}
 
           <div className="bg-white p-6 shadow-sm">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
-                <h2 className="text-lg font-black">Lịch sử chấm công</h2>
-                <p className="mt-1 text-sm text-slate-500">Các ca đã ghi nhận trong tháng.</p>
+                <h2 className="text-lg font-black">{isHrViewer ? 'Bảng chấm công nhân viên' : 'Lịch sử chấm công'}</h2>
+                <p className="mt-1 text-sm text-slate-500">{isHrViewer ? 'Kiểm tra thời gian, ảnh selfie và vị trí GPS.' : 'Các ca đã ghi nhận trong tháng.'}</p>
               </div>
-              <label className="flex items-center gap-2 text-sm font-bold text-slate-600">
-                <Clock3 size={17} />
-                <input type="month" value={month} onChange={(event) => setMonth(event.target.value)} className="border border-slate-200 bg-white px-3 py-2" />
-              </label>
+              <div className="flex flex-wrap items-center gap-2">
+                {isHrViewer && (
+                  <label className="flex items-center gap-2 text-sm font-bold text-slate-600">
+                    <Users size={17} />
+                    <select value={selectedUserId} onChange={(event) => { setRecordsLoading(true); setSelectedUserId(event.target.value); }} className="max-w-52 border border-slate-200 bg-white px-3 py-2">
+                      <option value="">Tất cả nhân viên</option>
+                      {employees.map((employee) => <option key={employee.id} value={employee.id}>{employee.name}</option>)}
+                    </select>
+                  </label>
+                )}
+                <label className="flex items-center gap-2 text-sm font-bold text-slate-600">
+                  <Clock3 size={17} />
+                  <input type="month" value={month} onChange={(event) => { setRecordsLoading(true); setMonth(event.target.value); }} className="border border-slate-200 bg-white px-3 py-2" />
+                </label>
+              </div>
             </div>
             <div className="mt-5 overflow-x-auto">
-              <table className="w-full min-w-[420px] text-left text-sm">
+              <table className={`w-full ${isHrViewer ? 'min-w-[850px]' : 'min-w-[420px]'} text-left text-sm`}>
                 <thead className="border-b border-slate-200 text-xs uppercase text-slate-400">
-                  <tr><th className="py-3">Ngày</th><th className="py-3">Vào ca</th><th className="py-3">Tan ca</th></tr>
+                  <tr>
+                    {isHrViewer && <th className="py-3">Nhân viên</th>}
+                    <th className="py-3">Ngày</th>
+                    <th className="py-3">Vào ca</th>
+                    <th className="py-3">Tan ca</th>
+                    {isHrViewer && <><th className="py-3">Ảnh vào ca</th><th className="py-3">Vị trí vào ca</th><th className="py-3">Ảnh tan ca</th><th className="py-3">Vị trí tan ca</th></>}
+                  </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {records.length ? records.map((record) => (
+                  {recordsLoading ? (
+                    <tr><td colSpan={isHrViewer ? 8 : 3} className="py-10 text-center text-slate-400">Đang tải dữ liệu chấm công...</td></tr>
+                  ) : records.length ? records.map((record) => (
                     <tr key={record.id}>
+                      {isHrViewer && <td className="py-3 font-semibold">{record.full_name || `Nhân viên ${record.user_id}`}</td>}
                       <td className="py-3 font-bold">{new Date(`${String(record.work_date).slice(0, 10)}T00:00:00`).toLocaleDateString('vi-VN')}</td>
                       <td className="py-3">{record.check_in ? new Date(record.check_in).toLocaleTimeString('vi-VN') : '--'}</td>
                       <td className="py-3">{record.check_out ? new Date(record.check_out).toLocaleTimeString('vi-VN') : '--'}</td>
+                      {isHrViewer && <>
+                        <td className="py-3">
+                          {record.check_in_photo ? (
+                            <button type="button" onClick={() => setSelectedEvidence({ url: `${API_URL}${record.check_in_photo}`, label: `${record.full_name || 'Nhân viên'} · ảnh vào ca` })} className="font-bold text-emerald-700 underline">Xem ảnh</button>
+                          ) : <span className="text-slate-400">Chưa có</span>}
+                        </td>
+                        <td className="py-3">
+                          {hasCoordinates(record.check_in_lat, record.check_in_lng)
+                            ? <a href={`https://www.google.com/maps/search/?api=1&query=${record.check_in_lat},${record.check_in_lng}`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 font-bold text-blue-700"><MapPin size={14} /> Xem bản đồ</a>
+                            : <span className="text-slate-400">Chưa có</span>}
+                        </td>
+                        <td className="py-3">
+                          {record.check_out_photo ? (
+                            <button type="button" onClick={() => setSelectedEvidence({ url: `${API_URL}${record.check_out_photo}`, label: `${record.full_name || 'Nhân viên'} · ảnh tan ca` })} className="font-bold text-emerald-700 underline">Xem ảnh</button>
+                          ) : <span className="text-slate-400">Chưa có</span>}
+                        </td>
+                        <td className="py-3">
+                          {hasCoordinates(record.check_out_lat, record.check_out_lng)
+                            ? <a href={`https://www.google.com/maps/search/?api=1&query=${record.check_out_lat},${record.check_out_lng}`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 font-bold text-blue-700"><MapPin size={14} /> Xem bản đồ</a>
+                            : <span className="text-slate-400">Chưa có</span>}
+                        </td>
+                      </>}
                     </tr>
-                  )) : <tr><td colSpan="3" className="py-10 text-center text-slate-400">Chưa có dữ liệu trong tháng này.</td></tr>}
+                  )) : <tr><td colSpan={isHrViewer ? 8 : 3} className="py-10 text-center text-slate-400">Chưa có dữ liệu trong tháng này.</td></tr>}
                 </tbody>
               </table>
             </div>
           </div>
         </section>
       </div>
+
+      {selectedEvidence && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-950/80 p-4" onClick={() => setSelectedEvidence(null)}>
+          <section role="dialog" aria-modal="true" aria-label={selectedEvidence.label} className="relative max-h-[90vh] max-w-4xl rounded-xl bg-white p-3 shadow-2xl" onClick={(event) => event.stopPropagation()}>
+            <button type="button" aria-label="Đóng ảnh" onClick={() => setSelectedEvidence(null)} className="absolute -right-3 -top-3 rounded-full bg-white p-2 text-slate-700 shadow-lg hover:bg-slate-100"><X size={18} /></button>
+            <p className="px-2 pb-2 text-sm font-bold text-slate-700">{selectedEvidence.label}</p>
+            <img src={selectedEvidence.url} alt={selectedEvidence.label} className="max-h-[78vh] max-w-full object-contain" />
+          </section>
+        </div>
+      )}
 
       {cameraAction && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-4">

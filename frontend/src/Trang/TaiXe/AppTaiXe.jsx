@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useState } from 'react';
+import { apiFetch as fetch } from '../../utils/apiFetch.js';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Html5QrcodeScanner, Html5QrcodeSupportedFormats } from 'html5-qrcode';
 import { io } from 'socket.io-client';
-import { MapPin, Package, CheckCircle, XCircle, LogOut, Navigation, Wallet, UserCircle, Bike, Map, Send, CalendarOff, Camera, AlertTriangle, X, ShieldCheck, House, PackageCheck, Banknote, Siren, Wifi, WifiOff, ScanLine } from 'lucide-react';
+import { MapPin, Package, CheckCircle, XCircle, LogOut, Navigation, Wallet, UserCircle, Bike, Map, Send, CalendarOff, Camera, AlertTriangle, X, ShieldCheck, House, PackageCheck, Banknote, Siren, Wifi, WifiOff, ScanLine, Route } from 'lucide-react';
 import { MapContainer, TileLayer, Marker, Popup } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
@@ -26,14 +27,51 @@ const distanceBetween = (first, second) => {
     * Math.sin(deltaLongitude / 2) ** 2;
   return 6371 * 2 * Math.atan2(Math.sqrt(value), Math.sqrt(1 - value));
 };
+const getDeliveryCoordinates = (order) => {
+  if (order.receiver_lat === null || order.receiver_lat === undefined || order.receiver_lat === ''
+    || order.receiver_lng === null || order.receiver_lng === undefined || order.receiver_lng === '') return null;
+  const lat = Number(order.receiver_lat);
+  const lng = Number(order.receiver_lng);
+  return Number.isFinite(lat) && lat >= -90 && lat <= 90 && Number.isFinite(lng) && lng >= -180 && lng <= 180
+    ? { lat, lng }
+    : null;
+};
+const optimizeDeliveryStops = (start, orders) => {
+  const remaining = orders
+    .map((order) => ({ order, coordinates: getDeliveryCoordinates(order) }))
+    .filter((stop) => stop.coordinates);
+  const unlocated = orders.filter((order) => !getDeliveryCoordinates(order));
+  const optimized = [];
+  let current = start;
+  let totalDistance = 0;
+  while (remaining.length) {
+    let nearestIndex = 0;
+    let nearestDistance = distanceBetween(current, remaining[0].coordinates);
+    for (let index = 1; index < remaining.length; index += 1) {
+      const distance = distanceBetween(current, remaining[index].coordinates);
+      if (distance < nearestDistance) {
+        nearestDistance = distance;
+        nearestIndex = index;
+      }
+    }
+    const [next] = remaining.splice(nearestIndex, 1);
+    optimized.push(next.order);
+    totalDistance += nearestDistance;
+    current = next.coordinates;
+  }
+  return { orders: [...optimized, ...unlocated], totalDistance, optimizedCount: optimized.length };
+};
 
-const socket = io('http://localhost:5000');
+const socket = io('http://localhost:5000', {
+  auth: { token: localStorage.getItem('access_token') }
+});
 
 export default function AppTaiXe() {
   const [donHang, setDonHang] = useState([]);
   const [tabHienTai, setTabHienTai] = useState('dashboard');
   const [viTien, setViTien] = useState(0);
   const [tienChoNop, setTienChoNop] = useState(0);
+  const [kyQuy, setKyQuy] = useState({ balance: 0, reserved: 0, available: 0 });
   const [dangOnline, setDangOnline] = useState(navigator.onLine);
   const [offlineSyncNotice, setOfflineSyncNotice] = useState('');
   const [showSos, setShowSos] = useState(false);
@@ -43,8 +81,13 @@ export default function AppTaiXe() {
   const [scanningTripBags, setScanningTripBags] = useState(false);
   const [tripBagNotice, setTripBagNotice] = useState('');
   const [cashSubmitting, setCashSubmitting] = useState(false);
+  const [expenseClaims, setExpenseClaims] = useState([]);
+  const [expenseSubmitting, setExpenseSubmitting] = useState(false);
+  const [expenseNotice, setExpenseNotice] = useState('');
   const [viTriHienTai, setViTriHienTai] = useState({ lat: 10.762622, lng: 106.660172 }); 
   const [routeInfo, setRouteInfo] = useState(null);
+  const [optimizedRouteIds, setOptimizedRouteIds] = useState([]);
+  const [optimizedRouteDistance, setOptimizedRouteDistance] = useState(null);
   
   // State cho form nghỉ phép
   const [lyDoNghi, setLyDoNghi] = useState('');
@@ -54,6 +97,8 @@ export default function AppTaiXe() {
   const [modalXuLy, setModalXuLy] = useState({ mo: false, loai: '', don: null });
   const [anhMinhChung, setAnhMinhChung] = useState(null);
   const [anhPreview, setAnhPreview] = useState(null);
+  const signatureCanvasRef = useRef(null);
+  const [signatureDrawn, setSignatureDrawn] = useState(false);
   const [lyDoHuy, setLyDoHuy] = useState('');
   const [xacNhanTien, setXacNhanTien] = useState(false);
   const [phuongThucCOD, setPhuongThucCOD] = useState('');
@@ -65,6 +110,27 @@ export default function AppTaiXe() {
   const driverId = localStorage.getItem('user_id');
   const driverRole = localStorage.getItem('role') || localStorage.getItem('user_role');
   const isPickupDriver = driverRole === 'pickup_driver';
+  const driverTheme = isPickupDriver
+    ? {
+      header: 'from-amber-500 to-orange-600',
+      label: 'text-amber-100',
+      wallet: 'bg-amber-50 text-amber-700',
+      accent: 'text-amber-300',
+      progress: '#f59e0b',
+      mission: 'border-amber-100 bg-amber-50',
+      missionLabel: 'text-amber-800',
+      action: 'bg-amber-600 hover:bg-amber-700'
+    }
+    : {
+      header: 'from-blue-600 to-indigo-600',
+      label: 'text-blue-100',
+      wallet: 'bg-blue-50 text-blue-600',
+      accent: 'text-blue-300',
+      progress: '#3b82f6',
+      mission: 'border-blue-100 bg-blue-50',
+      missionLabel: 'text-blue-800',
+      action: 'bg-blue-600 hover:bg-blue-700'
+    };
   const driverName = localStorage.getItem('full_name') || 'Tài Xế Giao Nhận';
   const taskRoute = routeInfo?.task_route;
   const diemDi = taskRoute?.origin?.address || (taskRoute?.origin ? `${taskRoute.origin.lat},${taskRoute.origin.lng}` : '10.762622,106.660172');
@@ -127,15 +193,31 @@ export default function AppTaiXe() {
       if (!response.ok || !data.success) throw new Error(data.message || 'Không thể tải ví COD.');
       setViTien(Number(data.data.cash_on_hand || 0));
       setTienChoNop(Number(data.data.cash_pending_handover || 0));
+      setKyQuy({
+        balance: Number(data.data.deposit_balance || 0),
+        reserved: Number(data.data.reserved_balance || 0),
+        available: Number(data.data.available_balance || 0)
+      });
     } catch (error) {
       console.error('Không tải được ví tài xế:', error);
     }
   }, [driverId]);
 
+  const taiYeuCauPhuPhi = useCallback(async () => {
+    if (!driverId) return;
+    const response = await fetch('http://localhost:5000/api/driver/expense-claims');
+    const data = await response.json();
+    if (!response.ok || !data.success) throw new Error(data.message || 'Không tải được yêu cầu phụ phí.');
+    setExpenseClaims(data.data || []);
+  }, [driverId]);
+
   useEffect(() => {
     const onlineHandler = () => {
       setDangOnline(true);
-      navigator.serviceWorker?.controller?.postMessage({ type: 'SYNC_DRIVER_ACTIONS' });
+      navigator.serviceWorker?.controller?.postMessage({
+        type: 'SYNC_DRIVER_ACTIONS',
+        token: localStorage.getItem('access_token')
+      });
     };
     const offlineHandler = () => setDangOnline(false);
     const serviceWorkerMessage = (event) => {
@@ -148,6 +230,10 @@ export default function AppTaiXe() {
     window.addEventListener('online', onlineHandler);
     window.addEventListener('offline', offlineHandler);
     navigator.serviceWorker?.addEventListener('message', serviceWorkerMessage);
+    navigator.serviceWorker?.controller?.postMessage({
+      type: 'SYNC_DRIVER_ACTIONS',
+      token: localStorage.getItem('access_token')
+    });
     return () => {
       window.removeEventListener('online', onlineHandler);
       window.removeEventListener('offline', offlineHandler);
@@ -319,6 +405,33 @@ export default function AppTaiXe() {
     }
   };
 
+  const guiYeuCauPhuPhi = async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    setExpenseSubmitting(true);
+    setExpenseNotice('');
+    try {
+      const response = await fetch('http://localhost:5000/api/driver/expense-claims', {
+        method: 'POST',
+        body: new FormData(form)
+      });
+      const data = await response.json();
+      if (!response.ok || !data.success) throw new Error(data.message || 'Không gửi được biên lai.');
+      form.reset();
+      setExpenseNotice(data.message);
+      await taiYeuCauPhuPhi();
+    } catch (error) {
+      setExpenseNotice(error.message || 'Lỗi kết nối khi gửi biên lai.');
+    } finally {
+      setExpenseSubmitting(false);
+    }
+  };
+
+  useEffect(() => {
+    if (tabHienTai !== 'wallet') return;
+    taiYeuCauPhuPhi().catch((error) => setExpenseNotice(error.message || 'Không tải được yêu cầu phụ phí.'));
+  }, [tabHienTai, taiYeuCauPhuPhi]);
+
   const guiBaoCaoSuCo = async (event) => {
     event.preventDefault();
     setSendingSos(true);
@@ -355,6 +468,45 @@ export default function AppTaiXe() {
     }
   };
 
+  const batDauVeChuKy = (event) => {
+    const canvas = signatureCanvasRef.current;
+    if (!canvas) return;
+    const bounds = canvas.getBoundingClientRect();
+    const context = canvas.getContext('2d');
+    context.beginPath();
+    const x = (event.clientX - bounds.left) * canvas.width / bounds.width;
+    const y = (event.clientY - bounds.top) * canvas.height / bounds.height;
+    context.fillStyle = '#0f172a';
+    context.beginPath();
+    context.arc(x, y, 1.5, 0, Math.PI * 2);
+    context.fill();
+    context.beginPath();
+    context.moveTo(x, y);
+    canvas.setPointerCapture(event.pointerId);
+    setSignatureDrawn(true);
+  };
+
+  const veChuKy = (event) => {
+    const canvas = signatureCanvasRef.current;
+    if (!canvas || !event.buttons) return;
+    const bounds = canvas.getBoundingClientRect();
+    const context = canvas.getContext('2d');
+    context.lineWidth = 3;
+    context.lineCap = 'round';
+    context.strokeStyle = '#0f172a';
+    context.lineTo(
+      (event.clientX - bounds.left) * canvas.width / bounds.width,
+      (event.clientY - bounds.top) * canvas.height / bounds.height
+    );
+    context.stroke();
+  };
+
+  const xoaChuKy = () => {
+    const canvas = signatureCanvasRef.current;
+    if (canvas) canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
+    setSignatureDrawn(false);
+  };
+
   // Hàm Submit Xử Lý (Gửi FormData chứa Ảnh + Trạng thái)
   const xacNhanThaoTac = async (e) => {
     e.preventDefault();
@@ -374,6 +526,7 @@ export default function AppTaiXe() {
       }
       if (!/^\d{4,6}$/.test(maOtpGiaoHang)) return alert('Vui lòng nhập mã OTP giao hàng gồm 4-6 chữ số.');
       if (!anhMinhChung) return alert("BẮT BUỘC: Vui lòng chụp ảnh minh chứng đã giao hàng!");
+      if (!signatureDrawn) return alert('Vui lòng lấy chữ ký xác nhận của người nhận.');
     }
 
     setDangCapNhat(true);
@@ -387,6 +540,17 @@ export default function AppTaiXe() {
       }
 
       if (loai === 'completed') {
+        const signatureCanvas = signatureCanvasRef.current;
+        if (!signatureCanvas) {
+          setDangCapNhat(false);
+          return alert('Không tìm thấy vùng chữ ký. Vui lòng đóng và mở lại xác nhận giao hàng.');
+        }
+        const signatureBlob = await new Promise((resolve) => signatureCanvas.toBlob(resolve, 'image/png'));
+        if (!signatureBlob) {
+          setDangCapNhat(false);
+          return alert('Không thể tạo ảnh chữ ký. Vui lòng ký lại.');
+        }
+        formData.append('signature_image', signatureBlob, `signature-${don.id}.png`);
         formData.append('delivery_otp', maOtpGiaoHang);
         formData.append('cod_collected', String(xacNhanTien));
         if (tinhTongTienCanThu(don) > 0) formData.append('cod_payment_method', phuongThucCOD);
@@ -422,6 +586,7 @@ export default function AppTaiXe() {
     setModalXuLy({ mo: false, loai: '', don: null });
     setAnhMinhChung(null);
     setAnhPreview(null);
+    xoaChuKy();
     setLyDoHuy('');
     setXacNhanTien(false);
     setPhuongThucCOD('');
@@ -475,19 +640,38 @@ export default function AppTaiXe() {
       return { ...order, distance: hasTarget ? distanceBetween(viTriHienTai, target) : Number.POSITIVE_INFINITY };
     })
     .sort((first, second) => first.distance - second.distance)[0];
+  const donTheoTuyen = optimizedRouteIds.length
+    ? donDangChay
+      .map((order, currentIndex) => ({ order, rank: optimizedRouteIds.indexOf(order.id), currentIndex }))
+      .sort((first, second) => {
+        const firstRank = first.rank < 0 ? Number.MAX_SAFE_INTEGER : first.rank;
+        const secondRank = second.rank < 0 ? Number.MAX_SAFE_INTEGER : second.rank;
+        return firstRank - secondRank || first.currentIndex - second.currentIndex;
+      })
+      .map(({ order }) => order)
+    : donDangChay;
+  const toiUuTuyenGiao = () => {
+    const { orders, totalDistance, optimizedCount } = optimizeDeliveryStops(viTriHienTai, donDangChay);
+    if (!optimizedCount) {
+      alert('Các đơn hiện tại chưa có tọa độ người nhận hợp lệ để sắp xếp tuyến.');
+      return;
+    }
+    setOptimizedRouteIds(orders.map((order) => order.id));
+    setOptimizedRouteDistance(totalDistance);
+  };
   return (
     <div className="bg-slate-100 min-h-screen flex justify-center font-sans text-slate-800">
       <div className="w-full max-w-md bg-white min-h-screen shadow-2xl relative overflow-hidden flex flex-col">
         
         {/* HEADER */}
-        <div className="bg-gradient-to-r from-blue-600 to-indigo-600 p-6 rounded-b-[32px] shadow-lg text-white sticky top-0 z-50">
+        <div className={`bg-gradient-to-r ${driverTheme.header} p-6 rounded-b-[32px] shadow-lg text-white sticky top-0 z-50`}>
           <div className="flex justify-between items-center mb-4">
             <div className="flex items-center gap-3">
               <div className="bg-white/20 p-2.5 rounded-full backdrop-blur-sm">
                 <Bike size={22} />
               </div>
               <div>
-                <p className="text-blue-100 text-[10px] font-bold uppercase tracking-wider">{isPickupDriver ? 'TÀI XẾ LẤY HÀNG' : 'TÀI XẾ GIAO HÀNG'}</p>
+                <p className={`${driverTheme.label} text-[10px] font-bold uppercase tracking-wider`}>{isPickupDriver ? 'TÀI XẾ NHẬN HÀNG' : 'TÀI XẾ GIAO HÀNG'}</p>
                 <h2 className="font-black text-base">{driverName}</h2>
               </div>
             </div>
@@ -502,7 +686,7 @@ export default function AppTaiXe() {
 
           <div className="bg-white rounded-2xl p-4 shadow-sm flex items-center justify-between text-slate-800">
             <div className="flex items-center gap-3">
-              <div className="bg-blue-50 p-2.5 rounded-xl text-blue-600">
+              <div className={`${driverTheme.wallet} p-2.5 rounded-xl`}>
                 <Wallet size={20} />
               </div>
               <div>
@@ -547,22 +731,29 @@ export default function AppTaiXe() {
           
           {tabHienTai === 'dashboard' && (
             <div className="space-y-5 p-5">
+              <section className={`flex items-center gap-4 rounded-2xl border p-4 ${driverTheme.mission}`}>
+                <div className="rounded-xl bg-white p-3 text-slate-700 shadow-sm"><PackageCheck size={22} /></div>
+                <div>
+                  <p className={`text-[10px] font-black uppercase tracking-wider ${driverTheme.missionLabel}`}>{isPickupDriver ? 'Chặng nhận hàng' : 'Chặng giao hàng'}</p>
+                  <p className="mt-1 text-sm font-bold text-slate-700">{isPickupDriver ? 'Nhận kiện từ cửa hàng và bàn giao đúng kho.' : 'Nhận kiện tại kho đích và giao trực tiếp cho người nhận.'}</p>
+                </div>
+              </section>
               <section className="flex items-center gap-5 rounded-[28px] bg-slate-900 p-5 text-white shadow-lg">
-                <div className="grid h-28 w-28 shrink-0 place-items-center rounded-full" style={{ background: `conic-gradient(#34d399 ${tienDoHomNay * 3.6}deg, #334155 0deg)` }}>
+                <div className="grid h-28 w-28 shrink-0 place-items-center rounded-full" style={{ background: `conic-gradient(${driverTheme.progress} ${tienDoHomNay * 3.6}deg, #334155 0deg)` }}>
                   <div className="grid h-20 w-20 place-items-center rounded-full bg-slate-900 text-center">
                     <span><strong className="block text-2xl">{tienDoHomNay}%</strong><small className="text-[9px] text-slate-400">HÔM NAY</small></span>
                   </div>
                 </div>
-                <div><p className="text-xs font-black uppercase tracking-wider text-emerald-300">Tiến độ hoàn thành</p><h3 className="mt-2 text-xl font-black">{donHoanTatHomNay}/{donTrongNgay} đơn</h3><p className="mt-1 text-xs text-slate-400">Cố lên, hoàn thành các nhiệm vụ còn lại!</p></div>
+                <div><p className={`text-xs font-black uppercase tracking-wider ${driverTheme.accent}`}>Tiến độ hoàn thành</p><h3 className="mt-2 text-xl font-black">{donHoanTatHomNay}/{donTrongNgay} đơn</h3><p className="mt-1 text-xs text-slate-400">Cố lên, hoàn thành các nhiệm vụ còn lại!</p></div>
               </section>
-              <section className="rounded-2xl border border-blue-100 bg-blue-50 p-4">
-                <div className="flex items-center justify-between"><p className="text-xs font-black uppercase tracking-wider text-blue-800">Nhiệm vụ tiếp theo · Gần bạn nhất</p><Navigation size={16} className="text-blue-600" /></div>
+              <section className={`rounded-2xl border p-4 ${driverTheme.mission}`}>
+                <div className="flex items-center justify-between"><p className={`text-xs font-black uppercase tracking-wider ${driverTheme.missionLabel}`}>{isPickupDriver ? 'Điểm nhận tiếp theo · Gần bạn nhất' : 'Điểm giao tiếp theo · Gần bạn nhất'}</p><Navigation size={16} className={isPickupDriver ? 'text-amber-600' : 'text-blue-600'} /></div>
                 {offlineSyncNotice && <p role="status" className="mb-3 rounded-lg bg-amber-100 p-3 text-xs font-bold text-amber-800">{offlineSyncNotice}</p>}
                 {nextMission ? <div className="mt-3">
                   <h3 className="font-black text-slate-800">{nextMission.tracking_code}</h3>
                   <p className="mt-1 text-sm text-slate-600">{isPickupDriver ? nextMission.shop_address : nextMission.receiver_address}</p>
-                  <p className="mt-1 text-xs font-bold text-blue-700">{Number.isFinite(nextMission.distance) ? `${nextMission.distance.toFixed(1)} km từ vị trí gần nhất` : 'Vị trí địa chỉ chưa có'}</p>
-                  <button type="button" onClick={() => setTabHienTai('thu-gom')} className="mt-3 rounded-lg bg-blue-600 px-4 py-2 text-sm font-bold text-white">Mở nhiệm vụ</button>
+                  <p className={`mt-1 text-xs font-bold ${driverTheme.missionLabel}`}>{Number.isFinite(nextMission.distance) ? `${nextMission.distance.toFixed(1)} km từ vị trí gần nhất` : 'Vị trí địa chỉ chưa có'}</p>
+                  <button type="button" onClick={() => setTabHienTai('thu-gom')} className={`mt-3 rounded-lg px-4 py-2 text-sm font-bold text-white ${driverTheme.action}`}>Mở nhiệm vụ</button>
                 </div> : <p className="mt-3 text-sm text-slate-600">Chưa có nhiệm vụ đang chờ. Hệ thống sẽ cập nhật khi Điều phối giao đơn.</p>}
               </section>
               <button type="button" onClick={() => setShowSos(true)} className="flex w-full items-center justify-center gap-2 rounded-2xl bg-red-600 p-4 font-black text-white shadow-md"><Siren size={19} /> SOS · Báo sự cố khẩn cấp</button>
@@ -572,9 +763,22 @@ export default function AppTaiXe() {
 
           {tabHienTai === 'thu-gom' && (
             <div className="p-5 space-y-4">
-              <h3 className="font-black text-base text-slate-800 flex items-center gap-2 mb-1">
-                <Navigation className="text-blue-600" size={18} /> {isPickupDriver ? 'Đơn cần lấy' : 'Đơn cần giao'} ({donDangChay.length})
-              </h3>
+              <div className="flex items-center justify-between gap-2">
+                <h3 className="font-black text-base text-slate-800 flex items-center gap-2 mb-1">
+                  <Navigation className="text-blue-600" size={18} /> {isPickupDriver ? 'Đơn cần lấy' : 'Đơn cần giao'} ({donDangChay.length})
+                </h3>
+                {!isPickupDriver && donDangChay.length > 1 && (
+                  <button type="button" onClick={toiUuTuyenGiao} className="flex shrink-0 items-center gap-1 rounded-lg bg-indigo-600 px-3 py-2 text-xs font-black text-white">
+                    <Route size={14} /> Tối ưu đường đi
+                  </button>
+                )}
+              </div>
+              {optimizedRouteIds.length > 0 && (
+                <div className="flex items-center justify-between rounded-lg bg-indigo-50 p-3 text-xs text-indigo-800">
+                  <span>Tuyến đã sắp xếp · ước tính {optimizedRouteDistance.toFixed(1)} km theo đường chim bay</span>
+                  <button type="button" onClick={() => { setOptimizedRouteIds([]); setOptimizedRouteDistance(null); }} className="font-black underline">Xóa</button>
+                </div>
+              )}
 
               {donDangChay.length === 0 ? (
                 <div className="bg-white p-8 rounded-2xl border border-slate-100 text-center mt-10">
@@ -583,7 +787,7 @@ export default function AppTaiXe() {
                   <p className="text-xs text-slate-400 mt-1">Đang chờ Điều phối viên chia đơn mới...</p>
                 </div>
               ) : (
-                donDangChay.map((don) => (
+                donTheoTuyen.map((don) => (
                   <div key={don.id} className="bg-white rounded-[24px] shadow-sm border border-slate-100 overflow-hidden relative">
                     <div className={`absolute top-0 left-0 w-1.5 h-full ${don.status === 'picking' ? 'bg-blue-500' : 'bg-amber-500'}`}></div>
                     <div className="p-5 pl-6">
@@ -682,6 +886,16 @@ export default function AppTaiXe() {
 
           {tabHienTai === 'wallet' && (
             <div className="space-y-4 p-5">
+              <section className="rounded-2xl border border-indigo-100 bg-white p-5 shadow-sm">
+                <p className="text-xs font-black uppercase tracking-wider text-slate-400">Ký quỹ bảo đảm đơn COD</p>
+                <h2 className="mt-2 text-3xl font-black text-indigo-700">{kyQuy.balance.toLocaleString()} đ</h2>
+                <div className="mt-3 grid grid-cols-2 gap-3 text-sm">
+                  <p className="rounded-lg bg-indigo-50 p-3 text-indigo-800">Đang giữ: <strong>{kyQuy.reserved.toLocaleString()} đ</strong></p>
+                  <p className="rounded-lg bg-emerald-50 p-3 text-emerald-800">Khả dụng: <strong>{kyQuy.available.toLocaleString()} đ</strong></p>
+                </div>
+                <p className="mt-3 text-xs text-slate-500">Ký quỹ được Kế toán cập nhật sau khi xác nhận nhận tiền. Phần đang giữ sẽ được giải phóng khi đơn được chuyển khoản, hoàn hàng hoặc kế toán xác nhận đã nhận COD tiền mặt.</p>
+                {kyQuy.available <= 0 && <p className="mt-2 rounded-lg bg-amber-50 p-2 text-xs font-bold text-amber-800">Ký quỹ khả dụng đã hết; Kế toán cần xác nhận nạp thêm để nhận đơn COD mới.</p>}
+              </section>
               <section className="rounded-2xl border border-emerald-100 bg-white p-5 shadow-sm">
                 <p className="text-xs font-black uppercase tracking-wider text-slate-400">Ví COD tiền mặt</p>
                 <h2 className="mt-2 text-3xl font-black text-emerald-700">{viTien.toLocaleString()} đ</h2>
@@ -690,6 +904,32 @@ export default function AppTaiXe() {
                 {!dangOnline && <p className="mt-2 text-xs font-semibold text-amber-700">Cần có kết nối mạng để lập phiếu nộp tiền.</p>}
               </section>
               <section className="rounded-2xl border border-slate-200 bg-white p-5"><p className="font-black text-slate-800">Tổng COD và cước đã thu hôm nay</p><p className="mt-2 text-2xl font-black text-red-600">{tongTienThuHo.toLocaleString()} đ</p></section>
+              <section className="rounded-2xl border border-orange-100 bg-white p-5 shadow-sm">
+                <h3 className="font-black text-slate-800">Gửi phụ phí và biên lai</h3>
+                <p className="mt-1 text-sm text-slate-500">Kế toán duyệt khoản hợp lệ và cộng vào bảng lương tháng phát sinh.</p>
+                {expenseNotice && <p role="status" className="mt-3 rounded-lg bg-blue-50 p-3 text-sm font-semibold text-blue-800">{expenseNotice}</p>}
+                <form onSubmit={guiYeuCauPhuPhi} className="mt-4 space-y-3">
+                  <select name="expense_type" required className="w-full rounded-xl border border-slate-200 bg-white p-3 text-sm">
+                    <option value="toll">Phí cầu đường</option><option value="parking">Phí gửi xe</option><option value="fuel">Nhiên liệu</option><option value="other">Khác</option>
+                  </select>
+                  <input name="amount" type="number" required min="1" max="10000000" step="0.01" placeholder="Số tiền (tối đa 10.000.000đ)" className="w-full rounded-xl border border-slate-200 p-3 text-sm" />
+                  <textarea name="note" required minLength={5} maxLength={500} rows={2} placeholder="Mô tả khoản chi" className="w-full rounded-xl border border-slate-200 p-3 text-sm" />
+                  <input name="receipt_image" type="file" required accept="image/jpeg,image/png,image/webp" className="w-full text-sm" />
+                  <button type="submit" disabled={expenseSubmitting || !dangOnline} className="w-full rounded-xl bg-orange-600 px-4 py-3 font-black text-white disabled:opacity-50">{expenseSubmitting ? 'Đang gửi...' : 'Gửi Kế toán duyệt'}</button>
+                  {!dangOnline && <p className="text-xs font-semibold text-amber-700">Cần kết nối mạng để tải ảnh biên lai.</p>}
+                </form>
+                <div className="mt-5 border-t border-slate-100 pt-4">
+                  <div className="mb-3 flex items-center justify-between"><h4 className="font-bold text-slate-700">Lịch sử yêu cầu</h4><button type="button" onClick={() => taiYeuCauPhuPhi().catch((error) => setExpenseNotice(error.message))} className="text-sm font-bold text-blue-700">Làm mới</button></div>
+                  <div className="space-y-2">
+                    {expenseClaims.map((claim) => <article key={claim.id} className="rounded-xl bg-slate-50 p-3 text-sm">
+                      <div className="flex justify-between gap-2"><strong>{({ toll: 'Cầu đường', parking: 'Gửi xe', fuel: 'Nhiên liệu', other: 'Khác' })[claim.expense_type]}</strong><strong>{Number(claim.amount).toLocaleString()} đ</strong></div>
+                      <p className="mt-1 text-slate-600">{claim.note}</p>
+                      <p className="mt-1 text-xs font-bold text-slate-500">Trạng thái: {claim.status === 'pending' ? 'Chờ duyệt' : claim.status === 'approved' ? 'Đã duyệt' : 'Từ chối'}{claim.review_note ? ` · ${claim.review_note}` : ''}</p>
+                    </article>)}
+                    {!expenseClaims.length && <p className="text-sm text-slate-500">Chưa có yêu cầu phụ phí.</p>}
+                  </div>
+                </div>
+              </section>
             </div>
           )}
 
@@ -873,6 +1113,23 @@ export default function AppTaiXe() {
                         </div>
                       </fieldset>
                     )}
+                    <div className="mt-4 border-t border-emerald-200 pt-3">
+                      <div className="mb-2 flex items-center justify-between">
+                        <label htmlFor="recipient-signature" className="text-xs font-black uppercase text-emerald-800">Chữ ký người nhận (*)</label>
+                        <button type="button" onClick={xoaChuKy} className="text-xs font-bold text-slate-500 underline">Xóa chữ ký</button>
+                      </div>
+                      <canvas
+                        id="recipient-signature"
+                        ref={signatureCanvasRef}
+                        width={600}
+                        height={180}
+                        onPointerDown={batDauVeChuKy}
+                        onPointerMove={veChuKy}
+                        className="h-36 w-full touch-none rounded-lg border border-emerald-200 bg-white"
+                        aria-label="Vùng ký xác nhận của người nhận"
+                      />
+                      <p className="mt-1 text-[11px] text-emerald-800">Người nhận ký trực tiếp trên màn hình. Chữ ký được tải lên cùng ảnh minh chứng khi có kết nối mạng.</p>
+                    </div>
                   </div>
                 )}
 

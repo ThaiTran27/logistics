@@ -10,8 +10,21 @@ DROP TABLE IF EXISTS driver_positions;
 DROP TABLE IF EXISTS driver_routes;
 DROP TABLE IF EXISTS chat_messages;
 DROP TABLE IF EXISTS chat_sessions;
+DROP TABLE IF EXISTS driver_wallet_transactions;
+DROP TABLE IF EXISTS driver_wallet_reservations;
+DROP TABLE IF EXISTS driver_wallets;
+DROP TABLE IF EXISTS driver_cash_remittances;
+DROP TABLE IF EXISTS driver_expense_claims;
 DROP TABLE IF EXISTS cod_settlements;
+DROP TABLE IF EXISTS shop_redelivery_requests;
+DROP TABLE IF EXISTS shop_webhook_configs;
+DROP TABLE IF EXISTS shop_api_keys;
 DROP TABLE IF EXISTS notifications;
+DROP TABLE IF EXISTS warehouse_bin_locations;
+DROP TABLE IF EXISTS warehouse_inventory_audit_scans;
+DROP TABLE IF EXISTS warehouse_inventory_audit_items;
+DROP TABLE IF EXISTS warehouse_inventory_audits;
+DROP TABLE IF EXISTS driver_dispatch_profiles;
 DROP TABLE IF EXISTS warehouses;
 DROP TABLE IF EXISTS order_status_history;
 DROP TABLE IF EXISTS service_requests;
@@ -49,6 +62,8 @@ CREATE TABLE orders (
   origin_warehouse_id INT NULL,
   destination_warehouse_id INT NULL,
   current_warehouse_id INT NULL,
+  storage_bin_id BIGINT NULL,
+  cross_docked TINYINT(1) NOT NULL DEFAULT 0,
   shop_address TEXT DEFAULT NULL,
   shop_province VARCHAR(255) DEFAULT 'Hồ Chí Minh',
   shop_lat DOUBLE DEFAULT 10.762622,
@@ -83,6 +98,7 @@ CREATE TABLE orders (
   insurance_fee DECIMAL(12,2) NOT NULL DEFAULT 0,
   is_cod_paid TINYINT(1) DEFAULT 0,
   proof_image VARCHAR(255) DEFAULT NULL,
+  signature_image VARCHAR(255) DEFAULT NULL,
   fail_reason TEXT DEFAULT NULL,
   status VARCHAR(50) NOT NULL DEFAULT 'pending',
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -106,6 +122,7 @@ CREATE TABLE order_status_history (
   to_status VARCHAR(50) NOT NULL,
   note TEXT DEFAULT NULL,
   proof_image VARCHAR(255) DEFAULT NULL,
+  signature_image VARCHAR(255) DEFAULT NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   KEY idx_order_status_history_order (order_id, created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -162,6 +179,55 @@ CREATE TABLE warehouses (
   KEY idx_warehouse_type_active (warehouse_type, is_active)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+CREATE TABLE warehouse_bin_locations (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  warehouse_id INT NOT NULL,
+  bin_code VARCHAR(80) NOT NULL,
+  bin_name VARCHAR(120) NOT NULL,
+  is_active TINYINT(1) NOT NULL DEFAULT 1,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_warehouse_bin_code (warehouse_id, bin_code),
+  KEY idx_warehouse_bin_active (warehouse_id, is_active)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE warehouse_inventory_audits (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  warehouse_id INT NOT NULL,
+  created_by INT NOT NULL,
+  status ENUM('open','completed') NOT NULL DEFAULT 'open',
+  expected_count INT NOT NULL DEFAULT 0,
+  scanned_count INT NOT NULL DEFAULT 0,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  completed_at DATETIME DEFAULT NULL,
+  KEY idx_inventory_audit_warehouse (warehouse_id, status, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE warehouse_inventory_audit_items (
+  audit_id BIGINT NOT NULL,
+  order_id INT NOT NULL,
+  tracking_code VARCHAR(100) NOT NULL,
+  PRIMARY KEY (audit_id, order_id),
+  UNIQUE KEY uq_inventory_audit_code (audit_id, tracking_code)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE warehouse_inventory_audit_scans (
+  audit_id BIGINT NOT NULL,
+  scan_code VARCHAR(100) NOT NULL,
+  order_id INT DEFAULT NULL,
+  scanned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (audit_id, scan_code),
+  KEY idx_inventory_audit_scan_order (audit_id, order_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE driver_dispatch_profiles (
+  driver_id INT PRIMARY KEY,
+  max_active_orders INT NOT NULL DEFAULT 10,
+  max_payload_kg DECIMAL(10,2) NOT NULL DEFAULT 100,
+  service_areas TEXT NOT NULL,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 INSERT INTO warehouses (warehouse_type, ward_name, name, address, lat, lng, is_configured, is_active)
 VALUES ('central', '__CENTRAL__', 'Kho tổng Smart Logistics', '10.762622, 106.660172, TP. Hồ Chí Minh', 10.762622, 106.660172, 1, 1);
 
@@ -176,6 +242,38 @@ CREATE TABLE cod_settlements (
   order_count INT NOT NULL DEFAULT 0,
   settled_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   KEY idx_cod_settlements_shop (shop_id, settled_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE shop_api_keys (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  shop_id INT NOT NULL,
+  name VARCHAR(100) NOT NULL,
+  key_prefix VARCHAR(24) NOT NULL,
+  key_hash CHAR(64) NOT NULL UNIQUE,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  last_used_at DATETIME DEFAULT NULL,
+  revoked_at DATETIME DEFAULT NULL,
+  KEY idx_shop_api_keys_owner (shop_id, revoked_at, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE shop_webhook_configs (
+  shop_id INT PRIMARY KEY,
+  target_url VARCHAR(2048) DEFAULT NULL,
+  secret_ciphertext TEXT DEFAULT NULL,
+  enabled TINYINT(1) NOT NULL DEFAULT 0,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE shop_redelivery_requests (
+  order_id INT PRIMARY KEY,
+  shop_id INT NOT NULL,
+  status ENUM('pending','approved','rejected') NOT NULL DEFAULT 'pending',
+  request_note TEXT NOT NULL,
+  requested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  reviewed_at DATETIME DEFAULT NULL,
+  reviewed_by INT DEFAULT NULL,
+  review_note TEXT DEFAULT NULL,
+  KEY idx_redelivery_shop_status (shop_id, status, requested_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE shipment_bags (
@@ -231,6 +329,52 @@ CREATE TABLE driver_cash_remittances (
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   received_at DATETIME DEFAULT NULL,
   KEY idx_driver_cash_remittance (driver_id, status, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE driver_expense_claims (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  driver_id INT NOT NULL,
+  expense_type ENUM('toll','parking','fuel','other') NOT NULL,
+  amount DECIMAL(12,2) NOT NULL,
+  note VARCHAR(500) NOT NULL,
+  receipt_image VARCHAR(255) NOT NULL,
+  status ENUM('pending','approved','rejected') NOT NULL DEFAULT 'pending',
+  reviewed_by INT DEFAULT NULL,
+  review_note VARCHAR(500) DEFAULT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  reviewed_at DATETIME DEFAULT NULL,
+  KEY idx_driver_expense_status (status, created_at),
+  KEY idx_driver_expense_owner (driver_id, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE driver_wallets (
+  driver_id INT PRIMARY KEY,
+  balance DECIMAL(12,2) NOT NULL DEFAULT 0,
+  reserved_balance DECIMAL(12,2) NOT NULL DEFAULT 0,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE driver_wallet_reservations (
+  order_id INT PRIMARY KEY,
+  driver_id INT NOT NULL,
+  amount DECIMAL(12,2) NOT NULL,
+  status ENUM('reserved','released') NOT NULL DEFAULT 'reserved',
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  released_at DATETIME DEFAULT NULL,
+  KEY idx_driver_wallet_reservation (driver_id, status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE driver_wallet_transactions (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  driver_id INT NOT NULL,
+  order_id INT DEFAULT NULL,
+  transaction_type ENUM('deposit','reserve','release') NOT NULL,
+  amount DECIMAL(12,2) NOT NULL,
+  note VARCHAR(255) DEFAULT NULL,
+  created_by INT DEFAULT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_driver_wallet_transactions (driver_id, created_at),
+  KEY idx_driver_wallet_order (order_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE driver_incidents (

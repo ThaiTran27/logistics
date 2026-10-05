@@ -1,3 +1,4 @@
+import { apiFetch as fetch } from '../../utils/apiFetch.js';
 import { useEffect, useState } from 'react';
 import { io } from 'socket.io-client';
 import { MapContainer, Marker, Popup, TileLayer, useMap } from 'react-leaflet';
@@ -45,6 +46,7 @@ export default function TraCuuHanhTrinh() {
         driver_location: { lat: position.lat, lng: position.lng, updated_at: position.timestamp }
       }));
     };
+    trackingSocket.emit('join_order_tracking', { tracking_code: thongTinDon.tracking_code });
     trackingSocket.on('driver_location_changed', updateDriverPosition);
     return () => trackingSocket.off('driver_location_changed', updateDriverPosition);
   }, [thongTinDon?.id]);

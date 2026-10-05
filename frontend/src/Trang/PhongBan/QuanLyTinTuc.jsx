@@ -1,3 +1,4 @@
+import { apiFetch as fetch } from '../../utils/apiFetch.js';
 import { useEffect, useState } from 'react';
 import { FileText, ImageIcon, Newspaper, Sparkles, CheckCircle2, LogOut, Briefcase, LayoutGrid, PlusCircle } from 'lucide-react';
 

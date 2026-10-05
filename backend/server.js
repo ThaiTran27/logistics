@@ -2,9 +2,13 @@ const express = require('express');
 const mysql = require('mysql');
 const cors = require('cors');
 const http = require('http'); 
+const https = require('https');
+const dns = require('dns').promises;
+const net = require('net');
 const { Server } = require('socket.io'); 
 const multer = require('multer');
 const crypto = require('crypto');
+const { promisify } = require('util');
 const nodemailer = require('nodemailer');
 const PDFDocument = require('pdfkit');
 const fs = require('fs');
@@ -12,6 +16,8 @@ const path = require('path');
 const jwt = require('jsonwebtoken');
 
 const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(32).toString('hex');
+const scrypt = promisify(crypto.scrypt);
+const PASSWORD_HASH_PREFIX = 'scrypt';
 if (!process.env.JWT_SECRET) {
   console.warn('JWT_SECRET chưa cấu hình; token đăng nhập sẽ hết hiệu lực khi máy chủ khởi động lại.');
 }
@@ -26,6 +32,53 @@ const chatAgentRoles = new Set([
   'admin', 'director', 'customer_service', 'customer_support', 'cskh', 'support',
   'fleet_manager', 'fleet', 'coordinator', 'dispatcher', 'dieu_hanh'
 ]);
+const driverRoles = new Set(['pickup_driver', 'delivery_driver']);
+const staffRoles = new Set([
+  'pickup_driver', 'delivery_driver', 'warehouse_manager', 'fleet_manager',
+  'accountant', 'hr_manager', 'director', 'shop', 'content_manager', 'customer_service'
+]);
+const staffStatuses = new Set(['active', 'inactive']);
+const normalizeRole = (value) => {
+  const role = String(value || '').trim().toLowerCase();
+  const aliases = {
+    hr: 'hr_manager',
+    human_resources: 'hr_manager',
+    nhan_su: 'hr_manager',
+    fleet: 'fleet_manager',
+    dispatcher: 'fleet_manager',
+    coordinator: 'fleet_manager',
+    dieu_hanh: 'fleet_manager',
+    warehouse: 'warehouse_manager',
+    kho: 'warehouse_manager',
+    content: 'content_manager',
+    content_team: 'content_manager',
+    phong_ban_noi_dung: 'content_manager',
+    marketing: 'content_manager',
+    cskh: 'customer_service',
+    customer_support: 'customer_service',
+    support: 'customer_service',
+    admin: 'director'
+  };
+  return aliases[role] || role;
+};
+const hashPassword = async (password) => {
+  const salt = crypto.randomBytes(16);
+  const derivedKey = await scrypt(password, salt, 64);
+  return `${PASSWORD_HASH_PREFIX}$${salt.toString('hex')}$${derivedKey.toString('hex')}`;
+};
+const verifyPassword = async (password, storedPassword) => {
+  if (!storedPassword.startsWith(`${PASSWORD_HASH_PREFIX}$`)) {
+    const supplied = Buffer.from(password);
+    const stored = Buffer.from(storedPassword);
+    return supplied.length === stored.length && crypto.timingSafeEqual(supplied, stored);
+  }
+  const [, saltHex, keyHex, ...extra] = storedPassword.split('$');
+  if (extra.length || !/^[\da-f]{32}$/i.test(saltHex || '')
+    || !/^[\da-f]{128}$/i.test(keyHex || '')) return false;
+  const expectedKey = Buffer.from(keyHex, 'hex');
+  const suppliedKey = await scrypt(password, Buffer.from(saltHex, 'hex'), expectedKey.length);
+  return crypto.timingSafeEqual(suppliedKey, expectedKey);
+};
 const authenticateUser = (req, res, next) => {
   const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
   if (!token) return res.status(401).json({ success: false, message: 'Vui lòng đăng nhập lại.' });
@@ -39,13 +92,214 @@ const authenticateUser = (req, res, next) => {
     });
   });
 };
-const requireChatAgent = (req, res, next) => authenticateUser(req, res, () => {
+const publicApiRequest = (req) => {
+  const method = req.method.toUpperCase();
+  const route = req.path;
+  return (method === 'POST' && [
+    '/api/login',
+    '/api/chat/sessions',
+    '/api/chat/ai',
+    '/api/v1/orders',
+    '/api/public/service-requests',
+    '/api/public/job-applications'
+  ].includes(route))
+    || (method === 'GET' && (
+      route === '/api/docs'
+      || route === '/api/openapi.json'
+      || /^\/api\/public\/linehaul-manifests\/[^/]+$/.test(route)
+      || route === '/api/news'
+      || /^\/api\/news\/\d+$/.test(route)
+      || /^\/api\/orders\/track\/[^/]+$/.test(route)
+      || /^\/api\/chat\/sessions\/\d+\/messages$/.test(route)
+    ));
+};
+const apiRolesForRequest = (req) => {
+  const method = req.method.toUpperCase();
+  const route = req.path;
+  if (route.startsWith('/api/shop/integrations') || route.startsWith('/api/shop/rma')) return new Set(['shop']);
+  if (route === '/api/dispatcher/rma' || /^\/api\/dispatcher\/rma\/\d+$/.test(route)) {
+    return new Set(['fleet_manager', 'director']);
+  }
+  if (route === '/api/dispatcher/driver-profiles' || /^\/api\/dispatcher\/driver-profiles\/\d+$/.test(route)
+    || route === '/api/dispatcher/auto-dispatch/preview') return new Set(['fleet_manager', 'director']);
+  if (route === '/api/chat/sessions' && method === 'GET'
+    || /^\/api\/chat\/sessions\/\d+\/(context|close)$/.test(route)) return chatAgentRoles;
+  if (route.startsWith('/api/admin/')) return new Set(['director']);
+  if (route.startsWith('/api/accountant/')) return new Set(['accountant', 'director']);
+  if (route === '/api/hr/leave' && method === 'POST') return new Set([...staffRoles].filter((role) => role !== 'customer'));
+  if (route.startsWith('/api/hr/')) return new Set(['hr_manager', 'director']);
+  if (route === '/api/news/admin' || route.startsWith('/api/news/') && method !== 'GET'
+    || route === '/api/news' && method !== 'GET') return new Set(['content_manager', 'director']);
+  if (route === '/api/notifications' || route.startsWith('/api/notifications/')) return staffRoles;
+  if (route === '/api/warehouses' && method === 'GET') return staffRoles;
+  if (route === '/api/warehouses' || route.startsWith('/api/warehouses/')) return new Set(['warehouse_manager', 'director']);
+  if (route.startsWith('/api/warehouse/') || route === '/api/warehouse') return new Set(['warehouse_manager', 'fleet_manager', 'director']);
+  if (route.startsWith('/api/linehaul/')) return new Set(['warehouse_manager', 'fleet_manager', 'director']);
+  if (route === '/api/shippers') return new Set(['warehouse_manager', 'fleet_manager', 'director']);
+  if (route === '/api/driver/live') return new Set(['warehouse_manager', 'fleet_manager', 'director']);
+  if (route === '/api/driver/location' || route.startsWith('/api/driver/wallet/')
+    || route === '/api/driver/cash-remittances' || route === '/api/driver/incidents'
+    || route === '/api/driver/expense-claims'
+    || route === '/api/driver/trips/scan') return driverRoles;
+  if (route === '/api/orders' && method === 'GET') {
+    return new Set(['shop', 'warehouse_manager', 'fleet_manager', 'accountant', 'director']);
+  }
+  if (route === '/api/orders' && method === 'POST') return new Set(['shop']);
+  if (/^\/api\/orders\/\d+\/assign$/.test(route)) return new Set(['fleet_manager', 'director']);
+  if (/^\/api\/orders\/shipper\/\d+$/.test(route)) return driverRoles;
+  if (/^\/api\/orders\/\d+\/status$/.test(route)) return driverRoles;
+  if (/^\/api\/orders\/\d+\/route$/.test(route)) {
+    return new Set(['shop', 'warehouse_manager', 'fleet_manager', 'director', ...driverRoles]);
+  }
+  if (route === '/api/attendance' && method === 'GET') return staffRoles;
+  if (route.startsWith('/api/attendance/')) return staffRoles;
+  if (route === '/api/reports' && method === 'POST') return new Set(['fleet_manager', 'director']);
+  return null;
+};
+app.use((req, res, next) => {
+  if (!req.path.startsWith('/api/')) return next();
+  if (publicApiRequest(req)) return next();
+  req.body = req.body || {};
+  authenticateUser(req, res, () => {
+    const allowedRoles = apiRolesForRequest(req);
+    const role = normalizeRole(req.authUser.role);
+    req.authRole = role;
+    if (!allowedRoles || !allowedRoles.has(role)) {
+      return res.status(403).json({ success: false, message: 'Tài khoản không có quyền truy cập API này.' });
+    }
+    if (req.path === '/api/orders' && req.method === 'GET' && role === 'shop') {
+      req.shopScopeId = req.authUser.id;
+    }
+    if (req.path === '/api/orders' && req.method === 'POST') {
+      req.body.shop_id = req.authUser.id;
+    }
+    if (req.path === '/api/hr/leave' && req.method === 'POST') {
+      req.body.user_id = req.authUser.id;
+    }
+    if (req.path === '/api/reports' && req.method === 'POST') {
+      req.body.created_by = req.authUser.id;
+    }
+    next();
+  });
+});
+const requireChatAgent = (req, res, next) => {
+  const authorizeAgent = () => {
   if (!chatAgentRoles.has(String(req.authUser.role || '').toLowerCase())) {
     return res.status(403).json({ success: false, message: 'Tài khoản không có quyền truy cập Trung tâm Hỗ trợ.' });
   }
   next();
-});
+  };
+  if (req.authUser) return authorizeAgent();
+  authenticateUser(req, res, authorizeAgent);
+};
 const hashChatToken = (token) => crypto.createHash('sha256').update(token).digest('hex');
+const hashApiKey = (key) => crypto.createHash('sha256').update(key).digest('hex');
+const stableWebhookEncryptionSecret = process.env.WEBHOOK_ENCRYPTION_KEY || process.env.JWT_SECRET;
+const webhookEncryptionKey = stableWebhookEncryptionSecret
+  ? crypto.createHash('sha256').update(stableWebhookEncryptionSecret).digest()
+  : null;
+const encryptWebhookSecret = (secret) => {
+  if (!webhookEncryptionKey) throw new Error('Cần cấu hình WEBHOOK_ENCRYPTION_KEY hoặc JWT_SECRET ổn định.');
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', webhookEncryptionKey, iv);
+  const encrypted = Buffer.concat([cipher.update(secret, 'utf8'), cipher.final()]);
+  return Buffer.concat([iv, cipher.getAuthTag(), encrypted]).toString('base64');
+};
+const decryptWebhookSecret = (payload) => {
+  if (!webhookEncryptionKey) throw new Error('Cần cấu hình WEBHOOK_ENCRYPTION_KEY hoặc JWT_SECRET ổn định.');
+  const encrypted = Buffer.from(payload, 'base64');
+  if (encrypted.length < 29) throw new Error('Webhook secret storage is invalid.');
+  const iv = encrypted.subarray(0, 12);
+  const authTag = encrypted.subarray(12, 28);
+  const decipher = crypto.createDecipheriv('aes-256-gcm', webhookEncryptionKey, iv);
+  decipher.setAuthTag(authTag);
+  return Buffer.concat([decipher.update(encrypted.subarray(28)), decipher.final()]).toString('utf8');
+};
+const isPublicWebhookAddress = (address) => {
+  const ipVersion = net.isIP(address);
+  if (ipVersion === 4) {
+    const octets = address.split('.').map(Number);
+    const [first, second] = octets;
+    return !(first === 0 || first === 10 || first === 127
+      || first >= 224
+      || first === 169 && second === 254
+      || first === 172 && second >= 16 && second <= 31
+      || first === 192 && second === 168
+      || first === 100 && second >= 64 && second <= 127
+      || first === 192 && second === 0
+      || first === 192 && second === 88 && octets[2] === 99
+      || first === 198 && (second === 18 || second === 19
+        || second === 51 && octets[2] === 100)
+      || first === 203 && second === 0 && octets[2] === 113);
+  }
+  if (ipVersion === 6) {
+    const normalized = address.toLowerCase();
+    return !(normalized === '::' || normalized === '::1'
+      || normalized.startsWith('fc') || normalized.startsWith('fd')
+      || normalized.startsWith('fe8') || normalized.startsWith('fe9')
+      || normalized.startsWith('fea') || normalized.startsWith('feb')
+      || normalized.startsWith('fec')
+      || normalized.startsWith('ff')
+      || normalized.startsWith('::ffff:'));
+  }
+  return false;
+};
+const validateWebhookTarget = async (target) => {
+  let endpoint;
+  try {
+    endpoint = new URL(target);
+  } catch {
+    throw new Error('Webhook URL không hợp lệ.');
+  }
+  if (endpoint.protocol !== 'https:' || endpoint.username || endpoint.password
+    || endpoint.port && endpoint.port !== '443') {
+    throw new Error('Webhook chỉ chấp nhận HTTPS công khai trên cổng 443.');
+  }
+  const hostname = endpoint.hostname.replace(/^\[|\]$/g, '');
+  if (net.isIP(hostname)) {
+    if (!isPublicWebhookAddress(hostname)) throw new Error('Webhook URL không được trỏ đến địa chỉ mạng nội bộ.');
+    return { endpoint, address: hostname };
+  }
+  if (!hostname.includes('.') || hostname === 'localhost' || hostname.endsWith('.local')) {
+    throw new Error('Webhook URL phải dùng tên miền công khai.');
+  }
+  const addresses = await dns.lookup(hostname, { all: true, verbatim: true });
+  if (!addresses.length || addresses.some(({ address }) => !isPublicWebhookAddress(address))) {
+    throw new Error('Tên miền webhook không được trỏ đến địa chỉ mạng nội bộ.');
+  }
+  return { endpoint, address: addresses[0].address };
+};
+const postSignedWebhook = async (target, secret, payload) => {
+  const { endpoint, address } = await validateWebhookTarget(target);
+  const body = JSON.stringify(payload);
+  const signature = crypto.createHmac('sha256', secret).update(body).digest('hex');
+  await new Promise((resolve, reject) => {
+    const request = https.request(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(body),
+        'X-SmartLogistics-Signature': `sha256=${signature}`,
+        'X-SmartLogistics-Event': payload.event
+      },
+      timeout: 5000,
+      lookup: (_hostname, options, callback) => {
+        const family = net.isIP(address);
+        if (options && options.all) return callback(null, [{ address, family }]);
+        callback(null, address, family);
+      }
+    }, (response) => {
+      response.resume();
+      response.on('end', () => {
+        if (response.statusCode >= 200 && response.statusCode < 300) return resolve();
+        reject(new Error(`Webhook trả về HTTP ${response.statusCode}.`));
+      });
+    });
+    request.on('timeout', () => request.destroy(new Error('Webhook hết thời gian chờ.')));
+    request.on('error', reject);
+    request.end(body);
+  });
+};
 const redactDeliveryOtp = (rows) => rows.map((row) => {
   const safeRow = { ...row };
   delete safeRow.delivery_otp;
@@ -110,6 +364,23 @@ const storage = multer.diskStorage({
   }
 });
 const upload = multer({ storage: storage });
+const podStorage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, uploadDir),
+  filename: (req, file, cb) => {
+    const extension = file.mimetype === 'image/jpeg' ? 'jpg' : file.mimetype === 'image/webp' ? 'webp' : 'png';
+    cb(null, `pod-${Date.now()}-${crypto.randomBytes(8).toString('hex')}.${extension}`);
+  }
+});
+const podUpload = multer({
+  storage: podStorage,
+  limits: { fileSize: 8 * 1024 * 1024, files: 2 },
+  fileFilter: (req, file, cb) => {
+    if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.mimetype)) {
+      return cb(new Error('Bằng chứng giao hàng chỉ chấp nhận ảnh JPG, PNG hoặc WEBP.'));
+    }
+    cb(null, true);
+  }
+});
 const reportStorage = multer.diskStorage({
   destination: function (req, file, cb) {
     cb(null, uploadDir);
@@ -274,6 +545,12 @@ io.use((socket, next) => {
       if (err) return next(new Error('Không thể xác thực kết nối.'));
       if (!users.length) return next(new Error('Tài khoản không còn hoạt động.'));
       socket.data.authUser = users[0];
+      socket.join(`user:${users[0].id}`);
+      const role = normalizeRole(users[0].role);
+      if (role === 'shop') socket.join(`shop:${users[0].id}`);
+      if (['fleet_manager', 'warehouse_manager', 'director'].includes(role)) {
+        socket.join('fleet_tracking');
+      }
       if (chatAgentRoles.has(String(users[0].role || '').toLowerCase())) socket.join('support_agents');
       next();
     });
@@ -285,16 +562,71 @@ io.on('connection', (socket) => {
 
   socket.on('driver_update_location', (data) => {
     const payload = data || {};
-    if (payload.shipper_id && payload.lat && payload.lng) {
-      db.query(
-        'INSERT INTO driver_positions (order_id, shipper_id, lat, lng, route_status) VALUES (?, ?, ?, ?, ?)',
-        [payload.order_id || null, payload.shipper_id, payload.lat, payload.lng, payload.route_status || 'moving'],
-        (err) => {
-          if (err) console.error('Lỗi lưu vị trí tài xế realtime:', err);
+    const authUser = socket.data.authUser;
+    const latitude = Number(payload.lat);
+    const longitude = Number(payload.lng);
+    const orderId = Number(payload.order_id);
+    if (!authUser || !driverRoles.has(normalizeRole(authUser.role))
+      || Number(payload.shipper_id) !== Number(authUser.id)
+      || !Number.isFinite(latitude) || Math.abs(latitude) > 90
+      || !Number.isFinite(longitude) || Math.abs(longitude) > 180
+      || !Number.isInteger(orderId) || orderId <= 0) return;
+    db.query(
+      `INSERT INTO driver_positions (order_id, shipper_id, lat, lng, route_status)
+       SELECT o.id, ?, ?, ?, ?
+       FROM orders o
+       WHERE o.id = ? AND (
+         (o.pickup_shipper_id = ? AND o.status IN ('picking','picked_up'))
+         OR (o.central_transfer_shipper_id = ? AND o.status = 'transferring_to_central')
+         OR (o.destination_transfer_shipper_id = ? AND o.status = 'transferring_to_destination')
+         OR (o.delivery_shipper_id = ? AND o.status = 'delivering')
+       )
+       LIMIT 1`,
+      [authUser.id, latitude, longitude, payload.route_status || 'moving', orderId, authUser.id, authUser.id, authUser.id, authUser.id],
+      (err, result) => {
+        if (err) {
+          console.error('Lỗi lưu vị trí tài xế realtime:', err);
+          return;
         }
-      );
+        if (!result.affectedRows) return;
+        const position = {
+          ...payload,
+          shipper_id: authUser.id,
+          order_id: orderId,
+          lat: latitude,
+          lng: longitude,
+          timestamp: new Date()
+        };
+        io.to('fleet_tracking').emit('driver_location_changed', position);
+        io.to(`order_tracking:${orderId}`).emit('driver_location_changed', position);
+      }
+    );
+  });
+
+  socket.on('join_order_tracking', (data = {}, acknowledge = () => {}) => {
+    const orderId = Number(data.order_id);
+    const trackingCode = String(data.tracking_code || '').trim().toUpperCase();
+    if ((!Number.isSafeInteger(orderId) || orderId <= 0) && !trackingCode) {
+      return acknowledge({ success: false, message: 'Cần mã đơn hoặc mã vận đơn hợp lệ.' });
     }
-    io.emit('driver_location_changed', payload);
+    const queryById = Boolean(socket.data.authUser && orderId);
+    const query = queryById
+      ? 'SELECT id, shop_id FROM orders WHERE id = ? LIMIT 1'
+      : 'SELECT id, shop_id FROM orders WHERE tracking_code = ? LIMIT 1';
+    db.query(query, [queryById ? orderId : trackingCode], (err, orders) => {
+      if (err) return acknowledge({ success: false, message: 'Không thể mở theo dõi vận đơn.' });
+      const order = orders[0];
+      if (!order) return acknowledge({ success: false, message: 'Không tìm thấy vận đơn.' });
+      const authUser = socket.data.authUser;
+      const role = authUser ? normalizeRole(authUser.role) : '';
+      const canTrack = !authUser
+        ? Boolean(trackingCode)
+        : ['director', 'fleet_manager', 'warehouse_manager'].includes(role)
+          || role === 'shop' && Number(order.shop_id) === Number(authUser.id);
+      if (!canTrack) return acknowledge({ success: false, message: 'Không có quyền theo dõi vận đơn này.' });
+      socket.join(`order_tracking:${order.id}`);
+      acknowledge({ success: true, order_id: order.id });
+    });
   });
 
   socket.on('join_chat', (data = {}, acknowledge = () => {}) => {
@@ -476,6 +808,60 @@ db.connect((err) => {
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `,
     `
+      CREATE TABLE IF NOT EXISTS warehouse_bin_locations (
+        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+        warehouse_id INT NOT NULL,
+        bin_code VARCHAR(80) NOT NULL,
+        bin_name VARCHAR(120) NOT NULL,
+        is_active TINYINT(1) NOT NULL DEFAULT 1,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uq_warehouse_bin_code (warehouse_id, bin_code),
+        KEY idx_warehouse_bin_active (warehouse_id, is_active)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `,
+    `
+      CREATE TABLE IF NOT EXISTS warehouse_inventory_audits (
+        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+        warehouse_id INT NOT NULL,
+        created_by INT NOT NULL,
+        status ENUM('open','completed') NOT NULL DEFAULT 'open',
+        expected_count INT NOT NULL DEFAULT 0,
+        scanned_count INT NOT NULL DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        completed_at DATETIME DEFAULT NULL,
+        KEY idx_inventory_audit_warehouse (warehouse_id, status, created_at)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `,
+    `
+      CREATE TABLE IF NOT EXISTS warehouse_inventory_audit_items (
+        audit_id BIGINT NOT NULL,
+        order_id INT NOT NULL,
+        tracking_code VARCHAR(100) NOT NULL,
+        PRIMARY KEY (audit_id, order_id),
+        UNIQUE KEY uq_inventory_audit_code (audit_id, tracking_code)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `,
+    `
+      CREATE TABLE IF NOT EXISTS warehouse_inventory_audit_scans (
+        audit_id BIGINT NOT NULL,
+        scan_code VARCHAR(100) NOT NULL,
+        order_id INT DEFAULT NULL,
+        scanned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (audit_id, scan_code),
+        KEY idx_inventory_audit_scan_order (audit_id, order_id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `,
+    `
+      CREATE TABLE IF NOT EXISTS driver_dispatch_profiles (
+        driver_id INT PRIMARY KEY,
+        max_active_orders INT NOT NULL DEFAULT 10,
+        max_payload_kg DECIMAL(10,2) NOT NULL DEFAULT 100,
+        service_areas TEXT NOT NULL,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `,
+    `
       CREATE TABLE IF NOT EXISTS order_status_history (
         id BIGINT AUTO_INCREMENT PRIMARY KEY,
         order_id INT NOT NULL,
@@ -483,6 +869,7 @@ db.connect((err) => {
         to_status VARCHAR(50) NOT NULL,
         note TEXT DEFAULT NULL,
         proof_image VARCHAR(255) DEFAULT NULL,
+        signature_image VARCHAR(255) DEFAULT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         KEY idx_order_status_history_order (order_id, created_at)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
@@ -499,6 +886,41 @@ db.connect((err) => {
         order_count INT NOT NULL DEFAULT 0,
         settled_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         KEY idx_cod_settlements_shop (shop_id, settled_at)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `,
+    `
+      CREATE TABLE IF NOT EXISTS shop_api_keys (
+        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+        shop_id INT NOT NULL,
+        name VARCHAR(100) NOT NULL,
+        key_prefix VARCHAR(24) NOT NULL,
+        key_hash CHAR(64) NOT NULL UNIQUE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        last_used_at DATETIME DEFAULT NULL,
+        revoked_at DATETIME DEFAULT NULL,
+        KEY idx_shop_api_keys_owner (shop_id, revoked_at, created_at)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `,
+    `
+      CREATE TABLE IF NOT EXISTS shop_webhook_configs (
+        shop_id INT PRIMARY KEY,
+        target_url VARCHAR(2048) DEFAULT NULL,
+        secret_ciphertext TEXT DEFAULT NULL,
+        enabled TINYINT(1) NOT NULL DEFAULT 0,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `,
+    `
+      CREATE TABLE IF NOT EXISTS shop_redelivery_requests (
+        order_id INT PRIMARY KEY,
+        shop_id INT NOT NULL,
+        status ENUM('pending','approved','rejected') NOT NULL DEFAULT 'pending',
+        request_note TEXT NOT NULL,
+        requested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        reviewed_at DATETIME DEFAULT NULL,
+        reviewed_by INT DEFAULT NULL,
+        review_note TEXT DEFAULT NULL,
+        KEY idx_redelivery_shop_status (shop_id, status, requested_at)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `,
     `
@@ -559,6 +981,56 @@ db.connect((err) => {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         received_at DATETIME DEFAULT NULL,
         KEY idx_driver_cash_remittance (driver_id, status, created_at)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `,
+    `
+      CREATE TABLE IF NOT EXISTS driver_expense_claims (
+        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+        driver_id INT NOT NULL,
+        expense_type ENUM('toll','parking','fuel','other') NOT NULL,
+        amount DECIMAL(12,2) NOT NULL,
+        note VARCHAR(500) NOT NULL,
+        receipt_image VARCHAR(255) NOT NULL,
+        status ENUM('pending','approved','rejected') NOT NULL DEFAULT 'pending',
+        reviewed_by INT DEFAULT NULL,
+        review_note VARCHAR(500) DEFAULT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        reviewed_at DATETIME DEFAULT NULL,
+        KEY idx_driver_expense_status (status, created_at),
+        KEY idx_driver_expense_owner (driver_id, created_at)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `,
+    `
+      CREATE TABLE IF NOT EXISTS driver_wallets (
+        driver_id INT PRIMARY KEY,
+        balance DECIMAL(12,2) NOT NULL DEFAULT 0,
+        reserved_balance DECIMAL(12,2) NOT NULL DEFAULT 0,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `,
+    `
+      CREATE TABLE IF NOT EXISTS driver_wallet_reservations (
+        order_id INT PRIMARY KEY,
+        driver_id INT NOT NULL,
+        amount DECIMAL(12,2) NOT NULL,
+        status ENUM('reserved','released') NOT NULL DEFAULT 'reserved',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        released_at DATETIME DEFAULT NULL,
+        KEY idx_driver_wallet_reservation (driver_id, status)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `,
+    `
+      CREATE TABLE IF NOT EXISTS driver_wallet_transactions (
+        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+        driver_id INT NOT NULL,
+        order_id INT DEFAULT NULL,
+        transaction_type ENUM('deposit','reserve','release') NOT NULL,
+        amount DECIMAL(12,2) NOT NULL,
+        note VARCHAR(255) DEFAULT NULL,
+        created_by INT DEFAULT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        KEY idx_driver_wallet_transactions (driver_id, created_at),
+        KEY idx_driver_wallet_order (order_id)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `,
     `
@@ -804,13 +1276,19 @@ db.connect((err) => {
 
   [
     ['fee_payer', "ENUM('sender','receiver') NOT NULL DEFAULT 'sender'"],
-    ['delivery_otp', 'CHAR(6) DEFAULT NULL']
+    ['delivery_otp', 'CHAR(6) DEFAULT NULL'],
+    ['signature_image', 'VARCHAR(255) DEFAULT NULL']
   ].forEach(([column, definition]) => {
     db.query(`ALTER TABLE orders ADD COLUMN ${column} ${definition}`, (alterErr) => {
       if (alterErr && alterErr.code !== 'ER_DUP_FIELDNAME' && alterErr.code !== 'ER_NO_SUCH_TABLE') {
         console.error(`Lỗi bổ sung cột ${column}:`, alterErr);
       }
     });
+  });
+  db.query('ALTER TABLE order_status_history ADD COLUMN signature_image VARCHAR(255) DEFAULT NULL', (alterErr) => {
+    if (alterErr && alterErr.code !== 'ER_DUP_FIELDNAME' && alterErr.code !== 'ER_NO_SUCH_TABLE') {
+      console.error('Lỗi bổ sung cột signature_image cho order_status_history:', alterErr);
+    }
   });
 
   [
@@ -845,7 +1323,9 @@ db.connect((err) => {
     ['destination_transfer_shipper_id', 'INT NULL'],
     ['origin_warehouse_id', 'INT NULL'],
     ['destination_warehouse_id', 'INT NULL'],
-    ['current_warehouse_id', 'INT NULL']
+    ['current_warehouse_id', 'INT NULL'],
+    ['storage_bin_id', 'BIGINT NULL'],
+    ['cross_docked', 'TINYINT(1) NOT NULL DEFAULT 0']
   ].forEach(([column, definition]) => {
     db.query(`ALTER TABLE orders ADD COLUMN ${column} ${definition}`, (alterErr) => {
       if (alterErr && alterErr.code !== 'ER_DUP_FIELDNAME') {
@@ -857,15 +1337,52 @@ db.connect((err) => {
   console.log('Đã đảm bảo bảng news_articles, warehouses, driver_routes, driver_positions sẵn sàng');
 });
 
-function recordOrderStatus(orderId, fromStatus, toStatus, note, proofImage, callback) {
+function recordOrderStatus(orderId, fromStatus, toStatus, note, proofImage, callback, signatureImage = null) {
   const sql = `
-    INSERT INTO order_status_history (order_id, from_status, to_status, note, proof_image)
-    VALUES (?, ?, ?, ?, ?)
+    INSERT INTO order_status_history (order_id, from_status, to_status, note, proof_image, signature_image)
+    VALUES (?, ?, ?, ?, ?, ?)
   `;
-  db.query(sql, [orderId, fromStatus, toStatus, note || null, proofImage || null], (err) => {
+  db.query(sql, [orderId, fromStatus, toStatus, note || null, proofImage || null, signatureImage || null], (err) => {
     if (err) console.error('Lỗi ghi lịch sử trạng thái đơn:', err);
+    if (toStatus === 'completed') dispatchShopWebhook(orderId);
     if (callback) callback();
   });
+}
+
+function dispatchShopWebhook(orderId) {
+  db.query(
+    `SELECT w.target_url, w.secret_ciphertext, o.shop_id, o.tracking_code, o.status
+     FROM orders o
+     JOIN shop_webhook_configs w ON w.shop_id = o.shop_id AND w.enabled = 1
+     WHERE o.id = ? AND o.status = 'completed' AND w.target_url IS NOT NULL
+       AND w.secret_ciphertext IS NOT NULL
+     LIMIT 1`,
+    [orderId],
+    async (err, rows) => {
+      if (err) {
+        console.error('Không thể tải cấu hình webhook Shop:', err);
+        return;
+      }
+      if (!rows.length) return;
+      const order = rows[0];
+      const payload = {
+        id: crypto.randomUUID(),
+        event: 'order.delivered',
+        created_at: new Date().toISOString(),
+        data: {
+          order_id: Number(orderId),
+          tracking_code: order.tracking_code,
+          status: order.status
+        }
+      };
+      try {
+        const secret = decryptWebhookSecret(order.secret_ciphertext);
+        await postSignedWebhook(order.target_url, secret, payload);
+      } catch (error) {
+        console.error(`Gửi webhook giao thành công thất bại cho Shop ${order.shop_id}, đơn ${orderId}:`, error.message);
+      }
+    }
+  );
 }
 
 function calculateShippingFee({ weight, length, width, height, distance, serviceType, remoteArea, fragile, vehicleType }) {
@@ -913,7 +1430,7 @@ function notifyUser(userId, orderId, title, message) {
     [userId, orderId || null, title, message],
     (err) => {
       if (err) return console.error('Lỗi lưu thông báo:', err);
-      io.emit(`notification_new_${userId}`, { order_id: orderId, title, message });
+      io.to(`user:${userId}`).emit(`notification_new_${userId}`, { order_id: orderId, title, message });
     }
   );
 }
@@ -930,18 +1447,47 @@ function notifyCustomerByEmail(email, orderId, title, message) {
 // 1. API HỆ THỐNG CHUNG
 // =========================================
 app.post('/api/login', (req, res) => {
-  const { email, password } = req.body;
-  const sql = 'SELECT id, email, full_name, role FROM users WHERE email = ? AND password = ? AND status = "active"';
-  
-  db.query(sql, [email, password], (err, results) => {
+  const email = String(req.body.email || '').trim();
+  const password = typeof req.body.password === 'string' ? req.body.password : '';
+  if (!email || email.length > 255 || !password || password.length > 1024) {
+    return res.status(400).json({ success: false, message: 'Email hoặc mật khẩu không hợp lệ.' });
+  }
+  const sql = 'SELECT id, email, full_name, role, password FROM users WHERE email = ? AND status = "active" LIMIT 1';
+
+  db.query(sql, [email], async (err, results) => {
     if (err) return res.status(500).json({ success: false, message: 'Lỗi server: ' + err.sqlMessage });
-    if (results.length > 0) {
-      const user = results[0];
-      const token = jwt.sign({ sub: user.id }, JWT_SECRET, { expiresIn: '12h' });
-      res.json({ success: true, user, token });
-    } else {
-      res.status(401).json({ success: false, message: 'Email hoặc mật khẩu không chính xác' });
+    if (!results.length) {
+      return res.status(401).json({ success: false, message: 'Email hoặc mật khẩu không chính xác' });
     }
+    const record = results[0];
+    let validPassword;
+    try {
+      validPassword = await verifyPassword(password, String(record.password || ''));
+    } catch (verifyError) {
+      console.error('Lỗi xác minh mật khẩu:', verifyError);
+      return res.status(500).json({ success: false, message: 'Không thể xác minh thông tin đăng nhập.' });
+    }
+    if (!validPassword) return res.status(401).json({ success: false, message: 'Email hoặc mật khẩu không chính xác' });
+
+    if (!String(record.password).startsWith(`${PASSWORD_HASH_PREFIX}$`)) {
+      try {
+        const upgradedPassword = await hashPassword(password);
+        await new Promise((resolve, reject) => {
+          db.query('UPDATE users SET password = ? WHERE id = ? AND password = ?', [upgradedPassword, record.id, record.password], (updateErr, result) => {
+            if (updateErr) return reject(updateErr);
+            if (!result.affectedRows) return reject(new Error('Mật khẩu cũ đã thay đổi trong lúc đăng nhập.'));
+            resolve();
+          });
+        });
+      } catch (upgradeError) {
+        console.error('Lỗi nâng cấp mật khẩu cũ:', upgradeError);
+        return res.status(500).json({ success: false, message: 'Không thể hoàn tất đăng nhập an toàn. Vui lòng thử lại.' });
+      }
+    }
+
+    const user = { id: record.id, email: record.email, full_name: record.full_name, role: record.role };
+    const token = jwt.sign({ sub: user.id }, JWT_SECRET, { expiresIn: '12h' });
+    res.json({ success: true, user, token });
   });
 });
 
@@ -1002,13 +1548,9 @@ app.get('/api/chat/sessions/:id/messages', (req, res) => {
       }
     );
     if (!session) return res.status(404).json({ success: false, message: 'Không tìm thấy phiên chat.' });
-    if (agent) {
-      return requireChatAgent(req, res, () => loadMessages());
-    }
-    if (!isMatchingChatToken(token, session.guest_token_hash)) {
-      return res.status(403).json({ success: false, message: 'Không có quyền truy cập phiên chat này.' });
-    }
-    loadMessages();
+    if (isMatchingChatToken(token, session.guest_token_hash)) return loadMessages();
+    if (agent) return requireChatAgent(req, res, () => loadMessages());
+    return res.status(403).json({ success: false, message: 'Không có quyền truy cập phiên chat này.' });
   });
 });
 
@@ -1039,10 +1581,98 @@ app.put('/api/chat/sessions/:id/close', requireChatAgent, (req, res) => {
   });
 });
 
+const normalizeChatText = (value) => String(value || '')
+  .toLocaleLowerCase('vi')
+  .normalize('NFD')
+  .replace(/[\u0300-\u036f]/g, '')
+  .replace(/đ/g, 'd');
+
+function getLocalChatReply(message) {
+  const normalized = normalizeChatText(message);
+  const trackingCode = message.match(/\bVTP[A-F0-9]{10}VN\b/i)?.[0];
+  if (trackingCode) return { trackingCode };
+  if (/\b(chao|xin chao|hello|hi)\b/.test(normalized)) {
+    return { reply: 'Xin chào! Mình có thể giúp bạn tra cứu vận đơn, hướng dẫn gửi hàng, giải thích trạng thái đơn, COD và cước phí. Bạn đang cần hỗ trợ nội dung nào?' };
+  }
+  if (/\b(gia cuoc|cuoc|phi ship|phi van chuyen|bao gia)\b/.test(normalized)) {
+    return { reply: 'Cước phí phụ thuộc vào điểm lấy/giao, loại xe, trọng lượng/kích thước và dịch vụ đi kèm. Bạn hãy vào mục Bảng giá hoặc gửi điểm gửi, điểm nhận và cân nặng để được hướng dẫn ước tính.' };
+  }
+  if (/\b(bao lau|thoi gian giao|may ngay|khi nao giao|giao hang mat bao lau)\b/.test(normalized)) {
+    return { reply: 'Thời gian giao phụ thuộc tuyến đường và trạng thái vận đơn. Gửi mình mã vận đơn bắt đầu bằng VTP...VN, mình sẽ tra cứu trạng thái hiện tại.' };
+  }
+  if (/\b(gui hang|cach gui|tao don|dong goi|lay hang)\b/.test(normalized)) {
+    return { reply: 'Để gửi hàng, bạn tạo đơn trên cổng Shop, nhập thông tin người nhận và kiện hàng, chọn bên trả cước rồi đóng gói chắc chắn. Điều phối sẽ phân công tài xế đến lấy; bạn có thể theo dõi bằng mã vận đơn.' };
+  }
+  if (/\b(cod|thu ho|tien thu ho|doi soat)\b/.test(normalized)) {
+    return { reply: 'COD là khoản tài xế thu từ người nhận theo thông tin đơn. Shop có thể theo dõi đối soát trên hệ thống; nếu bạn cần tra một đơn cụ thể, hãy gửi mã vận đơn (không gửi mật khẩu hoặc mã OTP).' };
+  }
+  if (/\b(hoan hang|giao that bai|khong nhan|tu choi nhan)\b/.test(normalized)) {
+    return { reply: 'Khi giao thất bại, hệ thống ghi nhận lý do và bằng chứng giao hàng, sau đó đơn được chuyển sang quy trình hoàn. Shop có thể kiểm tra chi tiết trong danh sách đơn và liên hệ CSKH nếu muốn yêu cầu giao lại.' };
+  }
+  if (/\b(lien he|nhan vien|ho tro|gap nguoi)\b/.test(normalized)) {
+    return { reply: 'Bạn có thể chọn “Gặp nhân viên CSKH” ở màn hình chọn kênh chat để vào hàng chờ hỗ trợ trực tiếp.' };
+  }
+  return {
+    reply: 'Mình chưa hiểu rõ câu hỏi. Bạn có thể hỏi về tra cứu vận đơn, cước phí, thời gian giao, cách gửi hàng, COD hoặc hàng hoàn. Nếu cần người hỗ trợ, hãy chọn “Gặp nhân viên CSKH”.'
+  };
+}
+
+async function getConfiguredChatAiReply(message, history) {
+  const apiKey = process.env.CHAT_AI_API_KEY;
+  if (!apiKey) return null;
+
+  const baseUrl = (process.env.CHAT_AI_BASE_URL || 'https://api.openai.com/v1').replace(/\/+$/, '');
+  const model = process.env.CHAT_AI_MODEL || 'gpt-4o-mini';
+  let endpoint;
+  try {
+    endpoint = new URL(`${baseUrl}/chat/completions`);
+  } catch {
+    throw new Error('CHAT_AI_BASE_URL không phải URL hợp lệ.');
+  }
+  if (!['https:', 'http:'].includes(endpoint.protocol)) {
+    throw new Error('CHAT_AI_BASE_URL phải sử dụng HTTP hoặc HTTPS.');
+  }
+
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      model,
+      temperature: 0.4,
+      max_tokens: 500,
+      messages: [
+        {
+          role: 'system',
+          content: 'Bạn là trợ lý CSKH Smart Logistics, trả lời bằng tiếng Việt rõ ràng, ngắn gọn và lịch sự. Chỉ hướng dẫn các nghiệp vụ giao nhận, tạo đơn, cước phí, trạng thái vận đơn, COD và hàng hoàn. Không yêu cầu hoặc tiết lộ mật khẩu, mã OTP, dữ liệu thanh toán hay thông tin cá nhân nhạy cảm. Không tự khẳng định thông tin vận đơn nếu chưa được tra cứu bằng công cụ.'
+        },
+        ...history.map((item) => ({
+          role: item.sender_type === 'bot' ? 'assistant' : 'user',
+          content: item.message
+        })),
+        { role: 'user', content: message }
+      ]
+    }),
+    signal: AbortSignal.timeout(20000)
+  });
+  const result = await response.json().catch(() => null);
+  if (!response.ok) {
+    console.error('Nhà cung cấp chatbot trả lỗi:', response.status, result?.error?.message || 'No response body');
+    throw new Error('Dịch vụ AI đang bận hoặc chưa cấu hình đúng. Vui lòng thử lại hoặc chọn CSKH.');
+  }
+  const reply = result?.choices?.[0]?.message?.content;
+  if (typeof reply !== 'string' || !reply.trim()) {
+    throw new Error('Dịch vụ AI chưa trả về câu trả lời. Vui lòng thử lại.');
+  }
+  return reply.trim().slice(0, 4000);
+}
+
 app.post('/api/chat/ai', (req, res) => {
   const sessionId = Number(req.body.session_id);
-  const message = String(req.body.message || '').trim().slice(0, 2000);
-  if (!Number.isSafeInteger(sessionId) || sessionId <= 0 || !message) {
+  const message = typeof req.body.message === 'string' ? req.body.message.trim() : '';
+  if (!Number.isSafeInteger(sessionId) || sessionId <= 0 || !message || message.length > 2000) {
     return res.status(400).json({ success: false, message: 'Vui lòng nhập nội dung cần hỗ trợ.' });
   }
   db.query('SELECT id, mode, guest_token_hash, status FROM chat_sessions WHERE id = ? LIMIT 1', [sessionId], (err, sessions) => {
@@ -1053,35 +1683,15 @@ app.post('/api/chat/ai', (req, res) => {
     }
     if (session.status === 'closed') return res.status(409).json({ success: false, message: 'Phiên chat đã kết thúc.' });
     db.query(
-      'INSERT INTO chat_messages (session_id, sender_type, message) VALUES (?, "customer", ?)',
-      [sessionId, message],
-      (saveQuestionErr) => {
-        if (saveQuestionErr) return res.status(500).json({ success: false, message: 'Không thể lưu câu hỏi.' });
-        const answerQuestion = (reply) => db.query(
-          'INSERT INTO chat_messages (session_id, sender_type, message) VALUES (?, "bot", ?)',
-          [sessionId, reply],
-          (saveReplyErr, result) => {
-            if (saveReplyErr) return res.status(500).json({ success: false, message: 'Không thể lưu câu trả lời chatbot.' });
-            db.query('UPDATE chat_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?', [sessionId], (updateErr) => {
-              if (updateErr) console.error('Không thể cập nhật thời gian phiên chatbot:', updateErr);
-            });
-            const event = {
-              id: result.insertId,
-              session_id: sessionId,
-              sender_type: 'bot',
-              message: reply,
-              created_at: new Date().toISOString()
-            };
-            io.to(`chat:${sessionId}`).emit('receive_message', event);
-            res.json({ success: true, data: event });
-          }
-        );
-        const normalized = message.toLocaleLowerCase('vi');
-        const trackingCode = message.match(/\bVTP(?:\d{6}|[A-F0-9]{10})VN\b/i)?.[0];
-        if (trackingCode) {
-          db.query('SELECT tracking_code, status FROM orders WHERE tracking_code = ? LIMIT 1', [trackingCode], (orderErr, orders) => {
+      'SELECT sender_type, message FROM chat_messages WHERE session_id = ? ORDER BY id DESC LIMIT 12',
+      [sessionId],
+      async (historyErr, historyRows) => {
+        if (historyErr) return res.status(500).json({ success: false, message: 'Không thể tải ngữ cảnh cuộc trò chuyện.' });
+        const history = historyRows.reverse();
+        const localAnswer = getLocalChatReply(message);
+        if (localAnswer.trackingCode) {
+          db.query('SELECT tracking_code, status FROM orders WHERE tracking_code = ? LIMIT 1', [localAnswer.trackingCode], (orderErr, orders) => {
             if (orderErr) return res.status(500).json({ success: false, message: 'Không thể tra cứu vận đơn lúc này.' });
-            if (!orders.length) return answerQuestion(`Mình chưa tìm thấy vận đơn ${trackingCode}. Bạn vui lòng kiểm tra lại mã vận đơn.`);
             const statusLabels = {
               pending: 'chờ lấy hàng', picking: 'tài xế đang đến lấy hàng', picked_up: 'đã lấy hàng',
               at_origin_warehouse: 'đã về kho lấy hàng', transferring_to_central: 'đang chuyển về kho tổng',
@@ -1089,22 +1699,58 @@ app.post('/api/chat/ai', (req, res) => {
               at_destination_warehouse: 'đã đến kho đích', delivering: 'đang giao hàng', completed: 'đã giao thành công',
               returning: 'đang hoàn hàng', cancelled: 'đã hủy'
             };
-            return answerQuestion(`Vận đơn ${orders[0].tracking_code} hiện ${statusLabels[orders[0].status] || orders[0].status}. Bạn có thể xem chi tiết tại mục Tra cứu vận đơn.`);
+            const orderReply = orders.length
+              ? `Vận đơn ${orders[0].tracking_code} hiện ${statusLabels[orders[0].status] || orders[0].status}. Bạn có thể xem chi tiết tại mục Tra cứu vận đơn.`
+              : `Mình chưa tìm thấy vận đơn ${localAnswer.trackingCode}. Bạn vui lòng kiểm tra lại mã vận đơn.`;
+            saveChatExchange(orderReply);
           });
           return;
         }
-        if (/giá cước|cước|phí ship|phí vận chuyển/.test(normalized)) {
-          return answerQuestion('Cước phí được tính theo khoảng cách, loại xe, trọng lượng/kích thước và phụ phí dịch vụ. Bạn có thể xem bảng giá hoặc dùng công cụ ước tính cước trên website.');
+        let reply;
+        try {
+          const aiReply = await getConfiguredChatAiReply(message, history);
+          if (aiReply) {
+            reply = aiReply;
+          } else {
+            reply = localAnswer.reply;
+          }
+        } catch (aiError) {
+          console.error('Không thể tạo câu trả lời chatbot:', aiError);
+          return res.status(502).json({ success: false, message: aiError.message || 'Chatbot tạm thời không khả dụng.' });
         }
-        if (/bao lâu|thời gian giao|mấy ngày|khi nào giao/.test(normalized)) {
-          return answerQuestion('Thời gian giao phụ thuộc tuyến đường và trạng thái vận đơn. Bạn gửi mã vận đơn để mình tra cứu lộ trình hiện tại nhé.');
-        }
-        if (/gửi hàng|cách gửi|tạo đơn|đóng gói/.test(normalized)) {
-          return answerQuestion('Bạn tạo đơn trên cổng khách hàng, điền thông tin người nhận và kiện hàng, sau đó đóng gói chắc chắn để tài xế đến lấy theo lịch hẹn.');
-        }
-        return answerQuestion('Mình có thể hỗ trợ về giá cước, thời gian giao, cách gửi hàng hoặc tra cứu vận đơn. Nếu cần nhân viên, hãy chọn “Gặp nhân viên CSKH”.');
+
+        saveChatExchange(reply);
       }
     );
+
+    function saveChatExchange(reply) {
+      db.query(
+        'INSERT INTO chat_messages (session_id, sender_type, message) VALUES (?, "customer", ?)',
+        [sessionId, message],
+        (saveQuestionErr) => {
+          if (saveQuestionErr) return res.status(500).json({ success: false, message: 'Không thể lưu câu hỏi.' });
+          db.query(
+            'INSERT INTO chat_messages (session_id, sender_type, message) VALUES (?, "bot", ?)',
+            [sessionId, reply],
+            (saveReplyErr, result) => {
+              if (saveReplyErr) return res.status(500).json({ success: false, message: 'Không thể lưu câu trả lời chatbot.' });
+              db.query('UPDATE chat_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?', [sessionId], (updateErr) => {
+                if (updateErr) console.error('Không thể cập nhật thời gian phiên chatbot:', updateErr);
+              });
+              const event = {
+                id: result.insertId,
+                session_id: sessionId,
+                sender_type: 'bot',
+                message: reply,
+                created_at: new Date().toISOString()
+              };
+              io.to(`chat:${sessionId}`).emit('receive_message', event);
+              res.json({ success: true, data: event });
+            }
+          );
+        }
+      );
+    }
   });
 });
 
@@ -1142,6 +1788,10 @@ const createOrder = (req, res) => {
     service_fee
   } = req.body;
   const finalTrackingCode = String(tracking_code || `VTP${crypto.randomBytes(5).toString('hex').toUpperCase()}VN`);
+  const normalizedReceiverPhone = String(receiver_phone || '').trim().replace(/[\s().-]/g, '');
+  const normalizedReceiverName = String(receiver_name || '').trim();
+  const normalizedReceiverAddress = String(receiver_address || '').trim();
+  const normalizedShopAddress = String(shop_address || '').trim();
 
   const numericFields = { cod_amount, weight_kg, length, width, height, item_value, distance_km, shop_lat, shop_lng, receiver_lat, receiver_lng, service_fee };
   const hasInvalidNumber = Object.entries(numericFields).some(([, value]) => value !== undefined && (!Number.isFinite(Number(value)) || Number(value) < 0));
@@ -1178,8 +1828,15 @@ const createOrder = (req, res) => {
     destinationProvince: provinceName
   });
 
-  if (!shop_address || !receiver_name || !receiver_phone || !receiver_address) {
+  if (!normalizedShopAddress || !normalizedReceiverName || !normalizedReceiverPhone || !normalizedReceiverAddress) {
     return res.status(400).json({ success: false, message: 'Thiếu địa chỉ cửa hàng hoặc thông tin người nhận.' });
+  }
+  if (!/^0\d{9,10}$/.test(normalizedReceiverPhone)) {
+    return res.status(400).json({ success: false, message: 'Số điện thoại người nhận phải có 10-11 chữ số và bắt đầu bằng 0.' });
+  }
+  if (normalizedReceiverName.length > 255 || normalizedReceiverPhone.length > 50
+    || normalizedShopAddress.length > 1000 || normalizedReceiverAddress.length > 1000) {
+    return res.status(400).json({ success: false, message: 'Tên, số điện thoại hoặc địa chỉ vượt quá độ dài cho phép.' });
   }
 
   if (shop_lat === undefined || shop_lat === null || shop_lat === ''
@@ -1223,13 +1880,13 @@ const createOrder = (req, res) => {
   db.query(sql, [
     finalTrackingCode,
     shop_id || null,
-    String(shop_address || '').trim(),
+    normalizedShopAddress,
     String(shop_province || 'Hồ Chí Minh').trim(),
     normalizedShopLat,
     normalizedShopLng,
-    receiver_name,
-    receiver_phone,
-    receiver_address,
+    normalizedReceiverName,
+    normalizedReceiverPhone,
+    normalizedReceiverAddress,
     normalizedReceiverLat,
     normalizedReceiverLng,
     customer_email || null,
@@ -1265,16 +1922,344 @@ const createOrder = (req, res) => {
   });
 };
 
+app.get('/api/shop/integrations', (req, res) => {
+  const shopId = Number(req.authUser.id);
+  db.query(
+    `SELECT id, name, key_prefix, created_at, last_used_at
+     FROM shop_api_keys WHERE shop_id = ? AND revoked_at IS NULL
+     ORDER BY created_at DESC`,
+    [shopId],
+    (keysErr, keys) => {
+      if (keysErr) return res.status(500).json({ success: false, message: 'Không tải được danh sách API key.' });
+      db.query(
+        'SELECT target_url, enabled, secret_ciphertext IS NOT NULL AS secret_configured, updated_at FROM shop_webhook_configs WHERE shop_id = ? LIMIT 1',
+        [shopId],
+        (webhookErr, rows) => {
+          if (webhookErr) return res.status(500).json({ success: false, message: 'Không tải được cấu hình webhook.' });
+          const webhook = rows[0] || {};
+          res.json({
+            success: true,
+            data: {
+              api_keys: keys,
+              webhook: {
+                target_url: webhook.target_url || '',
+                enabled: Boolean(webhook.enabled),
+                secret_configured: Boolean(webhook.secret_configured),
+                updated_at: webhook.updated_at || null
+              }
+            }
+          });
+        }
+      );
+    }
+  );
+});
+
+app.post('/api/shop/integrations/keys', (req, res) => {
+  const shopId = Number(req.authUser.id);
+  const name = String(req.body.name || '').trim();
+  if (!name || name.length > 100) {
+    return res.status(400).json({ success: false, message: 'Tên API key phải từ 1 đến 100 ký tự.' });
+  }
+  db.query(
+    'SELECT COUNT(*) AS active_count FROM shop_api_keys WHERE shop_id = ? AND revoked_at IS NULL',
+    [shopId],
+    (countErr, rows) => {
+      if (countErr) return res.status(500).json({ success: false, message: 'Không thể kiểm tra giới hạn API key.' });
+      if (Number(rows[0].active_count) >= 10) {
+        return res.status(409).json({ success: false, message: 'Mỗi Shop được tạo tối đa 10 API key đang hoạt động.' });
+      }
+      const apiKey = `sl_live_${crypto.randomBytes(32).toString('base64url')}`;
+      const keyPrefix = apiKey.slice(0, 16);
+      db.query(
+        'INSERT INTO shop_api_keys (shop_id, name, key_prefix, key_hash) VALUES (?, ?, ?, ?)',
+        [shopId, name, keyPrefix, hashApiKey(apiKey)],
+        (insertErr, result) => {
+          if (insertErr) return res.status(500).json({ success: false, message: 'Không thể tạo API key.' });
+          res.status(201).json({
+            success: true,
+            data: { id: result.insertId, name, key_prefix: keyPrefix, api_key: apiKey },
+            message: 'API key chỉ hiển thị đầy đủ một lần. Hãy lưu ở nơi an toàn.'
+          });
+        }
+      );
+    }
+  );
+});
+
+app.delete('/api/shop/integrations/keys/:id', (req, res) => {
+  const keyId = Number(req.params.id);
+  if (!Number.isSafeInteger(keyId) || keyId <= 0) {
+    return res.status(400).json({ success: false, message: 'Mã API key không hợp lệ.' });
+  }
+  db.query(
+    'UPDATE shop_api_keys SET revoked_at = CURRENT_TIMESTAMP WHERE id = ? AND shop_id = ? AND revoked_at IS NULL',
+    [keyId, req.authUser.id],
+    (err, result) => {
+      if (err) return res.status(500).json({ success: false, message: 'Không thể thu hồi API key.' });
+      if (!result.affectedRows) return res.status(404).json({ success: false, message: 'Không tìm thấy API key đang hoạt động của Shop.' });
+      res.json({ success: true, message: 'Đã thu hồi API key.' });
+    }
+  );
+});
+
+app.put('/api/shop/integrations/webhook', async (req, res) => {
+  const shopId = Number(req.authUser.id);
+  const targetUrl = String(req.body.target_url || '').trim();
+  if (targetUrl.length > 2048) return res.status(400).json({ success: false, message: 'Webhook URL quá dài.' });
+  if (targetUrl) {
+    try {
+      await validateWebhookTarget(targetUrl);
+    } catch (error) {
+      return res.status(400).json({ success: false, message: error.message || 'Webhook URL không hợp lệ.' });
+    }
+  }
+  db.query(
+    `INSERT INTO shop_webhook_configs (shop_id, target_url, enabled)
+     VALUES (?, ?, 0)
+     ON DUPLICATE KEY UPDATE
+       target_url = VALUES(target_url),
+       enabled = IF(VALUES(target_url) IS NULL, 0, enabled),
+       secret_ciphertext = IF(VALUES(target_url) IS NULL, NULL, secret_ciphertext)`,
+    [shopId, targetUrl || null],
+    (err) => {
+      if (err) return res.status(500).json({ success: false, message: 'Không thể lưu cấu hình webhook.' });
+      res.json({ success: true, message: targetUrl ? 'Đã lưu endpoint webhook.' : 'Đã xóa endpoint webhook và tắt webhook.' });
+    }
+  );
+});
+
+app.post('/api/shop/integrations/webhook/secret', (req, res) => {
+  const shopId = Number(req.authUser.id);
+  if (!webhookEncryptionKey) {
+    return res.status(503).json({ success: false, message: 'Máy chủ cần cấu hình WEBHOOK_ENCRYPTION_KEY hoặc JWT_SECRET ổn định trước khi tạo secret.' });
+  }
+  db.query('SELECT target_url FROM shop_webhook_configs WHERE shop_id = ? LIMIT 1', [shopId], (findErr, rows) => {
+    if (findErr) return res.status(500).json({ success: false, message: 'Không thể kiểm tra cấu hình webhook.' });
+    if (!rows.length || !rows[0].target_url) {
+      return res.status(409).json({ success: false, message: 'Hãy lưu endpoint webhook trước khi tạo signing secret.' });
+    }
+    const secret = `whsec_${crypto.randomBytes(32).toString('base64url')}`;
+    db.query(
+      'UPDATE shop_webhook_configs SET secret_ciphertext = ?, enabled = 1 WHERE shop_id = ?',
+      [encryptWebhookSecret(secret), shopId],
+      (updateErr) => {
+        if (updateErr) return res.status(500).json({ success: false, message: 'Không thể tạo signing secret.' });
+        res.status(201).json({
+          success: true,
+          data: { secret },
+          message: 'Signing secret chỉ hiển thị lần này. Lưu secret ngay và cập nhật vào máy chủ nhận webhook.'
+        });
+      }
+    );
+  });
+});
+
+app.get('/api/dispatcher/rma', (req, res) => {
+  db.query(
+    `SELECT r.order_id, r.shop_id, r.status AS request_status, r.request_note,
+      r.requested_at, r.reviewed_at, r.review_note, o.tracking_code, o.status AS order_status,
+      o.receiver_name, o.receiver_phone, o.receiver_address, o.cod_amount, o.fail_reason,
+      o.proof_image, u.full_name AS shop_name
+     FROM shop_redelivery_requests r
+     JOIN orders o ON o.id = r.order_id AND o.shop_id = r.shop_id
+     LEFT JOIN users u ON u.id = r.shop_id
+     ORDER BY (r.status = 'pending') DESC, r.requested_at DESC
+     LIMIT 200`,
+    (err, requests) => {
+      if (err) return res.status(500).json({ success: false, message: 'Không tải được danh sách yêu cầu giao lại.' });
+      res.json({ success: true, data: requests });
+    }
+  );
+});
+
+app.put('/api/dispatcher/rma/:orderId', (req, res) => {
+  const orderId = Number(req.params.orderId);
+  const status = String(req.body.status || '');
+  const reviewNote = String(req.body.review_note || '').trim();
+  if (!Number.isSafeInteger(orderId) || orderId <= 0
+    || !['approved', 'rejected'].includes(status)
+    || reviewNote.length > 1000
+    || status === 'rejected' && reviewNote.length < 5) {
+    return res.status(400).json({ success: false, message: 'Yêu cầu duyệt không hợp lệ; khi từ chối cần ghi rõ lý do (5–1000 ký tự).' });
+  }
+  db.query(
+    `SELECT r.shop_id, o.tracking_code
+     FROM shop_redelivery_requests r
+     JOIN orders o ON o.id = r.order_id AND o.shop_id = r.shop_id
+     WHERE r.order_id = ? AND r.status = 'pending' AND o.status = 'returning'
+     LIMIT 1`,
+    [orderId],
+    (findErr, rows) => {
+      if (findErr) return res.status(500).json({ success: false, message: 'Không thể kiểm tra yêu cầu giao lại.' });
+      if (!rows.length) {
+        return res.status(409).json({ success: false, message: 'Yêu cầu không còn chờ xử lý hoặc đơn không còn ở trạng thái hoàn.' });
+      }
+      db.query(
+        `UPDATE shop_redelivery_requests AS r
+         SET status = ?, reviewed_at = CURRENT_TIMESTAMP, reviewed_by = ?, review_note = ?
+         WHERE r.order_id = ? AND r.status = 'pending'
+           AND EXISTS (SELECT 1 FROM orders o WHERE o.id = r.order_id AND o.shop_id = r.shop_id AND o.status = 'returning')`,
+        [status, req.authUser.id, reviewNote || null, orderId],
+        (updateErr, result) => {
+          if (updateErr) return res.status(500).json({ success: false, message: 'Không thể cập nhật yêu cầu giao lại.' });
+          if (!result.affectedRows) {
+            return res.status(409).json({ success: false, message: 'Yêu cầu vừa được xử lý hoặc đơn không còn ở trạng thái hoàn.' });
+          }
+          const decisionText = status === 'approved' ? 'đã được duyệt' : 'bị từ chối';
+          notifyUser(rows[0].shop_id, orderId, 'Cập nhật yêu cầu giao lại', `Yêu cầu giao lại đơn ${rows[0].tracking_code} ${decisionText}.${reviewNote ? ` Ghi chú: ${reviewNote}` : ''}`);
+          res.json({ success: true, message: status === 'approved' ? 'Đã duyệt yêu cầu giao lại.' : 'Đã từ chối yêu cầu giao lại.' });
+        }
+      );
+    }
+  );
+});
+
+app.get('/api/shop/rma', (req, res) => {
+  const shopId = Number(req.authUser.id);
+  db.query(
+    `SELECT o.id, o.tracking_code, o.receiver_name, o.receiver_phone, o.receiver_address,
+      o.cod_amount, o.shipping_fee, o.fee_payer, o.fail_reason, o.proof_image,
+      o.updated_at, r.status AS redelivery_status, r.request_note AS redelivery_note,
+      r.requested_at AS redelivery_requested_at, r.review_note AS redelivery_review_note
+     FROM orders o
+     LEFT JOIN shop_redelivery_requests r ON r.order_id = o.id AND r.shop_id = o.shop_id
+     WHERE o.shop_id = ? AND o.status = 'returning'
+     ORDER BY o.updated_at DESC`,
+    [shopId],
+    (ordersErr, orders) => {
+      if (ordersErr) return res.status(500).json({ success: false, message: 'Không tải được danh sách hàng hoàn.' });
+      if (!orders.length) return res.json({ success: true, data: [] });
+      db.query(
+        `SELECT h.order_id, h.to_status, h.note, h.proof_image, h.signature_image, h.created_at
+         FROM order_status_history h
+         JOIN orders o ON o.id = h.order_id
+         WHERE o.shop_id = ? AND o.status = 'returning'
+         ORDER BY h.created_at DESC, h.id DESC`,
+        [shopId],
+        (historyErr, history) => {
+          if (historyErr) return res.status(500).json({ success: false, message: 'Không tải được lịch sử bằng chứng hàng hoàn.' });
+          const historyByOrder = new Map();
+          for (const entry of history) {
+            const entries = historyByOrder.get(Number(entry.order_id)) || [];
+            entries.push(entry);
+            historyByOrder.set(Number(entry.order_id), entries);
+          }
+          res.json({
+            success: true,
+            data: orders.map((order) => ({
+              ...order,
+              status_history: historyByOrder.get(Number(order.id)) || []
+            }))
+          });
+        }
+      );
+    }
+  );
+});
+
+app.post('/api/shop/rma/:orderId/redelivery', (req, res) => {
+  const shopId = Number(req.authUser.id);
+  const orderId = Number(req.params.orderId);
+  const note = String(req.body.note || '').trim();
+  if (!Number.isSafeInteger(orderId) || orderId <= 0 || note.length < 8 || note.length > 1000
+    || req.body.customer_confirmed !== true) {
+    return res.status(400).json({ success: false, message: 'Cần xác nhận khách đồng ý nhận lại và ghi chú từ 8 đến 1000 ký tự.' });
+  }
+  db.query(
+    "SELECT id, tracking_code FROM orders WHERE id = ? AND shop_id = ? AND status = 'returning' LIMIT 1",
+    [orderId, shopId],
+    (orderErr, orders) => {
+      if (orderErr) return res.status(500).json({ success: false, message: 'Không thể kiểm tra đơn hàng.' });
+      if (!orders.length) return res.status(404).json({ success: false, message: 'Không tìm thấy đơn hàng hoàn thuộc Shop.' });
+      db.query('SELECT status FROM shop_redelivery_requests WHERE order_id = ? AND shop_id = ? LIMIT 1', [orderId, shopId], (requestErr, requests) => {
+        if (requestErr) return res.status(500).json({ success: false, message: 'Không thể kiểm tra yêu cầu giao lại.' });
+        if (requests.length && requests[0].status !== 'rejected') {
+          return res.status(409).json({ success: false, message: 'Đơn này đã có yêu cầu giao lại đang chờ xử lý hoặc đã được duyệt.' });
+        }
+        const saveRequest = (callback) => {
+          if (requests.length) {
+            return db.query(
+              `UPDATE shop_redelivery_requests
+               SET status = 'pending', request_note = ?, requested_at = CURRENT_TIMESTAMP,
+                 reviewed_at = NULL, reviewed_by = NULL, review_note = NULL
+               WHERE order_id = ? AND shop_id = ? AND status = 'rejected'`,
+              [note, orderId, shopId],
+              callback
+            );
+          }
+          db.query(
+            'INSERT INTO shop_redelivery_requests (order_id, shop_id, request_note) VALUES (?, ?, ?)',
+            [orderId, shopId, note],
+            callback
+          );
+        };
+        saveRequest((saveErr) => {
+          if (saveErr) {
+            if (saveErr.code === 'ER_DUP_ENTRY') {
+              return res.status(409).json({ success: false, message: 'Yêu cầu giao lại vừa được gửi cho đơn này.' });
+            }
+            return res.status(500).json({ success: false, message: 'Không thể lưu yêu cầu giao lại.' });
+          }
+          db.query(
+            "SELECT id FROM users WHERE status = 'active' AND role IN ('fleet_manager','director')",
+            (staffErr, staff) => {
+              if (staffErr) console.error('Không tải được danh sách điều phối nhận yêu cầu giao lại:', staffErr);
+              (staff || []).forEach(({ id }) => notifyUser(id, orderId, 'Shop yêu cầu giao lại', `Đơn ${orders[0].tracking_code} có yêu cầu giao lại. Vui lòng kiểm tra thông tin trong hồ sơ RMA.`));
+              res.status(201).json({ success: true, message: 'Đã gửi yêu cầu giao lại cho bộ phận điều phối.' });
+            }
+          );
+        });
+      });
+    }
+  );
+});
+
 app.post('/api/orders', createOrder);
 app.post('/api/v1/orders', (req, res, next) => {
-  const expectedKey = process.env.OPEN_API_KEY;
-  if (!expectedKey) return res.status(503).json({ success: false, message: 'Open API chưa được cấu hình. Hãy đặt OPEN_API_KEY ở máy chủ.' });
-  const suppliedBuffer = Buffer.from(String(req.get('x-api-key') || ''));
-  const expectedBuffer = Buffer.from(expectedKey);
-  if (expectedBuffer.length !== suppliedBuffer.length || !crypto.timingSafeEqual(expectedBuffer, suppliedBuffer)) {
+  const suppliedKey = String(req.get('x-api-key') || '');
+  if (!suppliedKey || suppliedKey.length > 200) {
     return res.status(401).json({ success: false, message: 'API key không hợp lệ.' });
   }
-  next();
+  db.query(
+    `SELECT k.id, k.shop_id
+     FROM shop_api_keys k
+     JOIN users u ON u.id = k.shop_id AND u.role = 'shop' AND u.status = 'active'
+     WHERE k.key_hash = ? AND k.revoked_at IS NULL
+     LIMIT 1`,
+    [hashApiKey(suppliedKey)],
+    (keyErr, keys) => {
+      if (keyErr) return res.status(500).json({ success: false, message: 'Không thể xác thực API key.' });
+      if (keys.length) {
+        const apiKey = keys[0];
+        req.apiShopId = Number(apiKey.shop_id);
+        req.body.shop_id = req.apiShopId;
+        db.query('UPDATE shop_api_keys SET last_used_at = CURRENT_TIMESTAMP WHERE id = ?', [apiKey.id], (usageErr) => {
+          if (usageErr) console.error('Không cập nhật được thời gian sử dụng API key:', usageErr);
+        });
+        return next();
+      }
+
+      const legacyKey = process.env.OPEN_API_KEY;
+      const supplied = Buffer.from(suppliedKey);
+      const expected = Buffer.from(legacyKey || '');
+      const isLegacyKey = Boolean(legacyKey)
+        && supplied.length === expected.length
+        && crypto.timingSafeEqual(supplied, expected);
+      if (!isLegacyKey) return res.status(401).json({ success: false, message: 'API key không hợp lệ.' });
+
+      const legacyShopId = Number(req.body.shop_id);
+      if (!Number.isSafeInteger(legacyShopId) || legacyShopId <= 0) {
+        return res.status(400).json({ success: false, message: 'API key hệ thống cần shop_id hợp lệ.' });
+      }
+      db.query('SELECT id FROM users WHERE id = ? AND role = "shop" AND status = "active" LIMIT 1', [legacyShopId], (shopErr, shops) => {
+        if (shopErr) return res.status(500).json({ success: false, message: 'Không thể xác thực Shop.' });
+        if (!shops.length) return res.status(403).json({ success: false, message: 'shop_id không thuộc Shop đang hoạt động.' });
+        req.apiShopId = legacyShopId;
+        next();
+      });
+    }
+  );
 }, createOrder);
 
 const openApiSpecification = {
@@ -1282,7 +2267,7 @@ const openApiSpecification = {
   info: {
     title: 'Smart Logistics Open API',
     version: '1.0.0',
-    description: 'Tích hợp tạo đơn giao nhận. Máy chủ cần cấu hình OPEN_API_KEY; gửi khóa qua header x-api-key.'
+    description: 'Tích hợp tạo đơn giao nhận. Shop dùng API key riêng do cổng Shop cấp; gửi qua header x-api-key. shop_id được xác định từ khóa.'
   },
   servers: [{ url: 'http://localhost:5000' }],
   paths: {
@@ -1296,9 +2281,9 @@ const openApiSpecification = {
             'application/json': {
               schema: {
                 type: 'object',
-                required: ['shop_id', 'shop_address', 'shop_lat', 'shop_lng', 'receiver_name', 'receiver_phone', 'receiver_address', 'receiver_lat', 'receiver_lng', 'weight_kg'],
+                required: ['shop_address', 'shop_lat', 'shop_lng', 'receiver_name', 'receiver_phone', 'receiver_address', 'receiver_lat', 'receiver_lng', 'weight_kg'],
                 properties: {
-                  shop_id: { type: 'integer', example: 6 },
+                  shop_id: { type: 'integer', example: 6, description: 'Chỉ bắt buộc khi dùng OPEN_API_KEY hệ thống cũ; API key riêng của Shop tự xác định chủ sở hữu.' },
                   shop_address: { type: 'string' },
                   shop_lat: { type: 'number', example: 10.762622 },
                   shop_lng: { type: 'number', example: 106.660172 },
@@ -1320,7 +2305,7 @@ const openApiSpecification = {
           200: { description: 'Vận đơn được tiếp nhận.' },
           400: { description: 'Dữ liệu hoặc tọa độ không hợp lệ.' },
           401: { description: 'API key không hợp lệ.' },
-          503: { description: 'Chưa cấu hình OPEN_API_KEY.' }
+          403: { description: 'Shop gắn với API key không còn hoạt động.' }
         }
       }
     }
@@ -1335,9 +2320,13 @@ app.get('/api/docs', (req, res) => {
 });
 
 app.get('/api/notifications/:userId', (req, res) => {
+  const userId = Number(req.params.userId);
+  if (!Number.isInteger(userId) || userId !== Number(req.authUser.id)) {
+    return res.status(403).json({ success: false, message: 'Bạn chỉ được xem thông báo của tài khoản đang đăng nhập.' });
+  }
   db.query(
     'SELECT id, order_id, title, message, is_read, created_at FROM notifications WHERE recipient_user_id = ? ORDER BY created_at DESC LIMIT 50',
-    [req.params.userId],
+    [userId],
     (err, results) => {
       if (err) return res.status(500).json({ success: false, message: err.sqlMessage });
       res.json({ success: true, data: results });
@@ -1346,8 +2335,13 @@ app.get('/api/notifications/:userId', (req, res) => {
 });
 
 app.put('/api/notifications/:id/read', (req, res) => {
-  db.query('UPDATE notifications SET is_read = 1 WHERE id = ? AND recipient_user_id = ?', [req.params.id, req.body.user_id], (err) => {
+  const notificationId = Number(req.params.id);
+  if (!Number.isInteger(notificationId) || notificationId <= 0) {
+    return res.status(400).json({ success: false, message: 'Mã thông báo không hợp lệ.' });
+  }
+  db.query('UPDATE notifications SET is_read = 1 WHERE id = ? AND recipient_user_id = ?', [notificationId, req.authUser.id], (err, result) => {
     if (err) return res.status(500).json({ success: false, message: err.sqlMessage });
+    if (!result.affectedRows) return res.status(404).json({ success: false, message: 'Không tìm thấy thông báo.' });
     res.json({ success: true });
   });
 });
@@ -1397,8 +2391,9 @@ app.put('/api/warehouses/:id', (req, res) => {
 });
 
 app.get('/api/orders', (req, res) => {
-  const sql = 'SELECT * FROM orders ORDER BY created_at DESC';
-  db.query(sql, (err, results) => {
+  const sql = 'SELECT * FROM orders WHERE (? IS NULL OR shop_id = ?) ORDER BY created_at DESC';
+  const shopId = req.shopScopeId || null;
+  db.query(sql, [shopId, shopId], (err, results) => {
     if (err) return res.status(500).json({ success: false, message: 'Lỗi tải dữ liệu: ' + err.sqlMessage });
     res.json({ success: true, data: redactDeliveryOtp(results) });
   });
@@ -1563,7 +2558,11 @@ app.delete('/api/news/:id', (req, res) => {
 
 app.get('/api/orders/track/:code', (req, res) => {
   const sql = `
-    SELECT o.*, COALESCE(ud.full_name, ux.full_name, uc.full_name, up.full_name) as shipper_name,
+    SELECT o.id, o.tracking_code, o.status, o.receiver_name, o.receiver_phone,
+      o.receiver_address, o.receiver_lat, o.receiver_lng, o.cod_amount, o.shipping_fee,
+      o.shop_lat, o.shop_lng, o.shop_address, o.proof_image, o.fail_reason,
+      o.created_at, o.updated_at,
+      COALESCE(ud.full_name, ux.full_name, uc.full_name, up.full_name) as shipper_name,
       up.full_name as pickup_driver_name, uc.full_name as central_transfer_driver_name,
       ux.full_name as destination_transfer_driver_name, ud.full_name as delivery_driver_name
     FROM orders o
@@ -1594,7 +2593,7 @@ app.get('/api/orders/track/:code', (req, res) => {
         : null;
 
       db.query(
-        'SELECT id, from_status, to_status, note, proof_image, created_at FROM order_status_history WHERE order_id = ? ORDER BY created_at ASC, id ASC',
+        'SELECT id, from_status, to_status, note, proof_image, signature_image, created_at FROM order_status_history WHERE order_id = ? ORDER BY created_at ASC, id ASC',
         [order.id],
         (historyErr, statusHistory) => {
           res.json({
@@ -1628,7 +2627,12 @@ app.get('/api/orders/track/:code', (req, res) => {
 });
 
 app.get('/api/orders/:id/route', (req, res) => {
-  const orderId = req.params.id;
+  const orderId = Number(req.params.id);
+  if (!Number.isInteger(orderId) || orderId <= 0) {
+    return res.status(400).json({ success: false, message: 'Mã đơn hàng không hợp lệ.' });
+  }
+  const role = req.authRole || normalizeRole(req.authUser.role);
+  const userId = Number(req.authUser.id);
   const sql = `
         SELECT o.id, o.tracking_code, o.status,
           COALESCE(o.delivery_shipper_id, o.destination_transfer_shipper_id, o.central_transfer_shipper_id, o.pickup_shipper_id) AS shipper_id,
@@ -1647,10 +2651,18 @@ app.get('/api/orders/:id/route', (req, res) => {
     LEFT JOIN warehouses ow ON ow.id = o.origin_warehouse_id
     LEFT JOIN warehouses dw ON dw.id = o.destination_warehouse_id
     WHERE o.id = ?
+      AND (
+        ? IN ('director','fleet_manager','warehouse_manager')
+        OR (? = 'shop' AND o.shop_id = ?)
+        OR (? IN ('pickup_driver','delivery_driver') AND (
+          o.pickup_shipper_id = ? OR o.central_transfer_shipper_id = ?
+          OR o.destination_transfer_shipper_id = ? OR o.delivery_shipper_id = ?
+        ))
+      )
     LIMIT 1
   `;
 
-  db.query(sql, [orderId], (err, results) => {
+  db.query(sql, [orderId, role, role, userId, role, userId, userId, userId, userId], (err, results) => {
     if (err) {
       console.error('Lỗi lấy route:', err);
       return res.status(500).json({ success: false, message: 'Lỗi lấy thông tin lộ trình: ' + err.sqlMessage });
@@ -1742,6 +2754,67 @@ app.get('/api/orders/:id/route', (req, res) => {
 // =========================================
 // 3. API ĐIỀU PHỐI & TÀI XẾ
 // =========================================
+app.get('/api/dispatcher/driver-profiles', (req, res) => {
+  const sql = `
+    SELECT u.id, u.full_name, u.role,
+      COALESCE(p.max_active_orders, 10) AS max_active_orders,
+      COALESCE(p.max_payload_kg, 100) AS max_payload_kg,
+      COALESCE(p.service_areas, '') AS service_areas,
+      COALESCE(loads.active_count, 0) AS active_count,
+      COALESCE(loads.active_weight_kg, 0) AS active_weight_kg
+    FROM users u
+    LEFT JOIN driver_dispatch_profiles p ON p.driver_id = u.id
+    LEFT JOIN (
+      SELECT assigned.driver_id, COUNT(*) AS active_count, SUM(assigned.weight_kg) AS active_weight_kg
+      FROM (
+        SELECT pickup_shipper_id AS driver_id, weight_kg FROM orders
+          WHERE pickup_shipper_id IS NOT NULL AND status IN ('picking','picked_up')
+        UNION ALL
+        SELECT central_transfer_shipper_id AS driver_id, weight_kg FROM orders
+          WHERE central_transfer_shipper_id IS NOT NULL AND status = 'transferring_to_central'
+        UNION ALL
+        SELECT destination_transfer_shipper_id AS driver_id, weight_kg FROM orders
+          WHERE destination_transfer_shipper_id IS NOT NULL AND status = 'transferring_to_destination'
+        UNION ALL
+        SELECT delivery_shipper_id AS driver_id, weight_kg FROM orders
+          WHERE delivery_shipper_id IS NOT NULL AND status IN ('at_destination_warehouse','delivering')
+      ) assigned
+      GROUP BY assigned.driver_id
+    ) loads ON loads.driver_id = u.id
+    WHERE u.role IN ('pickup_driver','delivery_driver') AND u.status = 'active'
+    ORDER BY u.role, u.full_name
+  `;
+  db.query(sql, (err, rows) => {
+    if (err) return res.status(500).json({ success: false, message: 'Không tải được hồ sơ điều phối tài xế: ' + err.sqlMessage });
+    res.json({ success: true, data: rows });
+  });
+});
+
+app.put('/api/dispatcher/driver-profiles/:driverId', (req, res) => {
+  const driverId = Number(req.params.driverId);
+  const maxActiveOrders = Number(req.body.max_active_orders);
+  const maxPayloadKg = Number(req.body.max_payload_kg);
+  const serviceAreas = String(req.body.service_areas || '').trim();
+  if (!Number.isInteger(driverId) || driverId <= 0
+    || !Number.isInteger(maxActiveOrders) || maxActiveOrders < 1 || maxActiveOrders > 100
+    || !Number.isFinite(maxPayloadKg) || maxPayloadKg <= 0 || maxPayloadKg > 100000
+    || serviceAreas.length > 500) {
+    return res.status(400).json({ success: false, message: 'Giới hạn đơn, tải trọng hoặc khu vực tài xế không hợp lệ.' });
+  }
+  db.query(
+    `INSERT INTO driver_dispatch_profiles (driver_id, max_active_orders, max_payload_kg, service_areas)
+     SELECT id, ?, ?, ? FROM users WHERE id = ? AND role IN ('pickup_driver','delivery_driver') AND status = 'active'
+     ON DUPLICATE KEY UPDATE max_active_orders = VALUES(max_active_orders),
+       max_payload_kg = VALUES(max_payload_kg), service_areas = VALUES(service_areas)`,
+    [maxActiveOrders, maxPayloadKg, serviceAreas, driverId],
+    (err, result) => {
+      if (err) return res.status(500).json({ success: false, message: 'Không thể lưu hồ sơ điều phối: ' + err.sqlMessage });
+      if (!result.affectedRows) return res.status(404).json({ success: false, message: 'Không tìm thấy tài xế đang hoạt động.' });
+      res.json({ success: true, message: 'Đã lưu giới hạn tải và khu vực phụ trách.' });
+    }
+  );
+});
+
 app.get('/api/shippers', (req, res) => {
   const taskType = req.query.type;
   if (!['pickup', 'central_transfer', 'destination_transfer', 'delivery'].includes(taskType)) {
@@ -1755,9 +2828,129 @@ app.get('/api/shippers', (req, res) => {
   });
 });
 
+function reserveDriverWallet(driverId, orderId, amount, callback) {
+  const reserveAmount = Number(Number(amount).toFixed(2));
+  if (!Number.isFinite(reserveAmount) || reserveAmount <= 0) return callback(null);
+  db.query(
+    `INSERT INTO driver_wallet_reservations (order_id, driver_id, amount)
+     VALUES (?, ?, ?)`,
+    [orderId, driverId, reserveAmount],
+    (reservationErr) => {
+      if (reservationErr) {
+        if (reservationErr.code === 'ER_DUP_ENTRY') {
+          return callback({ code: 'WALLET_BUSY', message: 'Đơn hàng hoặc ký quỹ của tài xế đã được xử lý. Tải lại và kiểm tra trước khi phân công lại.' });
+        }
+        return callback(reservationErr);
+      }
+      db.query(
+        `UPDATE driver_wallets
+         SET reserved_balance = reserved_balance + ?
+         WHERE driver_id = ? AND balance - reserved_balance >= ?`,
+        [reserveAmount, driverId, reserveAmount],
+        (walletErr, result) => {
+          if (walletErr || !result.affectedRows) {
+            db.query('DELETE FROM driver_wallet_reservations WHERE order_id = ? AND status = "reserved"', [orderId], (deleteErr) => {
+              if (deleteErr) console.error('Không thể xóa yêu cầu ký quỹ bị từ chối:', deleteErr);
+              if (walletErr) return callback(walletErr);
+              db.query(
+                'SELECT balance, reserved_balance FROM driver_wallets WHERE driver_id = ?',
+                [driverId],
+                (balanceErr, rows) => {
+                  if (balanceErr) return callback(balanceErr);
+                  const available = rows.length ? Number(rows[0].balance) - Number(rows[0].reserved_balance) : 0;
+                  callback({
+                    code: 'INSUFFICIENT_WALLET',
+                    message: `Tài xế không đủ ký quỹ khả dụng. Cần ${reserveAmount.toLocaleString('vi-VN')} đ, hiện có ${Math.max(0, available).toLocaleString('vi-VN')} đ.`
+                  });
+                }
+              );
+            });
+            return;
+          }
+          db.query(
+            `INSERT INTO driver_wallet_transactions (driver_id, order_id, transaction_type, amount, note)
+             VALUES (?, ?, 'reserve', ?, 'Giữ ký quỹ khi phân công đơn COD')`,
+            [driverId, orderId, reserveAmount],
+            (ledgerErr) => {
+              if (!ledgerErr) return callback(null);
+              db.query('UPDATE driver_wallets SET reserved_balance = GREATEST(0, reserved_balance - ?) WHERE driver_id = ?', [reserveAmount, driverId], (rollbackErr) => {
+                if (rollbackErr) console.error('Không thể hoàn tác số dư ký quỹ sau lỗi ghi sổ:', rollbackErr);
+                db.query('DELETE FROM driver_wallet_reservations WHERE order_id = ? AND status = "reserved"', [orderId], (deleteErr) => {
+                  if (deleteErr) console.error('Không thể xóa reservation sau lỗi ghi sổ:', deleteErr);
+                  callback(ledgerErr);
+                });
+              });
+            }
+          );
+        }
+      );
+    }
+  );
+}
+
+function releaseDriverWalletReservation(orderId, note, callback = () => {}) {
+  db.query(
+    'SELECT driver_id, amount FROM driver_wallet_reservations WHERE order_id = ? AND status = "reserved" LIMIT 1',
+    [orderId],
+    (findErr, rows) => {
+      if (findErr) return callback(findErr);
+      if (!rows.length) return callback(null);
+      const reservation = rows[0];
+      db.query(
+        'UPDATE driver_wallet_reservations SET status = "released", released_at = CURRENT_TIMESTAMP WHERE order_id = ? AND status = "reserved"',
+        [orderId],
+        (updateErr, result) => {
+          if (updateErr) return callback(updateErr);
+          if (!result.affectedRows) return callback(null);
+          db.query(
+            'UPDATE driver_wallets SET reserved_balance = GREATEST(0, reserved_balance - ?) WHERE driver_id = ?',
+            [reservation.amount, reservation.driver_id],
+            (walletErr) => {
+              if (walletErr) {
+                return db.query(
+                  'UPDATE driver_wallet_reservations SET status = "reserved", released_at = NULL WHERE order_id = ? AND status = "released"',
+                  [orderId],
+                  (rollbackErr) => {
+                    if (rollbackErr) console.error(`Không thể khôi phục giữ chỗ đơn ${orderId} sau lỗi cập nhật ví:`, rollbackErr);
+                    callback(walletErr);
+                  }
+                );
+              }
+              db.query(
+                `INSERT INTO driver_wallet_transactions (driver_id, order_id, transaction_type, amount, note)
+                 VALUES (?, ?, 'release', ?, ?)`,
+                [reservation.driver_id, orderId, reservation.amount, String(note || 'Giải phóng ký quỹ').slice(0, 255)],
+                (ledgerErr) => {
+                  if (!ledgerErr) return callback(null);
+                  db.query(
+                    'UPDATE driver_wallets SET reserved_balance = reserved_balance + ? WHERE driver_id = ?',
+                    [reservation.amount, reservation.driver_id],
+                    (rollbackErr) => {
+                      if (rollbackErr) console.error(`Không thể hoàn tác số dư ví đơn ${orderId} sau lỗi ghi sổ:`, rollbackErr);
+                      db.query(
+                        'UPDATE driver_wallet_reservations SET status = "reserved", released_at = NULL WHERE order_id = ? AND status = "released"',
+                        [orderId],
+                        (restoreErr) => {
+                          if (restoreErr) console.error(`Không thể khôi phục reservation đơn ${orderId}:`, restoreErr);
+                          callback(ledgerErr);
+                        }
+                      );
+                    }
+                  );
+                }
+              );
+            }
+          );
+        }
+      );
+    }
+  );
+}
+
 app.put('/api/orders/:id/assign', (req, res) => {
   const { shipper_id, task_type } = req.body;
-  const orderId = req.params.id;
+  const orderId = Number(req.params.id);
+  const shipperId = Number(shipper_id);
   const tasks = {
     pickup: { role: 'pickup_driver', expected: 'pending', next: 'picking', column: 'pickup_shipper_id', label: 'lấy hàng tại Shop' },
     central_transfer: { role: 'pickup_driver', expected: 'at_origin_warehouse', next: 'transferring_to_central', column: 'central_transfer_shipper_id', label: 'điều chuyển về kho tổng' },
@@ -1765,7 +2958,10 @@ app.put('/api/orders/:id/assign', (req, res) => {
     delivery: { role: 'delivery_driver', expected: 'at_destination_warehouse', next: 'at_destination_warehouse', column: 'delivery_shipper_id', label: 'giao hàng đến người nhận' }
   };
   const task = tasks[task_type];
-  if (!shipper_id || !task) return res.status(400).json({ success: false, message: 'Thiếu tài xế hoặc loại nhiệm vụ.' });
+  if (!Number.isInteger(orderId) || orderId <= 0
+    || !Number.isInteger(shipperId) || shipperId <= 0 || !task) {
+    return res.status(400).json({ success: false, message: 'Mã đơn, tài xế hoặc loại nhiệm vụ không hợp lệ.' });
+  }
 
   db.query('SELECT * FROM orders WHERE id = ?', [orderId], (selectErr, orders) => {
     if (selectErr) return res.status(500).json({ success: false, message: 'Lỗi DB: ' + selectErr.sqlMessage });
@@ -1775,13 +2971,14 @@ app.put('/api/orders/:id/assign', (req, res) => {
       return res.status(409).json({ success: false, message: `Nhiệm vụ này cần trạng thái "${task.expected}", đơn hiện ở "${order.status}".` });
     }
 
-    db.query('SELECT id FROM users WHERE id = ? AND role = ? AND status = "active"', [shipper_id, task.role], (driverErr, drivers) => {
+    db.query('SELECT id FROM users WHERE id = ? AND role = ? AND status = "active"', [shipperId, task.role], (driverErr, drivers) => {
       if (driverErr) return res.status(500).json({ success: false, message: 'Lỗi kiểm tra tài xế: ' + driverErr.sqlMessage });
       if (!drivers.length) return res.status(400).json({ success: false, message: 'Tài xế không thuộc đúng nhóm nhiệm vụ.' });
 
       const continueAssignment = (warehouseId = null) => {
-        let sql = `UPDATE orders SET ${task.column} = ?, status = ?`;
-        const params = [shipper_id, task.next];
+        const updateAssignedOrder = () => {
+            let sql = `UPDATE orders SET ${task.column} = ?, status = ?, storage_bin_id = NULL, cross_docked = 0`;
+        const params = [shipperId, task.next];
         if (task_type === 'pickup') {
           sql += ', origin_warehouse_id = ?, current_warehouse_id = NULL';
           params.push(warehouseId);
@@ -1791,11 +2988,24 @@ app.put('/api/orders/:id/assign', (req, res) => {
           params.push(warehouseId);
         }
         sql += ' WHERE id = ? AND status = ?';
+        if (task_type === 'delivery') sql += ' AND delivery_shipper_id IS NULL';
         params.push(orderId, task.expected);
 
         db.query(sql, params, (updateErr, result) => {
-          if (updateErr) return res.status(500).json({ success: false, message: updateErr.sqlMessage });
-          if (!result.affectedRows) return res.status(409).json({ success: false, message: 'Trạng thái đơn đã thay đổi, vui lòng tải lại.' });
+          if (updateErr || !result.affectedRows) {
+            const respond = () => {
+              if (updateErr) return res.status(500).json({ success: false, message: updateErr.sqlMessage });
+              return res.status(409).json({ success: false, message: 'Trạng thái đơn đã thay đổi hoặc đơn đã được phân công, vui lòng tải lại.' });
+            };
+            if (task_type === 'delivery' && Number(order.cod_amount || 0)
+              + (order.fee_payer === 'receiver' ? Number(order.shipping_fee || 0) : 0) > 0) {
+              return releaseDriverWalletReservation(orderId, 'Hoàn giữ ký quỹ do phân công thất bại', (releaseErr) => {
+                if (releaseErr) console.error('Không thể hoàn tác ký quỹ sau khi phân công thất bại:', releaseErr);
+                respond();
+              });
+            }
+            return respond();
+          }
           recordOrderStatus(orderId, task.expected, task.next, `Điều phối phân công tài xế ${task.label}`);
           const routeSql = `
             INSERT INTO driver_routes (order_id, shipper_id, warehouse_lat, warehouse_lng, pickup_lat, pickup_lng, delivery_lat, delivery_lng, route_status)
@@ -1803,15 +3013,27 @@ app.put('/api/orders/:id/assign', (req, res) => {
             FROM orders WHERE id = ?
             ON DUPLICATE KEY UPDATE shipper_id = VALUES(shipper_id), route_status = VALUES(route_status)
           `;
-          db.query(routeSql, [orderId, shipper_id, task_type, orderId], (routeErr) => {
+          db.query(routeSql, [orderId, shipperId, task_type, orderId], (routeErr) => {
             if (routeErr) console.error('Lỗi lưu route:', routeErr);
           });
-          io.emit(`new_order_assigned_${shipper_id}`, { message: `Bạn vừa được phân công ${task.label}.` });
-          notifyUser(shipper_id, orderId, 'Có nhiệm vụ vận chuyển mới', `Đơn ${order.tracking_code}: ${task.label}.`);
+          io.to(`user:${shipperId}`).emit(`new_order_assigned_${shipperId}`, { message: `Bạn vừa được phân công ${task.label}.` });
+          notifyUser(shipperId, orderId, 'Có nhiệm vụ vận chuyển mới', `Đơn ${order.tracking_code}: ${task.label}.`);
           notifyUser(order.shop_id, orderId, 'Cập nhật luân chuyển vận đơn', `Đơn ${order.tracking_code} đang được ${task.label}.`);
           notifyCustomerByEmail(order.customer_email, orderId, 'Cập nhật vận đơn', `Đơn ${order.tracking_code} đang được luân chuyển đến chặng tiếp theo.`);
           io.emit('order_status_changed', { order_id: Number(orderId), status: task.next });
           res.json({ success: true, message: `Đã phân công tài xế ${task.label}.` });
+        });
+        };
+        if (task_type !== 'delivery') return updateAssignedOrder();
+        const reserveAmount = Number(order.cod_amount || 0)
+          + (order.fee_payer === 'receiver' ? Number(order.shipping_fee || 0) : 0);
+        if (reserveAmount <= 0) return updateAssignedOrder();
+        reserveDriverWallet(shipperId, orderId, reserveAmount, (reserveErr) => {
+          if (reserveErr) {
+            const status = reserveErr.code === 'INSUFFICIENT_WALLET' ? 409 : reserveErr.code === 'WALLET_BUSY' ? 409 : 500;
+            return res.status(status).json({ success: false, message: reserveErr.message || 'Không thể giữ ký quỹ tài xế.' });
+          }
+          updateAssignedOrder();
         });
       };
 
@@ -1851,29 +3073,86 @@ app.get('/api/driver/live', (req, res) => {
 });
 
 app.post('/api/driver/location', (req, res) => {
-  const { shipper_id, order_id, lat, lng, route_status, tracking_code } = req.body;
+  const { shipper_id, order_id, lat, lng, route_status } = req.body;
+  const shipperId = Number(shipper_id);
+  const orderId = order_id === null || order_id === undefined || order_id === '' ? null : Number(order_id);
+  const latitude = Number(lat);
+  const longitude = Number(lng);
+  const driverRole = req.authRole || normalizeRole(req.authUser.role);
+  const allowedRouteStatuses = new Set(['moving', 'stopped', 'assigned', 'pickup', 'central_transfer', 'destination_transfer', 'delivery']);
 
-  if (!shipper_id || !lat || !lng) {
-    return res.status(400).json({ success: false, message: 'Thiếu dữ liệu vị trí tài xế.' });
+  if (!Number.isInteger(shipperId) || shipperId !== Number(req.authUser.id)
+    || (orderId !== null && (!Number.isInteger(orderId) || orderId <= 0))
+    || !driverRoles.has(driverRole)
+    || lat === null || lat === undefined || lat === ''
+    || lng === null || lng === undefined || lng === ''
+    || !Number.isFinite(latitude) || latitude < -90 || latitude > 90
+    || !Number.isFinite(longitude) || longitude < -180 || longitude > 180
+    || (route_status && !allowedRouteStatuses.has(route_status))) {
+    return res.status(400).json({ success: false, message: 'Dữ liệu vị trí hoặc trạng thái lộ trình không hợp lệ.' });
   }
 
-  const sql = `
-    INSERT INTO driver_positions (order_id, shipper_id, lat, lng, route_status)
-    VALUES (?, ?, ?, ?, ?)
-  `;
-
-  db.query(sql, [order_id || null, shipper_id, lat, lng, route_status || 'moving'], (err) => {
-    if (err) return res.status(500).json({ success: false, message: 'Lỗi lưu vị trí tài xế: ' + err.sqlMessage });
-    io.emit('driver_location_changed', { order_id, tracking_code: tracking_code || 'N/A', lat, lng, timestamp: new Date() });
+  const emitPosition = (verifiedTrackingCode = null) => {
+    const position = {
+      shipper_id: shipperId,
+      order_id: orderId,
+      tracking_code: verifiedTrackingCode,
+      lat: latitude,
+      lng: longitude,
+      timestamp: new Date()
+    };
+    io.to('fleet_tracking').emit('driver_location_changed', position);
+    if (orderId) io.to(`order_tracking:${orderId}`).emit('driver_location_changed', position);
     res.json({ success: true, message: 'Đã cập nhật vị trí tài xế.' });
+  };
+
+  if (orderId === null) {
+    return db.query(
+      'INSERT INTO driver_positions (order_id, shipper_id, lat, lng, route_status) VALUES (NULL, ?, ?, ?, ?)',
+      [shipperId, latitude, longitude, route_status || 'moving'],
+      (err) => {
+        if (err) return res.status(500).json({ success: false, message: 'Lỗi lưu vị trí tài xế: ' + err.sqlMessage });
+        emitPosition();
+      }
+    );
+  }
+
+  const assignedOrderSql = `
+    INSERT INTO driver_positions (order_id, shipper_id, lat, lng, route_status)
+    SELECT o.id, ?, ?, ?, ?
+    FROM orders o
+    WHERE o.id = ? AND (
+      (? = 'pickup_driver' AND (
+        (o.pickup_shipper_id = ? AND o.status IN ('picking', 'picked_up'))
+        OR (o.central_transfer_shipper_id = ? AND o.status = 'transferring_to_central')
+        OR (o.destination_transfer_shipper_id = ? AND o.status = 'transferring_to_destination')
+      ))
+      OR (? = 'delivery_driver' AND o.delivery_shipper_id = ? AND o.status = 'delivering')
+    )
+    LIMIT 1
+  `;
+  const params = [
+    shipperId, latitude, longitude, route_status || 'moving', orderId,
+    driverRole, shipperId, shipperId, shipperId, driverRole, shipperId
+  ];
+  db.query(assignedOrderSql, params, (err, result) => {
+    if (err) return res.status(500).json({ success: false, message: 'Lỗi lưu vị trí tài xế: ' + err.sqlMessage });
+    if (!result.affectedRows) {
+      return res.status(403).json({ success: false, message: 'Bạn không được cập nhật vị trí cho đơn hàng này.' });
+    }
+    emitPosition();
   });
 });
 
 app.get('/api/orders/shipper/:id', (req, res) => {
+  const driverId = Number(req.params.id);
+  if (!Number.isInteger(driverId) || driverId <= 0 || driverId !== Number(req.authUser.id)) {
+    return res.status(403).json({ success: false, message: 'Tài xế chỉ được xem nhiệm vụ của tài khoản đang đăng nhập.' });
+  }
   const sql = `
     SELECT o.*, u.role AS driver_role
     FROM orders o
-    JOIN users u ON u.id = ?
+    JOIN users u ON u.id = ? AND u.status = 'active'
     WHERE (u.role = 'pickup_driver' AND (
         (o.pickup_shipper_id = ? AND o.status IN ('picking','picked_up'))
         OR (o.central_transfer_shipper_id = ? AND o.status = 'transferring_to_central')
@@ -1883,18 +3162,40 @@ app.get('/api/orders/shipper/:id', (req, res) => {
        OR (u.role = 'delivery_driver' AND o.delivery_shipper_id = ? AND o.status = 'completed' AND DATE(o.updated_at) = CURDATE())
     ORDER BY o.created_at DESC
   `;
-  db.query(sql, [req.params.id, req.params.id, req.params.id, req.params.id, req.params.id, req.params.id], (err, results) => {
+  db.query(sql, [driverId, driverId, driverId, driverId, driverId, driverId], (err, results) => {
     if (err) return res.status(500).json({ success: false, message: err.sqlMessage });
     res.json({ success: true, data: redactDeliveryOtp(results) });
   });
 });
 
-app.put('/api/orders/:id/status', upload.single('proof_image'), (req, res) => {
+app.put('/api/orders/:id/status', podUpload.fields([
+  { name: 'proof_image', maxCount: 1 },
+  { name: 'signature_image', maxCount: 1 }
+]), (req, res) => {
   const { id } = req.params;
   const { status, fail_reason, cod_collected, cod_payment_method, delivery_otp, user_id } = req.body;
-  const imageUrl = req.file ? `/uploads/${req.file.filename}` : null;
+  const orderId = Number(id);
+  const driverId = Number(user_id);
+  const allowedTransitions = new Set(['picked_up', 'delivering', 'completed', 'returning']);
+  const proofFile = req.files?.proof_image?.[0];
+  const signatureFile = req.files?.signature_image?.[0];
+  const imageUrl = proofFile ? `/uploads/${proofFile.filename}` : null;
+  const signatureUrl = signatureFile ? `/uploads/${signatureFile.filename}` : null;
 
-  db.query('SELECT status, cod_amount, shipping_fee, fee_payer, shop_id, customer_email, tracking_code, delivery_otp, pickup_shipper_id, delivery_shipper_id, destination_transfer_shipper_id FROM orders WHERE id = ?', [id], (selectErr, orders) => {
+  if (!Number.isInteger(orderId) || orderId <= 0 || !Number.isInteger(driverId) || driverId <= 0
+    || driverId !== Number(req.authUser.id) || !allowedTransitions.has(status)) {
+    return res.status(400).json({ success: false, message: 'Mã đơn, tài xế hoặc trạng thái cập nhật không hợp lệ.' });
+  }
+
+  db.query(
+    `SELECT o.status, o.cod_amount, o.shipping_fee, o.fee_payer, o.shop_id, o.customer_email,
+      o.tracking_code, o.delivery_otp, o.pickup_shipper_id, o.delivery_shipper_id,
+      o.destination_transfer_shipper_id, u.role AS driver_role
+     FROM orders o
+     LEFT JOIN users u ON u.id = ? AND u.status = 'active'
+     WHERE o.id = ?`,
+    [driverId, orderId],
+    (selectErr, orders) => {
     if (selectErr) return res.status(500).json({ success: false, message: 'Lỗi cập nhật: ' + selectErr.sqlMessage });
     if (!orders.length) return res.status(404).json({ success: false, message: 'Không tìm thấy đơn hàng.' });
 
@@ -1902,14 +3203,15 @@ app.put('/api/orders/:id/status', upload.single('proof_image'), (req, res) => {
     const amountToCollect = Number(order.cod_amount || 0)
       + (order.fee_payer === 'receiver' ? Number(order.shipping_fee || 0) : 0);
     if (status === 'picked_up' && order.status === 'picked_up'
-      && String(order.pickup_shipper_id) === String(user_id)) {
+      && order.driver_role === 'pickup_driver'
+      && Number(order.pickup_shipper_id) === driverId) {
       return res.json({ success: true, already_applied: true, message: 'Vận đơn đã được xác nhận đã lấy trước đó.' });
     }
     const validTransition = status === 'picked_up'
-      ? order.status === 'picking' && String(order.pickup_shipper_id) === String(user_id)
+      ? order.driver_role === 'pickup_driver' && order.status === 'picking' && Number(order.pickup_shipper_id) === driverId
       : status === 'delivering'
-      ? order.status === 'at_destination_warehouse' && String(order.delivery_shipper_id) === String(user_id)
-      : order.status === 'delivering' && ['completed', 'returning'].includes(status) && String(order.delivery_shipper_id) === String(user_id);
+      ? order.driver_role === 'delivery_driver' && order.status === 'at_destination_warehouse' && Number(order.delivery_shipper_id) === driverId
+      : order.driver_role === 'delivery_driver' && order.status === 'delivering' && ['completed', 'returning'].includes(status) && Number(order.delivery_shipper_id) === driverId;
     if (!validTransition) {
       return res.status(409).json({ success: false, message: `Không thể chuyển đơn từ "${order.status}" sang "${status}".` });
     }
@@ -1918,6 +3220,9 @@ app.put('/api/orders/:id/status', upload.single('proof_image'), (req, res) => {
     }
     if (['completed', 'returning'].includes(status) && !imageUrl) {
       return res.status(400).json({ success: false, message: 'Cần ảnh minh chứng trước khi kết thúc lượt giao.' });
+    }
+    if (status === 'completed' && !signatureUrl) {
+      return res.status(400).json({ success: false, message: 'Cần chữ ký điện tử của người nhận trước khi hoàn tất đơn.' });
     }
     if (status === 'returning' && !String(fail_reason || '').trim()) {
       return res.status(400).json({ success: false, message: 'Cần ghi rõ lý do giao thất bại.' });
@@ -1952,6 +3257,10 @@ app.put('/api/orders/:id/status', upload.single('proof_image'), (req, res) => {
       sql += ', proof_image = ?';
       params.push(imageUrl);
     }
+    if (signatureUrl) {
+      sql += ', signature_image = ?';
+      params.push(signatureUrl);
+    }
     if (status === 'returning') {
       sql += ', fail_reason = ?';
       params.push(String(fail_reason).trim());
@@ -1966,7 +3275,7 @@ app.put('/api/orders/:id/status', upload.single('proof_image'), (req, res) => {
       params.push(amountToCollect > 0 ? cod_payment_method : null);
     }
     sql += ' WHERE id = ? AND status = ?';
-    params.push(id, order.status);
+    params.push(orderId, order.status);
 
     db.query(sql, params, (err, result) => {
       if (err) {
@@ -1975,10 +3284,10 @@ app.put('/api/orders/:id/status', upload.single('proof_image'), (req, res) => {
       }
       if (!result.affectedRows) return res.status(409).json({ success: false, message: 'Trạng thái đơn đã thay đổi, vui lòng tải lại.' });
 
-      const completeStatusUpdate = () => recordOrderStatus(id, order.status, status, fail_reason, imageUrl, () => {
-        notifyUser(order.shop_id, id, 'Cập nhật trạng thái vận đơn', `Đơn ${order.tracking_code} đã chuyển sang trạng thái ${status === 'picked_up' ? 'đã lấy hàng, chờ nhập kho' : status === 'delivering' ? 'đang giao' : status === 'completed' ? 'giao thành công' : 'giao thất bại, đang hoàn hàng'}.`);
+      const completeStatusUpdate = () => recordOrderStatus(orderId, order.status, status, fail_reason, imageUrl, () => {
+        notifyUser(order.shop_id, orderId, 'Cập nhật trạng thái vận đơn', `Đơn ${order.tracking_code} đã chuyển sang trạng thái ${status === 'picked_up' ? 'đã lấy hàng, chờ nhập kho' : status === 'delivering' ? 'đang giao' : status === 'completed' ? 'giao thành công' : 'giao thất bại, đang hoàn hàng'}.`);
         const customerMessage = status === 'picked_up' ? 'Tài xế đã lấy hàng và đang đưa về kho.' : status === 'delivering' ? 'Đơn hàng đang trên đường giao đến bạn.' : status === 'completed' ? 'Đơn hàng đã được giao thành công.' : 'Giao hàng chưa thành công; đơn đang được chuyển hoàn.';
-        notifyCustomerByEmail(order.customer_email, id, 'Cập nhật vận đơn', `Đơn ${order.tracking_code}: ${customerMessage}`);
+        notifyCustomerByEmail(order.customer_email, orderId, 'Cập nhật vận đơn', `Đơn ${order.tracking_code}: ${customerMessage}`);
         const customerEmail = order.customer_email;
         if (customerEmail) {
       const mailOptions = {
@@ -2004,9 +3313,21 @@ app.put('/api/orders/:id/status', upload.single('proof_image'), (req, res) => {
         }
 
         res.json({ success: true, message: 'Cập nhật trạng thái thành công!' });
-        io.emit('order_status_changed', { order_id: Number(id), status });
-      });
-      if (!deliveryOtp) return completeStatusUpdate();
+        io.emit('order_status_changed', { order_id: orderId, status });
+      }, signatureUrl);
+      if (!deliveryOtp) {
+        const shouldReleaseReservation = status === 'returning'
+          || status === 'completed' && cod_payment_method === 'bank_transfer';
+        if (!shouldReleaseReservation) return completeStatusUpdate();
+        return releaseDriverWalletReservation(
+          orderId,
+          status === 'returning' ? 'Đơn giao thất bại, giải phóng ký quỹ' : 'COD chuyển khoản, giải phóng ký quỹ',
+          (releaseErr) => {
+            if (releaseErr) console.error(`Không thể giải phóng ký quỹ đơn ${orderId}:`, releaseErr);
+            completeStatusUpdate();
+          }
+        );
+      }
 
       transporter.sendMail({
         from: mailFrom,
@@ -2027,7 +3348,7 @@ app.put('/api/orders/:id/status', upload.single('proof_image'), (req, res) => {
         console.error('Lỗi gửi OTP giao hàng:', mailErr);
         db.query(
           'UPDATE orders SET status = ?, delivery_otp = NULL WHERE id = ? AND status = ? AND delivery_otp = ?',
-          [order.status, id, 'delivering', deliveryOtp],
+          [order.status, orderId, 'delivering', deliveryOtp],
           (rollbackErr, rollbackResult) => {
             if (rollbackErr) console.error('Lỗi hoàn tác trạng thái sau khi gửi OTP thất bại:', rollbackErr);
             const rollbackSucceeded = !rollbackErr && rollbackResult.affectedRows > 0;
@@ -2047,8 +3368,181 @@ app.put('/api/orders/:id/status', upload.single('proof_image'), (req, res) => {
 // =========================================
 // 4. API KHO BÃI
 // =========================================
+app.get('/api/warehouse/bin-locations', (req, res) => {
+  const warehouseId = Number(req.query.warehouse_id);
+  if (!Number.isInteger(warehouseId) || warehouseId <= 0) {
+    return res.status(400).json({ success: false, message: 'Mã kho không hợp lệ.' });
+  }
+  db.query(
+    'SELECT id, warehouse_id, bin_code, bin_name FROM warehouse_bin_locations WHERE warehouse_id = ? AND is_active = 1 ORDER BY bin_code',
+    [warehouseId],
+    (err, rows) => {
+      if (err) return res.status(500).json({ success: false, message: 'Không tải được danh sách vị trí kệ: ' + err.sqlMessage });
+      res.json({ success: true, data: rows });
+    }
+  );
+});
+
+app.get('/api/warehouse/bin-locations/lookup', (req, res) => {
+  const warehouseId = Number(req.query.warehouse_id);
+  const binCode = String(req.query.bin_code || '').trim().toUpperCase();
+  if (!Number.isInteger(warehouseId) || warehouseId <= 0 || !/^[A-Z0-9][A-Z0-9._-]{0,79}$/.test(binCode)) {
+    return res.status(400).json({ success: false, message: 'Mã kho hoặc mã vị trí kệ không hợp lệ.' });
+  }
+  db.query(
+    'SELECT id, warehouse_id, bin_code, bin_name FROM warehouse_bin_locations WHERE warehouse_id = ? AND bin_code = ? AND is_active = 1 LIMIT 1',
+    [warehouseId, binCode],
+    (err, rows) => {
+      if (err) return res.status(500).json({ success: false, message: 'Không thể xác thực mã vị trí kệ: ' + err.sqlMessage });
+      res.json({ success: true, matched: rows.length > 0, data: rows[0] || null });
+    }
+  );
+});
+
+app.post('/api/warehouse/bin-locations', (req, res) => {
+  const warehouseId = Number(req.body.warehouse_id);
+  const binCode = String(req.body.bin_code || '').trim().toUpperCase();
+  const binName = String(req.body.bin_name || '').trim();
+  if (!Number.isInteger(warehouseId) || warehouseId <= 0
+    || !/^[A-Z0-9][A-Z0-9._-]{0,79}$/.test(binCode)
+    || !binName || binName.length > 120) {
+    return res.status(400).json({ success: false, message: 'Mã kho, mã kệ hoặc tên vị trí không hợp lệ.' });
+  }
+  db.query(
+    'INSERT INTO warehouse_bin_locations (warehouse_id, bin_code, bin_name) SELECT id, ?, ? FROM warehouses WHERE id = ? AND is_active = 1',
+    [binCode, binName, warehouseId],
+    (err, result) => {
+      if (err) {
+        if (err.code === 'ER_DUP_ENTRY') return res.status(409).json({ success: false, message: 'Mã kệ này đã tồn tại trong kho.' });
+        return res.status(500).json({ success: false, message: 'Không thể tạo vị trí kệ: ' + err.sqlMessage });
+      }
+      if (!result.affectedRows) return res.status(404).json({ success: false, message: 'Không tìm thấy kho đang hoạt động.' });
+      res.status(201).json({ success: true, data: { id: result.insertId, warehouse_id: warehouseId, bin_code: binCode, bin_name: binName } });
+    }
+  );
+});
+
+app.post('/api/warehouse/inventory-audits', (req, res) => {
+  const warehouseId = Number(req.body.warehouse_id);
+  if (!Number.isInteger(warehouseId) || warehouseId <= 0) {
+    return res.status(400).json({ success: false, message: 'Mã kho không hợp lệ.' });
+  }
+  db.query(
+    'INSERT INTO warehouse_inventory_audits (warehouse_id, created_by) SELECT id, ? FROM warehouses WHERE id = ? AND is_active = 1',
+    [Number(req.authUser.id), warehouseId],
+    (createErr, result) => {
+      if (createErr) return res.status(500).json({ success: false, message: 'Không thể mở phiếu kiểm kê: ' + createErr.sqlMessage });
+      if (!result.affectedRows) return res.status(404).json({ success: false, message: 'Không tìm thấy kho đang hoạt động.' });
+      const auditId = result.insertId;
+      db.query(
+        `INSERT INTO warehouse_inventory_audit_items (audit_id, order_id, tracking_code)
+         SELECT ?, id, tracking_code FROM orders
+         WHERE current_warehouse_id = ?
+           AND status IN ('at_origin_warehouse', 'at_central_warehouse', 'at_destination_warehouse')`,
+        [auditId, warehouseId],
+        (snapshotErr, snapshot) => {
+          if (snapshotErr) {
+            return db.query('DELETE FROM warehouse_inventory_audits WHERE id = ?', [auditId], (cleanupErr) => {
+              if (cleanupErr) console.error('Không thể xóa phiếu kiểm kê lỗi:', cleanupErr);
+              res.status(500).json({ success: false, message: 'Không thể chụp danh sách tồn kho đầu kỳ: ' + snapshotErr.sqlMessage });
+            });
+          }
+          db.query('UPDATE warehouse_inventory_audits SET expected_count = ? WHERE id = ?', [snapshot.affectedRows, auditId], (updateErr) => {
+            if (updateErr) return res.status(500).json({ success: false, message: 'Không thể lưu số lượng tồn đầu kỳ: ' + updateErr.sqlMessage });
+            res.status(201).json({ success: true, data: { id: auditId, status: 'open' }, message: 'Đã mở kiểm kê mù. Danh sách tồn kỳ vọng được ẩn trong lúc quét.' });
+          });
+        }
+      );
+    }
+  );
+});
+
+app.post('/api/warehouse/inventory-audits/:id/scan', (req, res) => {
+  const auditId = Number(req.params.id);
+  const scanCode = String(req.body.tracking_code || '').trim().toUpperCase();
+  if (!Number.isSafeInteger(auditId) || auditId <= 0 || !/^[A-Z0-9][A-Z0-9._-]{0,99}$/.test(scanCode)) {
+    return res.status(400).json({ success: false, message: 'Mã phiếu hoặc mã kiện quét không hợp lệ.' });
+  }
+  db.query('SELECT id FROM warehouse_inventory_audits WHERE id = ? AND status = "open" LIMIT 1', [auditId], (auditErr, audits) => {
+    if (auditErr) return res.status(500).json({ success: false, message: 'Không thể kiểm tra phiếu kiểm kê: ' + auditErr.sqlMessage });
+    if (!audits.length) return res.status(409).json({ success: false, message: 'Phiếu kiểm kê không tồn tại hoặc đã được chốt.' });
+    db.query('SELECT order_id FROM warehouse_inventory_audit_items WHERE audit_id = ? AND tracking_code = ? LIMIT 1', [auditId, scanCode], (itemErr, items) => {
+      if (itemErr) return res.status(500).json({ success: false, message: 'Không thể đối chiếu mã quét: ' + itemErr.sqlMessage });
+      const expectedOrderId = items.length ? Number(items[0].order_id) : null;
+      db.query(
+        `INSERT INTO warehouse_inventory_audit_scans (audit_id, scan_code, order_id)
+         SELECT ?, ?, ? FROM warehouse_inventory_audits WHERE id = ? AND status = 'open'`,
+        [auditId, scanCode, expectedOrderId, auditId],
+        (scanErr, scanResult) => {
+          if (scanErr?.code === 'ER_DUP_ENTRY') return res.status(409).json({ success: false, message: 'Mã này đã được quét trong phiếu kiểm kê.' });
+          if (scanErr) return res.status(500).json({ success: false, message: 'Không thể lưu mã kiểm kê: ' + scanErr.sqlMessage });
+          if (!scanResult.affectedRows) return res.status(409).json({ success: false, message: 'Phiếu kiểm kê đã được chốt.' });
+          db.query('UPDATE warehouse_inventory_audits SET scanned_count = scanned_count + 1 WHERE id = ? AND status = "open"', [auditId], (countErr) => {
+            if (countErr) return res.status(500).json({ success: false, message: 'Đã lưu mã nhưng không cập nhật được bộ đếm phiếu: ' + countErr.sqlMessage });
+            res.json({ success: true, message: 'Đã ghi nhận mã quét. Tiếp tục quét kiện hàng trong kho.' });
+          });
+        }
+      );
+    });
+  });
+});
+
+app.put('/api/warehouse/inventory-audits/:id/complete', (req, res) => {
+  const auditId = Number(req.params.id);
+  if (!Number.isSafeInteger(auditId) || auditId <= 0) {
+    return res.status(400).json({ success: false, message: 'Mã phiếu kiểm kê không hợp lệ.' });
+  }
+  const sendReport = () => db.query(
+    'SELECT a.id, a.warehouse_id, a.expected_count, (SELECT COUNT(*) FROM warehouse_inventory_audit_scans s WHERE s.audit_id = a.id) AS scanned_count, a.created_at, a.completed_at FROM warehouse_inventory_audits a WHERE a.id = ? AND a.status = "completed"',
+    [auditId],
+    (auditErr, audits) => {
+      if (auditErr) return res.status(500).json({ success: false, message: 'Đã chốt phiếu nhưng không tải được báo cáo: ' + auditErr.sqlMessage });
+      if (!audits.length) return res.status(404).json({ success: false, message: 'Không tìm thấy phiếu kiểm kê đã chốt.' });
+      db.query(
+        `SELECT i.order_id, i.tracking_code
+         FROM warehouse_inventory_audit_items i
+         LEFT JOIN warehouse_inventory_audit_scans s ON s.audit_id = i.audit_id AND s.order_id = i.order_id
+         WHERE i.audit_id = ? AND s.order_id IS NULL ORDER BY i.tracking_code`,
+        [auditId],
+        (missingErr, missing) => {
+          if (missingErr) return res.status(500).json({ success: false, message: 'Không tải được danh sách kiện thiếu: ' + missingErr.sqlMessage });
+          db.query(
+            'SELECT scan_code FROM warehouse_inventory_audit_scans WHERE audit_id = ? AND order_id IS NULL ORDER BY scan_code',
+            [auditId],
+            (extraErr, extra) => {
+              if (extraErr) return res.status(500).json({ success: false, message: 'Không tải được danh sách mã dư: ' + extraErr.sqlMessage });
+              res.json({ success: true, data: { ...audits[0], missing, extra, missing_count: missing.length, extra_count: extra.length } });
+            }
+          );
+        }
+      );
+    }
+  );
+  db.query(
+    'UPDATE warehouse_inventory_audits SET status = "completed", completed_at = CURRENT_TIMESTAMP WHERE id = ? AND status = "open"',
+    [auditId],
+    (completeErr, result) => {
+      if (completeErr) return res.status(500).json({ success: false, message: 'Không thể chốt phiếu kiểm kê: ' + completeErr.sqlMessage });
+      if (!result.affectedRows) {
+        return db.query('SELECT status FROM warehouse_inventory_audits WHERE id = ?', [auditId], (auditErr, audits) => {
+          if (auditErr) return res.status(500).json({ success: false, message: 'Không kiểm tra được trạng thái phiếu: ' + auditErr.sqlMessage });
+          if (!audits.length) return res.status(404).json({ success: false, message: 'Không tìm thấy phiếu kiểm kê.' });
+          if (audits[0].status !== 'completed') return res.status(409).json({ success: false, message: 'Phiếu kiểm kê chưa thể chốt.' });
+          sendReport();
+        });
+      }
+      sendReport();
+    }
+  );
+});
+
 app.post('/api/warehouse/scan', (req, res) => {
   const { tracking_code, warehouse_id } = req.body;
+  const binCode = String(req.body.bin_code || '').trim().toUpperCase();
+  const crossDockRequested = req.body.cross_dock === true || req.body.cross_dock === 'true';
+  if (!String(tracking_code || '').trim() || (!crossDockRequested && !/^[A-Z0-9][A-Z0-9._-]{0,79}$/.test(binCode))) {
+    return res.status(400).json({ success: false, message: 'Quét mã vận đơn và mã vị trí kệ hợp lệ trước khi nhập kho.' });
+  }
   db.query('SELECT * FROM orders WHERE tracking_code = ?', [tracking_code], (err, results) => {
     if (err) return res.status(500).json({ success: false, message: err.sqlMessage });
     if (results.length === 0) return res.status(404).json({ success: false, message: '❌ Không tìm thấy Mã vận đơn này!' });
@@ -2127,16 +3621,32 @@ app.post('/api/warehouse/scan', (req, res) => {
     }
 
     function finalizeScan(targetWarehouseId, targetStatus, targetMessage) {
-      db.query('UPDATE orders SET status = ?, current_warehouse_id = ? WHERE id = ? AND status = ?', [targetStatus, targetWarehouseId, order.id, order.status], (updateErr, result) => {
-        if (updateErr) return res.status(500).json({ success: false, message: updateErr.sqlMessage });
-        if (!result.affectedRows) return res.status(409).json({ success: false, message: 'Trạng thái đơn đã thay đổi, vui lòng quét lại.' });
-        recordOrderStatus(order.id, order.status, targetStatus, 'Quét mã tại kho', null, () => {
-          notifyUser(order.shop_id, order.id, 'Cập nhật luân chuyển vận đơn', `Đơn ${order.tracking_code}: ${targetMessage}`);
-          io.emit('order_status_changed', { order_id: Number(order.id), status: targetStatus });
-          const safeOrder = redactDeliveryOtp([order])[0];
-          res.json({ success: true, message: targetMessage, order: { ...safeOrder, status: targetStatus, current_warehouse_id: targetWarehouseId } });
-        });
-      });
+      const crossDock = crossDockRequested;
+      const saveInboundOrder = (binId) => {
+          db.query('UPDATE orders SET status = ?, current_warehouse_id = ?, storage_bin_id = ?, cross_docked = ? WHERE id = ? AND status = ?', [targetStatus, targetWarehouseId, binId, crossDock ? 1 : 0, order.id, order.status], (updateErr, result) => {
+            if (updateErr) return res.status(500).json({ success: false, message: updateErr.sqlMessage });
+            if (!result.affectedRows) return res.status(409).json({ success: false, message: 'Trạng thái đơn đã thay đổi, vui lòng quét lại.' });
+            const storageNote = crossDock ? 'Chuyển tải nhanh, không lưu kệ' : `Nhập kho tại vị trí ${binCode}`;
+            recordOrderStatus(order.id, order.status, targetStatus, storageNote, null, () => {
+              const storageMessage = crossDock ? ' Đơn được chuyển thẳng đến khu xuất, không lưu kệ.' : ` Vị trí lưu kho: ${binCode}.`;
+              notifyUser(order.shop_id, order.id, 'Cập nhật luân chuyển vận đơn', `${targetMessage}${storageMessage}`);
+              io.emit('order_status_changed', { order_id: Number(order.id), status: targetStatus });
+              const safeOrder = redactDeliveryOtp([order])[0];
+              res.json({ success: true, message: `${targetMessage}${storageMessage}`, order: { ...safeOrder, status: targetStatus, current_warehouse_id: targetWarehouseId, storage_bin_id: binId, cross_docked: crossDock ? 1 : 0 } });
+            });
+          });
+      };
+      if (crossDock) return saveInboundOrder(null);
+      if (!binCode) return res.status(400).json({ success: false, message: 'Quét mã vị trí kệ trước khi nhập kiện hàng vào kho.' });
+      db.query(
+        'SELECT id FROM warehouse_bin_locations WHERE warehouse_id = ? AND bin_code = ? AND is_active = 1 LIMIT 1',
+        [targetWarehouseId, binCode],
+        (binErr, binRows) => {
+          if (binErr) return res.status(500).json({ success: false, message: 'Không thể kiểm tra vị trí kệ: ' + binErr.sqlMessage });
+          if (!binRows.length) return res.status(409).json({ success: false, message: `Mã kệ ${binCode} chưa được khai báo hoặc không thuộc kho đang nhập.` });
+          saveInboundOrder(Number(binRows[0].id));
+        }
+      );
     }
   });
 });
@@ -2271,7 +3781,92 @@ app.get('/api/linehaul/trips', (req, res) => {
   `;
   db.query(sql, (err, rows) => {
     if (err) return res.status(500).json({ success: false, message: err.sqlMessage });
-    res.json({ success: true, data: rows });
+    const data = rows.map((trip) => ({
+      ...trip,
+      manifest_url: `/api/public/linehaul-manifests/${jwt.sign(
+        { purpose: 'linehaul_manifest', trip_id: Number(trip.id) },
+        JWT_SECRET,
+        { expiresIn: '7d' }
+      )}`
+    }));
+    res.json({ success: true, data });
+  });
+});
+
+app.get('/api/public/linehaul-manifests/:token', (req, res) => {
+  jwt.verify(req.params.token, JWT_SECRET, (tokenErr, payload) => {
+    if (tokenErr || payload?.purpose !== 'linehaul_manifest' || !Number.isSafeInteger(Number(payload.trip_id))) {
+      return res.status(401).json({ success: false, message: 'Mã QR chuyến xe không hợp lệ hoặc đã hết hạn.' });
+    }
+    const tripId = Number(payload.trip_id);
+    db.query(
+      `SELECT t.trip_code, t.vehicle_plate, t.status, t.departed_at, t.arrived_at,
+        source.name AS source_warehouse_name, destination.name AS destination_warehouse_name
+       FROM linehaul_trips t
+       JOIN warehouses source ON source.id = t.source_warehouse_id
+       JOIN warehouses destination ON destination.id = t.destination_warehouse_id
+       WHERE t.id = ? LIMIT 1`,
+      [tripId],
+      (tripErr, trips) => {
+        if (tripErr) return res.status(500).json({ success: false, message: 'Không tải được chuyến xe: ' + tripErr.sqlMessage });
+        if (!trips.length) return res.status(404).json({ success: false, message: 'Không tìm thấy chuyến xe trong manifest.' });
+        db.query(
+          `SELECT b.bag_code, o.tracking_code
+           FROM linehaul_trip_bags tb
+           JOIN shipment_bags b ON b.id = tb.bag_id
+           LEFT JOIN shipment_bag_orders bo ON bo.bag_id = b.id
+           LEFT JOIN orders o ON o.id = bo.order_id
+           WHERE tb.trip_id = ?
+           ORDER BY b.bag_code, o.tracking_code`,
+          [tripId],
+          (manifestErr, rows) => {
+            if (manifestErr) return res.status(500).json({ success: false, message: 'Không tải được danh sách kiện trên chuyến: ' + manifestErr.sqlMessage });
+            const bags = new Map();
+            for (const row of rows) {
+              if (!bags.has(row.bag_code)) bags.set(row.bag_code, []);
+              if (row.tracking_code) bags.get(row.bag_code).push(row.tracking_code);
+            }
+            const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (character) => ({
+              '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+            })[character]);
+            const bagMarkup = [...bags.entries()].map(([bagCode, trackingCodes]) => `
+              <section class="bag">
+                <h2>${escapeHtml(bagCode)} <small>${trackingCodes.length} kiện</small></h2>
+                <ul>${trackingCodes.map((code) => `<li>${escapeHtml(code)}</li>`).join('') || '<li>Chưa có kiện hàng</li>'}</ul>
+              </section>`).join('');
+            res.set('Cache-Control', 'no-store');
+            res.type('html').send(`<!doctype html>
+              <html lang="vi">
+                <head>
+                  <meta charset="utf-8" />
+                  <meta name="viewport" content="width=device-width, initial-scale=1" />
+                  <title>Manifest ${escapeHtml(trips[0].trip_code)}</title>
+                  <style>
+                    body{font:16px system-ui,sans-serif;background:#f1f5f9;color:#0f172a;margin:0;padding:20px}
+                    main{max-width:720px;margin:auto;background:white;border-radius:20px;padding:24px;box-shadow:0 8px 30px #0f172a12}
+                    h1{margin:0 0 8px;font-size:24px}p{margin:6px 0;color:#475569}.summary{padding:16px;background:#eef2ff;border-radius:14px}
+                    .bag{border:1px solid #e2e8f0;border-radius:14px;padding:14px;margin-top:14px}
+                    .bag h2{font-size:17px;margin:0}.bag small{color:#64748b;font-weight:500}
+                    ul{columns:2;list-style:none;padding:0;margin:12px 0 0}li{padding:4px 0;font-family:ui-monospace,monospace}
+                    @media(max-width:480px){body{padding:10px}main{padding:16px}ul{columns:1}}
+                  </style>
+                </head>
+                <body><main>
+                  <h1>Manifest chuyến ${escapeHtml(trips[0].trip_code)}</h1>
+                  <div class="summary">
+                    <p><strong>Biển số:</strong> ${escapeHtml(trips[0].vehicle_plate)}</p>
+                    <p><strong>Tuyến:</strong> ${escapeHtml(trips[0].source_warehouse_name)} → ${escapeHtml(trips[0].destination_warehouse_name)}</p>
+                    <p><strong>Trạng thái:</strong> ${escapeHtml(trips[0].status)}</p>
+                    <p><strong>Số bao:</strong> ${bags.size} · <strong>Tổng kiện:</strong> ${[...bags.values()].reduce((total, codes) => total + codes.length, 0)}</p>
+                  </div>
+                  ${bagMarkup || '<p class="bag">Chuyến xe chưa được gán bao.</p>'}
+                  <p style="margin-top:20px;font-size:12px">Manifest chỉ hiển thị mã kiện và mã vận đơn; không hiển thị thông tin cá nhân người nhận.</p>
+                </main></body>
+              </html>`);
+          }
+        );
+      }
+    );
   });
 });
 
@@ -2346,8 +3941,8 @@ app.post('/api/linehaul/trips/:id/bags', (req, res) => {
 app.post('/api/driver/trips/scan', (req, res) => {
   const driverId = Number(req.body.driver_id);
   const bagCode = String(req.body.bag_code || '').trim().toUpperCase();
-  if (!Number.isInteger(driverId) || driverId <= 0 || !bagCode) {
-    return res.status(400).json({ success: false, message: 'Tài xế hoặc mã bao không hợp lệ.' });
+  if (!Number.isInteger(driverId) || driverId !== Number(req.authUser.id) || !bagCode) {
+    return res.status(403).json({ success: false, message: 'Tài xế chỉ được quét chuyến được giao cho tài khoản đang đăng nhập.' });
   }
   const findSql = `
     SELECT t.id AS trip_id, t.trip_code, t.status, t.destination_warehouse_id, b.id AS bag_id, b.bag_code
@@ -2444,7 +4039,7 @@ app.post('/api/warehouse/linehaul/scan', (req, res) => {
 });
 
 app.get('/api/warehouse/inventory', (req, res) => {
-  const sql = 'SELECT o.*, w.name AS warehouse_name, w.ward_name FROM orders o LEFT JOIN warehouses w ON w.id = o.current_warehouse_id WHERE o.status IN ("at_origin_warehouse", "at_central_warehouse", "at_destination_warehouse") AND (? IS NULL OR o.current_warehouse_id = ?) ORDER BY o.updated_at DESC';
+  const sql = 'SELECT o.*, w.name AS warehouse_name, w.ward_name, b.bin_code AS storage_bin_code, b.bin_name AS storage_bin_name FROM orders o LEFT JOIN warehouses w ON w.id = o.current_warehouse_id LEFT JOIN warehouse_bin_locations b ON b.id = o.storage_bin_id WHERE o.status IN ("at_origin_warehouse", "at_central_warehouse", "at_destination_warehouse") AND (? IS NULL OR o.current_warehouse_id = ?) ORDER BY o.updated_at DESC';
   const warehouseId = req.query.warehouse_id ? Number(req.query.warehouse_id) : null;
   db.query(sql, [warehouseId, warehouseId], (err, results) => {
     if (err) return res.status(500).json({ success: false, message: err.sqlMessage });
@@ -2483,16 +4078,22 @@ app.get('/api/accountant/debt', (req, res) => {
 
 app.get('/api/driver/wallet/:driverId', (req, res) => {
   const driverId = Number(req.params.driverId);
-  if (!Number.isInteger(driverId) || driverId <= 0) return res.status(400).json({ success: false, message: 'Mã tài xế không hợp lệ.' });
+  if (!Number.isInteger(driverId) || driverId !== Number(req.authUser.id)) {
+    return res.status(403).json({ success: false, message: 'Bạn chỉ được xem ví COD của tài khoản đang đăng nhập.' });
+  }
   const sql = `
     SELECT u.id, u.full_name,
+      COALESCE(w.balance, 0) AS deposit_balance,
+      COALESCE(w.reserved_balance, 0) AS reserved_balance,
+      GREATEST(0, COALESCE(w.balance, 0) - COALESCE(w.reserved_balance, 0)) AS available_balance,
       (SELECT COALESCE(SUM(o.cod_collected_amount), 0) FROM orders o
        WHERE o.delivery_shipper_id = u.id AND o.status = 'completed' AND o.cod_collected = 1
          AND o.cod_payment_method = 'cash' AND o.cod_remittance_id IS NULL) AS cash_on_hand,
       (SELECT COALESCE(SUM(r.amount), 0) FROM driver_cash_remittances r
        WHERE r.driver_id = u.id AND r.status = 'pending') AS cash_pending_handover
     FROM users u
-    WHERE u.id = ?
+    LEFT JOIN driver_wallets w ON w.driver_id = u.id
+    WHERE u.id = ? AND u.role IN ('pickup_driver','delivery_driver') AND u.status = 'active'
   `;
   db.query(sql, [driverId], (err, rows) => {
     if (err) return res.status(500).json({ success: false, message: err.sqlMessage });
@@ -2501,9 +4102,78 @@ app.get('/api/driver/wallet/:driverId', (req, res) => {
   });
 });
 
+app.get('/api/accountant/driver-wallets', (req, res) => {
+  db.query(
+    `SELECT u.id AS driver_id, u.full_name, COALESCE(w.balance, 0) AS deposit_balance,
+      COALESCE(w.reserved_balance, 0) AS reserved_balance,
+      GREATEST(0, COALESCE(w.balance, 0) - COALESCE(w.reserved_balance, 0)) AS available_balance
+     FROM users u
+     LEFT JOIN driver_wallets w ON w.driver_id = u.id
+     WHERE u.role = 'delivery_driver' AND u.status = 'active'
+     ORDER BY u.full_name`,
+    (err, rows) => {
+      if (err) return res.status(500).json({ success: false, message: 'Không tải được danh sách ký quỹ tài xế.' });
+      res.json({ success: true, data: rows });
+    }
+  );
+});
+
+app.post('/api/accountant/driver-wallets/:driverId/deposits', (req, res) => {
+  const driverId = Number(req.params.driverId);
+  const amount = Number(req.body.amount);
+  const note = String(req.body.note || '').trim();
+  if (!Number.isSafeInteger(driverId) || driverId <= 0
+    || !Number.isFinite(amount) || amount <= 0 || amount > 100000000
+    || note.length > 200) {
+    return res.status(400).json({ success: false, message: 'Số tiền nạp phải từ 1 đến 100.000.000 đồng; ghi chú tối đa 200 ký tự.' });
+  }
+  db.query(
+    `INSERT INTO driver_wallets (driver_id)
+     SELECT id FROM users WHERE id = ? AND role = 'delivery_driver' AND status = 'active'
+     ON DUPLICATE KEY UPDATE driver_id = VALUES(driver_id)`,
+    [driverId],
+    (walletErr) => {
+      if (walletErr) return res.status(500).json({ success: false, message: 'Không thể tạo ví ký quỹ.' });
+      db.query('SELECT id FROM users WHERE id = ? AND role = "delivery_driver" AND status = "active"', [driverId], (driverErr, drivers) => {
+        if (driverErr) return res.status(500).json({ success: false, message: 'Không thể kiểm tra tài xế.' });
+        if (!drivers.length) return res.status(404).json({ success: false, message: 'Không tìm thấy tài xế giao hàng đang hoạt động.' });
+        db.query('UPDATE driver_wallets SET balance = balance + ? WHERE driver_id = ?', [amount, driverId], (updateErr) => {
+          if (updateErr) return res.status(500).json({ success: false, message: 'Không thể cộng số dư ký quỹ.' });
+          db.query(
+            `INSERT INTO driver_wallet_transactions (driver_id, transaction_type, amount, note, created_by)
+             VALUES (?, 'deposit', ?, ?, ?)`,
+            [driverId, amount, note || 'Kế toán xác nhận đã nhận tiền ký quỹ', req.authUser.id],
+            (ledgerErr) => {
+              if (ledgerErr) {
+                db.query('UPDATE driver_wallets SET balance = GREATEST(0, balance - ?) WHERE driver_id = ?', [amount, driverId], (rollbackErr) => {
+                  if (rollbackErr) console.error('Không thể hoàn tác nạp ví sau lỗi ghi sổ:', rollbackErr);
+                  return res.status(500).json({ success: false, message: 'Không thể lưu lịch sử nạp ký quỹ; số dư đã được hoàn tác nếu thao tác bù trừ thành công.' });
+                });
+                return;
+              }
+              db.query(
+                `SELECT balance AS deposit_balance, reserved_balance,
+                  GREATEST(0, balance - reserved_balance) AS available_balance
+                 FROM driver_wallets WHERE driver_id = ?`,
+                [driverId],
+                (selectErr, rows) => {
+                  if (selectErr) return res.status(500).json({ success: false, message: 'Đã nhận tiền nhưng không tải được số dư ví.' });
+                  res.status(201).json({ success: true, data: rows[0], message: 'Đã xác nhận nhận tiền ký quỹ và cộng vào ví tài xế.' });
+                }
+              );
+            }
+          );
+        });
+      });
+    }
+  );
+});
+
 app.post('/api/driver/cash-remittances', (req, res) => {
   const driverId = Number(req.body.driver_id);
-  if (!Number.isInteger(driverId) || driverId <= 0) return res.status(400).json({ success: false, message: 'Mã tài xế không hợp lệ.' });
+  if (!Number.isInteger(driverId) || driverId !== Number(req.authUser.id)) {
+    return res.status(403).json({ success: false, message: 'Bạn chỉ được tạo phiếu nộp tiền cho tài khoản đang đăng nhập.' });
+  }
   db.query(
     `SELECT id FROM orders
      WHERE delivery_shipper_id = ? AND status = 'completed' AND cod_collected = 1
@@ -2527,12 +4197,11 @@ app.post('/api/driver/cash-remittances', (req, res) => {
               (updateErr, updateResult) => {
                 if (updateErr) return res.status(500).json({ success: false, message: updateErr.sqlMessage });
                 if (updateResult.affectedRows !== orderIds.length) {
-                  db.query('UPDATE orders SET cod_remittance_id = NULL WHERE cod_remittance_id = ?', [result.insertId], (rollbackErr) => {
+                  return db.query('UPDATE orders SET cod_remittance_id = NULL WHERE cod_remittance_id = ?', [result.insertId], (rollbackErr) => {
                     if (rollbackErr) console.error('Không thể hoàn tác giữ chỗ tiền COD:', rollbackErr);
                     db.query('DELETE FROM driver_cash_remittances WHERE id = ?', [result.insertId], () => {});
                     return res.status(409).json({ success: false, message: 'Ví vừa thay đổi. Tải lại số dư rồi thử lại.' });
                   });
-                  return;
                 }
                 res.status(201).json({ success: true, data: { remittance_id: result.insertId, amount }, message: 'Đã ghi nhận yêu cầu nộp tiền. Kế toán cần xác nhận tiền mặt.' });
               }
@@ -2540,6 +4209,42 @@ app.post('/api/driver/cash-remittances', (req, res) => {
           });
         }
       );
+    }
+  );
+});
+
+app.get('/api/driver/expense-claims', (req, res) => {
+  const driverId = Number(req.authUser.id);
+  db.query(
+    `SELECT id, expense_type, amount, note, receipt_image, status, review_note, created_at, reviewed_at
+     FROM driver_expense_claims WHERE driver_id = ? ORDER BY created_at DESC LIMIT 100`,
+    [driverId],
+    (err, rows) => {
+      if (err) return res.status(500).json({ success: false, message: 'Không tải được yêu cầu phụ phí: ' + err.sqlMessage });
+      res.json({ success: true, data: rows });
+    }
+  );
+});
+
+app.post('/api/driver/expense-claims', podUpload.fields([{ name: 'receipt_image', maxCount: 1 }]), (req, res) => {
+  const driverId = Number(req.authUser.id);
+  const expenseType = String(req.body.expense_type || '');
+  const amount = Number(req.body.amount);
+  const note = String(req.body.note || '').trim();
+  const receipt = req.files?.receipt_image?.[0];
+  if (!Number.isSafeInteger(driverId) || driverId <= 0
+    || !['toll', 'parking', 'fuel', 'other'].includes(expenseType)
+    || !Number.isFinite(amount) || amount <= 0 || amount > 10000000
+    || note.length < 5 || note.length > 500 || !receipt) {
+    return res.status(400).json({ success: false, message: 'Loại chi phí, số tiền, ghi chú hoặc ảnh biên lai không hợp lệ.' });
+  }
+  db.query(
+    `INSERT INTO driver_expense_claims (driver_id, expense_type, amount, note, receipt_image)
+     VALUES (?, ?, ?, ?, ?)`,
+    [driverId, expenseType, amount, note, `/uploads/${receipt.filename}`],
+    (err, result) => {
+      if (err) return res.status(500).json({ success: false, message: 'Không thể gửi yêu cầu phụ phí: ' + err.sqlMessage });
+      res.status(201).json({ success: true, data: { id: result.insertId }, message: 'Đã gửi biên lai chờ Kế toán duyệt.' });
     }
   );
 });
@@ -2561,19 +4266,111 @@ app.get('/api/accountant/driver-remittances', (req, res) => {
   });
 });
 
+app.get('/api/accountant/expense-claims', (req, res) => {
+  const status = ['pending', 'approved', 'rejected'].includes(req.query.status) ? req.query.status : 'pending';
+  db.query(
+    `SELECT c.id, c.driver_id, u.full_name AS driver_name, c.expense_type, c.amount, c.note,
+      c.receipt_image, c.status, c.review_note, c.created_at, c.reviewed_at, reviewer.full_name AS reviewer_name
+     FROM driver_expense_claims c
+     JOIN users u ON u.id = c.driver_id
+     LEFT JOIN users reviewer ON reviewer.id = c.reviewed_by
+     WHERE c.status = ? ORDER BY c.created_at ASC`,
+    [status],
+    (err, rows) => {
+      if (err) return res.status(500).json({ success: false, message: 'Không tải được danh sách phụ phí: ' + err.sqlMessage });
+      res.json({ success: true, data: rows });
+    }
+  );
+});
+
+app.put('/api/accountant/expense-claims/:id/review', (req, res) => {
+  const claimId = Number(req.params.id);
+  const status = String(req.body.status || '');
+  const reviewNote = String(req.body.review_note || '').trim();
+  if (!Number.isSafeInteger(claimId) || claimId <= 0 || !['approved', 'rejected'].includes(status)
+    || reviewNote.length > 500 || status === 'rejected' && reviewNote.length < 5) {
+    return res.status(400).json({ success: false, message: 'Trạng thái duyệt hoặc ghi chú xử lý không hợp lệ.' });
+  }
+  db.beginTransaction((transactionErr) => {
+    if (transactionErr) return res.status(500).json({ success: false, message: 'Không mở được giao dịch duyệt phụ phí: ' + transactionErr.sqlMessage });
+    db.query(
+      `UPDATE driver_expense_claims SET status = ?, reviewed_by = ?, review_note = ?, reviewed_at = CURRENT_TIMESTAMP
+       WHERE id = ? AND status = 'pending'`,
+      [status, Number(req.authUser.id), reviewNote || null, claimId],
+      (updateErr, result) => {
+        if (updateErr || !result.affectedRows) {
+          return db.rollback(() => res.status(updateErr ? 500 : 409).json({
+            success: false,
+            message: updateErr ? 'Không cập nhật được yêu cầu: ' + updateErr.sqlMessage : 'Yêu cầu đã được xử lý hoặc không tồn tại.'
+          }));
+        }
+        const finalize = () => db.commit((commitErr) => {
+          if (commitErr) return db.rollback(() => res.status(500).json({ success: false, message: 'Không thể lưu giao dịch duyệt phụ phí: ' + commitErr.sqlMessage }));
+          res.json({ success: true, message: status === 'approved' ? 'Đã duyệt và cộng phụ phí vào lương tháng tạo yêu cầu.' : 'Đã từ chối yêu cầu phụ phí.' });
+        });
+        if (status !== 'approved') return finalize();
+        db.query(
+          `INSERT INTO employee_payroll_adjustments (user_id, payroll_month, adjustment_type, amount, reason)
+           SELECT driver_id, DATE_FORMAT(created_at, '%Y-%m'), 'bonus', amount, CONCAT('Hoàn phụ phí claim #', id)
+           FROM driver_expense_claims WHERE id = ?`,
+          [claimId],
+          (payrollErr, payrollResult) => {
+            if (payrollErr || !payrollResult.affectedRows) {
+              return db.rollback(() => res.status(500).json({
+                success: false,
+                message: payrollErr ? 'Đã duyệt nhưng không cộng được vào bảng lương: ' + payrollErr.sqlMessage : 'Không tìm thấy phiếu phụ phí để cộng vào lương.'
+              }));
+            }
+            finalize();
+          });
+      }
+    );
+  });
+});
+
 app.put('/api/accountant/driver-remittances/:id/receive', (req, res) => {
   const remittanceId = Number(req.params.id);
-  const accountantId = Number(req.body.accountant_id);
-  if (!Number.isSafeInteger(remittanceId) || remittanceId <= 0 || !Number.isInteger(accountantId) || accountantId <= 0) {
-    return res.status(400).json({ success: false, message: 'Mã phiếu nộp hoặc kế toán không hợp lệ.' });
+  const accountantId = Number(req.authUser.id);
+  if (!Number.isSafeInteger(remittanceId) || remittanceId <= 0) {
+    return res.status(400).json({ success: false, message: 'Mã phiếu nộp không hợp lệ.' });
   }
   db.query(
-    'UPDATE driver_cash_remittances SET status = "received", received_by = ?, received_at = CURRENT_TIMESTAMP WHERE id = ? AND status = "pending"',
-    [accountantId, remittanceId],
-    (err, result) => {
-      if (err) return res.status(500).json({ success: false, message: err.sqlMessage });
-      if (!result.affectedRows) return res.status(409).json({ success: false, message: 'Phiếu nộp đã được xác nhận hoặc không tồn tại.' });
-      res.json({ success: true, message: 'Đã xác nhận nhận tiền mặt từ tài xế.' });
+    'SELECT id FROM driver_cash_remittances WHERE id = ? AND status = "pending" LIMIT 1',
+    [remittanceId],
+    (findErr, remittances) => {
+      if (findErr) return res.status(500).json({ success: false, message: findErr.sqlMessage });
+      if (!remittances.length) return res.status(409).json({ success: false, message: 'Phiếu nộp đã được xác nhận hoặc không tồn tại.' });
+      db.query('SELECT id FROM orders WHERE cod_remittance_id = ?', [remittanceId], (ordersErr, orders) => {
+        if (ordersErr) {
+          return res.status(500).json({ success: false, message: 'Không tải được đơn trong phiếu để giải phóng ký quỹ.' });
+        }
+        let remaining = orders.length;
+        let releaseFailed = false;
+        const markRemittanceReceived = () => {
+          db.query(
+            'UPDATE driver_cash_remittances SET status = "received", received_by = ?, received_at = CURRENT_TIMESTAMP WHERE id = ? AND status = "pending"',
+            [accountantId, remittanceId],
+            (updateErr, result) => {
+              if (updateErr) return res.status(500).json({ success: false, message: updateErr.sqlMessage });
+              if (!result.affectedRows) return res.status(409).json({ success: false, message: 'Phiếu nộp vừa được xác nhận bởi người khác.' });
+              res.json({ success: true, message: 'Đã xác nhận nhận tiền mặt và giải phóng ký quỹ các đơn trong phiếu.' });
+            }
+          );
+        };
+        if (!remaining) return markRemittanceReceived();
+        orders.forEach(({ id }) => releaseDriverWalletReservation(id, 'Kế toán xác nhận đã nhận COD tiền mặt', (releaseErr) => {
+          if (releaseErr) {
+            releaseFailed = true;
+            console.error(`Không thể giải phóng ký quỹ đơn ${id} sau khi nhận COD:`, releaseErr);
+          }
+          remaining -= 1;
+          if (remaining) return;
+          if (releaseFailed) {
+            return res.status(500).json({ success: false, message: 'Không thể giải phóng ký quỹ cho toàn bộ đơn; phiếu vẫn chờ để có thể thử lại.' });
+          }
+          markRemittanceReceived();
+        }));
+      });
     }
   );
 });
@@ -2584,7 +4381,7 @@ app.post('/api/driver/incidents', (req, res) => {
   const description = String(req.body.description || '').trim();
   const latitude = req.body.lat === undefined || req.body.lat === null ? null : Number(req.body.lat);
   const longitude = req.body.lng === undefined || req.body.lng === null ? null : Number(req.body.lng);
-  if (!Number.isInteger(driverId) || driverId <= 0
+  if (!Number.isInteger(driverId) || driverId !== Number(req.authUser.id)
     || !['accident', 'vehicle_breakdown', 'traffic', 'other'].includes(type)
     || !description || description.length > 2000
     || ((latitude === null) !== (longitude === null))
@@ -2804,58 +4601,93 @@ app.get('/api/hr/staff', (req, res) => {
 app.post('/api/hr/staff', (req, res) => {
   const { full_name, email, password, role, status } = req.body;
 
-  if (!full_name || !email || !password || !role) {
+  if (!full_name || !email || typeof password !== 'string' || !password || password.length > 1024 || !role) {
     return res.status(400).json({ success: false, message: 'Thiếu thông tin bắt buộc: họ tên, email, mật khẩu, chức vụ.' });
   }
 
-  const normalizedRole = String(role).trim();
+  const normalizedRole = String(role).trim().toLowerCase();
   const normalizedEmail = String(email).trim();
+  const normalizedName = String(full_name).trim();
+  const normalizedStatus = status || 'active';
+  if (!normalizedName || normalizedName.length > 255
+    || normalizedEmail.length > 255 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)
+    || !staffRoles.has(normalizedRole) || !staffStatuses.has(normalizedStatus)) {
+    return res.status(400).json({ success: false, message: 'Họ tên, email, chức vụ hoặc trạng thái nhân sự không hợp lệ.' });
+  }
 
   const sql = 'INSERT INTO users (full_name, email, password, role, status) VALUES (?, ?, ?, ?, ?)';
-  db.query(sql, [full_name.trim(), normalizedEmail, password, normalizedRole, status || 'active'], (err, result) => {
-    if (err) {
-      if (err.code === 'ER_DUP_ENTRY') {
-        return res.status(409).json({ success: false, message: 'Email đã tồn tại trong hệ thống.' });
+  hashPassword(password).then((passwordHash) => {
+    db.query(sql, [normalizedName, normalizedEmail, passwordHash, normalizedRole, normalizedStatus], (err, result) => {
+      if (err) {
+        if (err.code === 'ER_DUP_ENTRY') {
+          return res.status(409).json({ success: false, message: 'Email đã tồn tại trong hệ thống.' });
+        }
+        return res.status(500).json({ success: false, message: 'Lỗi tạo nhân sự: ' + err.sqlMessage });
       }
-      return res.status(500).json({ success: false, message: 'Lỗi tạo nhân sự: ' + err.sqlMessage });
-    }
 
-    res.json({ success: true, message: 'Đã tạo nhân sự mới thành công.', staffId: result.insertId });
+      res.json({ success: true, message: 'Đã tạo nhân sự mới thành công.', staffId: result.insertId });
+    });
+  }).catch((error) => {
+    console.error('Lỗi băm mật khẩu nhân sự mới:', error);
+    res.status(500).json({ success: false, message: 'Không thể tạo mật khẩu an toàn cho nhân sự.' });
   });
 });
 
 app.put('/api/hr/staff/:id', (req, res) => {
   const { full_name, email, password, role, status } = req.body;
+  const staffId = Number(req.params.id);
 
-  if (!full_name || !email || !role) {
+  if (!full_name || !email || !role || !Number.isInteger(staffId) || staffId <= 0) {
     return res.status(400).json({ success: false, message: 'Thiếu thông tin bắt buộc khi cập nhật nhân sự.' });
   }
 
-  const updates = [full_name.trim(), String(email).trim(), role, status || 'active'];
-  const sql = 'UPDATE users SET full_name = ?, email = ?, role = ?, status = ?';
-
-  if (password && String(password).trim()) {
-    updates.push(password);
-    sql += ', password = ?';
+  const normalizedName = String(full_name).trim();
+  const normalizedEmail = String(email).trim();
+  const normalizedRole = String(role).trim().toLowerCase();
+  const normalizedStatus = status || 'active';
+  if (!normalizedName || normalizedName.length > 255
+    || normalizedEmail.length > 255 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)
+    || !staffRoles.has(normalizedRole) || !staffStatuses.has(normalizedStatus)) {
+    return res.status(400).json({ success: false, message: 'Họ tên, email, chức vụ hoặc trạng thái nhân sự không hợp lệ.' });
   }
 
-  updates.push(req.params.id);
-  sql += ' WHERE id = ?';
+  const updates = [normalizedName, normalizedEmail, normalizedRole, normalizedStatus];
+  const sql = 'UPDATE users SET full_name = ?, email = ?, role = ?, status = ?';
 
-  db.query(sql, updates, (err, result) => {
-    if (err) {
-      if (err.code === 'ER_DUP_ENTRY') {
-        return res.status(409).json({ success: false, message: 'Email đã tồn tại trong hệ thống.' });
+  const saveStaff = (passwordHash = null) => {
+    if (passwordHash) {
+      updates.push(passwordHash);
+      sql += ', password = ?';
+    }
+    updates.push(staffId);
+    sql += ' WHERE id = ?';
+
+    db.query(sql, updates, (err, result) => {
+      if (err) {
+        if (err.code === 'ER_DUP_ENTRY') {
+          return res.status(409).json({ success: false, message: 'Email đã tồn tại trong hệ thống.' });
+        }
+        return res.status(500).json({ success: false, message: 'Lỗi cập nhật nhân sự: ' + err.sqlMessage });
       }
-      return res.status(500).json({ success: false, message: 'Lỗi cập nhật nhân sự: ' + err.sqlMessage });
-    }
 
-    if (result.affectedRows === 0) {
-      return res.status(404).json({ success: false, message: 'Không tìm thấy nhân sự để cập nhật.' });
-    }
+      if (result.affectedRows === 0) {
+        return res.status(404).json({ success: false, message: 'Không tìm thấy nhân sự để cập nhật.' });
+      }
 
-    res.json({ success: true, message: 'Cập nhật thông tin nhân sự thành công.' });
-  });
+      res.json({ success: true, message: 'Cập nhật thông tin nhân sự thành công.' });
+    });
+  };
+
+  if (password && String(password).trim()) {
+    if (typeof password !== 'string' || password.length > 1024) {
+      return res.status(400).json({ success: false, message: 'Mật khẩu không hợp lệ.' });
+    }
+    return hashPassword(password).then(saveStaff).catch((error) => {
+      console.error('Lỗi băm mật khẩu cập nhật:', error);
+      res.status(500).json({ success: false, message: 'Không thể cập nhật mật khẩu an toàn.' });
+    });
+  }
+  saveStaff();
 });
 
 app.delete('/api/hr/staff/:id', (req, res) => {
@@ -2870,9 +4702,14 @@ app.delete('/api/hr/staff/:id', (req, res) => {
 });
 
 app.put('/api/hr/staff/:id/status', (req, res) => {
+  const staffId = Number(req.params.id);
+  if (!Number.isInteger(staffId) || staffId <= 0 || !staffStatuses.has(req.body.status)) {
+    return res.status(400).json({ success: false, message: 'Mã nhân viên hoặc trạng thái không hợp lệ.' });
+  }
   const sql = 'UPDATE users SET status = ? WHERE id = ?';
-  db.query(sql, [req.body.status, req.params.id], (err, result) => {
+  db.query(sql, [req.body.status, staffId], (err, result) => {
     if (err) return res.status(500).json({ success: false, message: err.sqlMessage });
+    if (!result.affectedRows) return res.status(404).json({ success: false, message: 'Không tìm thấy nhân viên.' });
     res.json({ success: true });
   });
 });
@@ -2911,10 +4748,12 @@ app.get('/api/attendance', (req, res) => {
   const month = /^\d{4}-\d{2}$/.test(req.query.month || '')
     ? req.query.month
     : new Date().toISOString().slice(0, 7);
-  const userId = req.query.user_id ? Number(req.query.user_id) : null;
-  if (req.query.user_id && (!Number.isInteger(userId) || userId <= 0)) {
+  const requestedUserId = req.query.user_id ? Number(req.query.user_id) : null;
+  if (req.query.user_id && (!Number.isInteger(requestedUserId) || requestedUserId <= 0)) {
     return res.status(400).json({ success: false, message: 'Mã nhân viên không hợp lệ.' });
   }
+  const isHr = ['hr_manager', 'director'].includes(req.authRole || normalizeRole(req.authUser.role));
+  const userId = isHr ? requestedUserId : Number(req.authUser.id);
 
   const sql = `
     SELECT a.id, a.user_id, u.full_name, u.role,
@@ -2953,9 +4792,9 @@ app.post('/api/attendance/check-in', (req, res, next) => {
   const userId = Number(req.body.user_id);
   const latitude = req.body.lat === undefined || req.body.lat === '' ? null : Number(req.body.lat);
   const longitude = req.body.lng === undefined || req.body.lng === '' ? null : Number(req.body.lng);
-  if (!Number.isInteger(userId) || userId <= 0) {
+  if (!Number.isInteger(userId) || userId !== Number(req.authUser.id)) {
     removeAttendanceUpload(req.file);
-    return res.status(400).json({ success: false, message: 'Mã nhân viên không hợp lệ.' });
+    return res.status(403).json({ success: false, message: 'Bạn chỉ được chấm công cho tài khoản đang đăng nhập.' });
   }
   if ((latitude === null) !== (longitude === null)
     || (latitude !== null && (!Number.isFinite(latitude) || Math.abs(latitude) > 90))
@@ -3006,9 +4845,9 @@ app.post('/api/attendance/check-out', (req, res, next) => {
   const userId = Number(req.body.user_id);
   const latitude = req.body.lat === undefined || req.body.lat === '' ? null : Number(req.body.lat);
   const longitude = req.body.lng === undefined || req.body.lng === '' ? null : Number(req.body.lng);
-  if (!Number.isInteger(userId) || userId <= 0) {
+  if (!Number.isInteger(userId) || userId !== Number(req.authUser.id)) {
     removeAttendanceUpload(req.file);
-    return res.status(400).json({ success: false, message: 'Mã nhân viên không hợp lệ.' });
+    return res.status(403).json({ success: false, message: 'Bạn chỉ được chấm công cho tài khoản đang đăng nhập.' });
   }
   if ((latitude === null) !== (longitude === null)
     || (latitude !== null && (!Number.isFinite(latitude) || Math.abs(latitude) > 90))
@@ -3289,13 +5128,19 @@ app.post('/api/reports', (req, res, next) => {
     next();
   });
 }, (req, res) => {
-  const { created_by, department, title, content } = req.body;
-  if (!created_by || !department || !title || !content) {
+  const createdBy = Number(req.authUser.id);
+  const department = String(req.body.department || '').trim();
+  const title = String(req.body.title || '').trim();
+  const content = String(req.body.content || '').trim();
+  const allowedDepartments = new Set(['Phòng Tài Chính', 'Phòng Điều Phối', 'Phòng Kho', 'Phòng Nhân Sự', 'Phòng Nội Dung']);
+  if (!Number.isInteger(createdBy) || !allowedDepartments.has(department)
+    || !title || title.length > 255 || !content || content.length > 10000) {
+    removeReportUpload(req.file);
     return res.status(400).json({ success: false, message: 'Vui lòng nhập đầy đủ thông tin báo cáo.' });
   }
   const attachmentUrl = req.file ? `/uploads/${req.file.filename}` : null;
   const sql = 'INSERT INTO department_reports (created_by, department, title, content, attachment_url, status) VALUES (?, ?, ?, ?, ?, "pending")';
-  db.query(sql, [created_by, department, title, content, attachmentUrl], (err, result) => {
+  db.query(sql, [createdBy, department, title, content, attachmentUrl], (err, result) => {
     if (err) {
       console.error("Lỗi Database khi gửi báo cáo:", err);
       return res.status(500).json({ success: false, message: 'Lỗi MySQL: ' + err.sqlMessage });
@@ -3303,6 +5148,13 @@ app.post('/api/reports', (req, res, next) => {
     res.json({ success: true, message: 'Đã gửi báo cáo cho Giám đốc!', reportId: result.insertId });
   });
 });
+
+function removeReportUpload(file) {
+  if (!file) return;
+  fs.unlink(file.path, (err) => {
+    if (err && err.code !== 'ENOENT') console.error('Không thể xóa tệp báo cáo không hợp lệ:', err);
+  });
+}
 
 app.put('/api/admin/reports/:id/status', (req, res) => {
   const sql = 'UPDATE department_reports SET status = ? WHERE id = ?';

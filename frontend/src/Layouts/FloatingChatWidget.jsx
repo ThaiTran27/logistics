@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import { MessageCircle, Send, X, Bot, Headphones, ArrowLeft } from 'lucide-react';
 import { io } from 'socket.io-client';
+import { apiFetch as fetch } from '../utils/apiFetch.js';
 
-const chatSocket = io('http://localhost:5000');
+const API_URL = (import.meta.env.VITE_API_URL || 'http://localhost:5000').replace(/\/+$/, '');
+const chatSocket = io(API_URL);
 
 export default function FloatingChatWidget() {
   const [isOpen, setIsOpen] = useState(false);
@@ -51,7 +53,7 @@ export default function FloatingChatWidget() {
     setBusy(true);
     setError('');
     try {
-      const response = await fetch('http://localhost:5000/api/chat/sessions', {
+      const response = await fetch(`${API_URL}/api/chat/sessions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ mode: selectedMode, customer_name: name, customer_phone: phone })
@@ -86,7 +88,7 @@ export default function FloatingChatWidget() {
       setBusy(true);
       setMessages((existing) => [...existing, { id: `local-${Date.now()}`, sender_type: 'customer', message }]);
       try {
-        const response = await fetch('http://localhost:5000/api/chat/ai', {
+        const response = await fetch(`${API_URL}/api/chat/ai`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ session_id: session.id, guest_token: session.guest_token, message })
@@ -177,6 +179,11 @@ export default function FloatingChatWidget() {
                     </p>
                   </div>
                 ))}
+                {busy && mode === 'ai' && (
+                  <p className="w-fit rounded-2xl border border-slate-200 bg-white px-3 py-2 text-xs text-slate-500" role="status">
+                    AI đang soạn câu trả lời...
+                  </p>
+                )}
                 <div ref={endRef} />
               </div>
               <form onSubmit={guiTinNhan} className="flex gap-2 border-t p-3">

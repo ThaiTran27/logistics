@@ -1,9 +1,11 @@
-import { useState, useEffect } from 'react';
+import { apiFetch as fetch } from '../../utils/apiFetch.js';
+import { useState, useEffect, useCallback } from 'react';
 import { MapContainer, TileLayer, Marker, Popup, Polyline, GeoJSON, useMap, useMapEvents } from 'react-leaflet';
 import { io } from 'socket.io-client';
+import * as XLSX from 'xlsx';
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
-import { Store, PackagePlus, ListOrdered, Wallet, LogOut, User, Phone, MapPin, DollarSign, Clock, Truck, CheckCircle, AlertCircle, PackageSearch, Scale, Calculator, Eye, X, Box, MapPinned, Printer, Camera, Zap, ShieldAlert, Navigation, Bell } from 'lucide-react';
+import { Store, PackagePlus, ListOrdered, Wallet, LogOut, User, Phone, MapPin, DollarSign, Clock, Truck, CheckCircle, AlertCircle, PackageSearch, Scale, Calculator, Eye, X, Box, MapPinned, Printer, Camera, Zap, ShieldAlert, Navigation, Bell, FileSpreadsheet, Download, Upload, KeyRound, Webhook, Copy, RotateCw } from 'lucide-react';
 import Barcode from 'react-barcode';
 
 import iconMarkerUrl from 'leaflet/dist/images/marker-icon.png';
@@ -21,6 +23,22 @@ const HCMC_DISTRICTS = [
   'Quận Tân Phú', 'Thành phố Thủ Đức', 'Huyện Bình Chánh', 'Huyện Cần Giờ',
   'Huyện Củ Chi', 'Huyện Hóc Môn', 'Huyện Nhà Bè', 'Quận 2', 'Quận 9'
 ];
+const BULK_ORDER_LIMIT = 500;
+const API_URL = (import.meta.env.VITE_API_URL || 'http://localhost:5000').replace(/\/+$/, '');
+const BULK_ORDER_HEADERS = [
+  'shop_address', 'shop_province', 'shop_lat', 'shop_lng',
+  'receiver_name', 'receiver_phone', 'receiver_address', 'receiver_lat', 'receiver_lng',
+  'customer_email', 'cod_amount', 'weight_kg', 'length', 'width', 'height',
+  'item_value', 'service_fee', 'distance_km', 'destination_province',
+  'fee_payer', 'service_type', 'is_fragile', 'is_remote_area'
+];
+const normalizeImportHeader = (value) => String(value || '')
+  .trim()
+  .toLocaleLowerCase('vi')
+  .normalize('NFD')
+  .replace(/[\u0300-\u036f]/g, '')
+  .replace(/đ/g, 'd')
+  .replace(/[^a-z0-9]/g, '');
 
 const isPointInRing = (longitude, latitude, ring) => {
   let isInside = false;
@@ -197,6 +215,22 @@ export default function QuanLyDonHang() {
   const [shippingFee, setShippingFee] = useState(0);
   const [chargeableWeight, setChargeableWeight] = useState(0); // Trọng lượng tính cước cuối cùng
   const [tabHienTai, setTabHienTai] = useState('taodon');
+  const [bulkRows, setBulkRows] = useState([]);
+  const [bulkFileName, setBulkFileName] = useState('');
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkError, setBulkError] = useState('');
+  const [shopApiKeys, setShopApiKeys] = useState([]);
+  const [shopWebhook, setShopWebhook] = useState({ target_url: '', enabled: false, secret_configured: false });
+  const [apiKeyName, setApiKeyName] = useState('');
+  const [revealedCredential, setRevealedCredential] = useState(null);
+  const [integrationBusy, setIntegrationBusy] = useState(false);
+  const [integrationError, setIntegrationError] = useState('');
+  const [integrationMessage, setIntegrationMessage] = useState('');
+  const [rmaOrders, setRmaOrders] = useState([]);
+  const [rmaBusy, setRmaBusy] = useState(false);
+  const [rmaLoading, setRmaLoading] = useState(false);
+  const [rmaError, setRmaError] = useState('');
+  const [rmaMessage, setRmaMessage] = useState('');
   const [thongBaoShop, setThongBaoShop] = useState([]);
   
   const [donHangDangChon, setDonHangDangChon] = useState(null);
@@ -213,6 +247,342 @@ export default function QuanLyDonHang() {
   const shopId = localStorage.getItem('user_id');
   const shopName = localStorage.getItem('full_name') || 'Cửa Hàng Đối Tác';
 
+  const taiCauHinhTichHop = useCallback(async () => {
+    setIntegrationBusy(true);
+    setIntegrationError('');
+    try {
+      const response = await fetch(`${API_URL}/api/shop/integrations`);
+      const result = await response.json();
+      if (!response.ok || !result.success) throw new Error(result.message || 'Không tải được cấu hình tích hợp.');
+      setShopApiKeys(result.data.api_keys || []);
+      setShopWebhook(result.data.webhook || { target_url: '', enabled: false, secret_configured: false });
+    } catch (error) {
+      setIntegrationError(error.message || 'Không tải được cấu hình tích hợp.');
+    } finally {
+      setIntegrationBusy(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (tabHienTai === 'integrations') taiCauHinhTichHop();
+  }, [tabHienTai, taiCauHinhTichHop]);
+
+  const taiDanhSachRma = useCallback(async () => {
+    setRmaLoading(true);
+    setRmaError('');
+    try {
+      const response = await fetch(`${API_URL}/api/shop/rma`);
+      const result = await response.json();
+      if (!response.ok || !result.success) throw new Error(result.message || 'Không tải được hồ sơ hàng hoàn.');
+      setRmaOrders(result.data || []);
+    } catch (error) {
+      setRmaError(error.message || 'Không tải được hồ sơ hàng hoàn.');
+    } finally {
+      setRmaLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (tabHienTai === 'rma') taiDanhSachRma();
+  }, [tabHienTai, taiDanhSachRma]);
+
+  const guiYeuCauGiaoLai = async (event, order) => {
+    event.preventDefault();
+    const formData = new FormData(event.currentTarget);
+    setRmaBusy(true);
+    setRmaError('');
+    setRmaMessage('');
+    try {
+      const response = await fetch(`${API_URL}/api/shop/rma/${order.id}/redelivery`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          note: formData.get('note'),
+          customer_confirmed: formData.get('customer_confirmed') === 'on'
+        })
+      });
+      const result = await response.json();
+      if (!response.ok || !result.success) throw new Error(result.message || 'Không gửi được yêu cầu giao lại.');
+      setRmaMessage(result.message);
+      await taiDanhSachRma();
+    } catch (error) {
+      setRmaError(error.message || 'Không gửi được yêu cầu giao lại.');
+    } finally {
+      setRmaBusy(false);
+    }
+  };
+
+  const createShopApiKey = async (event) => {
+    event.preventDefault();
+    setIntegrationBusy(true);
+    setIntegrationError('');
+    setIntegrationMessage('');
+    try {
+      const response = await fetch(`${API_URL}/api/shop/integrations/keys`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: apiKeyName })
+      });
+      const result = await response.json();
+      if (!response.ok || !result.success) throw new Error(result.message || 'Không tạo được API key.');
+      setRevealedCredential({ label: `API key · ${result.data.name}`, value: result.data.api_key });
+      setApiKeyName('');
+      await taiCauHinhTichHop();
+      setIntegrationMessage(result.message);
+    } catch (error) {
+      setIntegrationError(error.message || 'Không tạo được API key.');
+    } finally {
+      setIntegrationBusy(false);
+    }
+  };
+
+  const revokeShopApiKey = async (key) => {
+    if (!window.confirm(`Thu hồi API key "${key.name}"? Hệ thống đang tích hợp bằng key này sẽ không thể tạo đơn nữa.`)) return;
+    setIntegrationBusy(true);
+    setIntegrationError('');
+    setIntegrationMessage('');
+    try {
+      const response = await fetch(`${API_URL}/api/shop/integrations/keys/${key.id}`, { method: 'DELETE' });
+      const result = await response.json();
+      if (!response.ok || !result.success) throw new Error(result.message || 'Không thu hồi được API key.');
+      setRevealedCredential(null);
+      await taiCauHinhTichHop();
+      setIntegrationMessage(result.message);
+    } catch (error) {
+      setIntegrationError(error.message || 'Không thu hồi được API key.');
+    } finally {
+      setIntegrationBusy(false);
+    }
+  };
+
+  const saveShopWebhook = async (event) => {
+    event.preventDefault();
+    setIntegrationBusy(true);
+    setIntegrationError('');
+    setIntegrationMessage('');
+    try {
+      const response = await fetch(`${API_URL}/api/shop/integrations/webhook`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ target_url: shopWebhook.target_url })
+      });
+      const result = await response.json();
+      if (!response.ok || !result.success) throw new Error(result.message || 'Không lưu được webhook.');
+      await taiCauHinhTichHop();
+      setIntegrationMessage(result.message);
+    } catch (error) {
+      setIntegrationError(error.message || 'Không lưu được webhook.');
+    } finally {
+      setIntegrationBusy(false);
+    }
+  };
+
+  const createWebhookSecret = async () => {
+    setIntegrationBusy(true);
+    setIntegrationError('');
+    setIntegrationMessage('');
+    try {
+      const response = await fetch(`${API_URL}/api/shop/integrations/webhook/secret`, { method: 'POST' });
+      const result = await response.json();
+      if (!response.ok || !result.success) throw new Error(result.message || 'Không tạo được signing secret.');
+      setRevealedCredential({ label: 'Webhook signing secret', value: result.data.secret });
+      await taiCauHinhTichHop();
+      setIntegrationMessage(result.message);
+    } catch (error) {
+      setIntegrationError(error.message || 'Không tạo được signing secret.');
+    } finally {
+      setIntegrationBusy(false);
+    }
+  };
+
+  const copyCredential = async () => {
+    if (!revealedCredential) return;
+    try {
+      await navigator.clipboard.writeText(revealedCredential.value);
+      setIntegrationMessage('Đã sao chép thông tin bí mật.');
+    } catch {
+      setIntegrationError('Không thể truy cập clipboard. Hãy chọn và sao chép nội dung trong ô bên dưới.');
+    }
+  };
+
+  const downloadBulkTemplate = () => {
+    const worksheet = XLSX.utils.aoa_to_sheet([BULK_ORDER_HEADERS]);
+    worksheet['!cols'] = BULK_ORDER_HEADERS.map((header) => ({ wch: Math.max(header.length + 3, 18) }));
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Don hang');
+    XLSX.writeFile(workbook, 'mau-import-don-hang.xlsx');
+  };
+
+  const validateBulkOrder = (source, rowNumber) => {
+    const order = Object.fromEntries(BULK_ORDER_HEADERS.map((header) => [header, source[header] ?? '']));
+    const errors = [];
+    const requiredText = [
+      ['shop_address', 'Thiếu địa chỉ Shop'],
+      ['receiver_name', 'Thiếu tên người nhận'],
+      ['receiver_phone', 'Thiếu số điện thoại'],
+      ['receiver_address', 'Thiếu địa chỉ người nhận']
+    ];
+    requiredText.forEach(([field, label]) => {
+      if (!String(order[field] || '').trim()) errors.push(label);
+    });
+
+    order.receiver_phone = String(order.receiver_phone || '').trim().replace(/[\s().-]/g, '');
+    if (/^84\d{9,10}$/.test(order.receiver_phone)) {
+      order.receiver_phone = `0${order.receiver_phone.slice(2)}`;
+    } else if (/^\d{9}$/.test(order.receiver_phone)) {
+      order.receiver_phone = `0${order.receiver_phone}`;
+    }
+    if (order.receiver_phone && !/^0\d{9,10}$/.test(order.receiver_phone)) {
+      errors.push('Số điện thoại phải có 10-11 chữ số và bắt đầu bằng 0');
+    }
+    order.customer_email = String(order.customer_email || '').trim();
+    if (order.customer_email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(order.customer_email)) {
+      errors.push('Email người nhận không hợp lệ');
+    }
+
+    const parseNumber = (field, label, { required = false, positive = false, fallback = null } = {}) => {
+      const raw = order[field];
+      if (raw === '' || raw === null || raw === undefined) {
+        if (required) errors.push(`Thiếu ${label}`);
+        else if (fallback !== null) order[field] = fallback;
+        return null;
+      }
+      const value = typeof raw === 'number' ? raw : Number(String(raw).trim().replace(',', '.'));
+      if (!Number.isFinite(value) || value < 0 || (positive && value <= 0)) {
+        errors.push(`${label} không hợp lệ`);
+        return null;
+      }
+      order[field] = value;
+      return value;
+    };
+    const shopLat = parseNumber('shop_lat', 'vĩ độ Shop', { required: true });
+    const shopLng = parseNumber('shop_lng', 'kinh độ Shop', { required: true });
+    const receiverLat = parseNumber('receiver_lat', 'vĩ độ người nhận', { required: true });
+    const receiverLng = parseNumber('receiver_lng', 'kinh độ người nhận', { required: true });
+    const weight = parseNumber('weight_kg', 'cân nặng', { required: true, positive: true });
+    const length = parseNumber('length', 'chiều dài', { required: true, positive: true });
+    const width = parseNumber('width', 'chiều rộng', { required: true, positive: true });
+    const height = parseNumber('height', 'chiều cao', { required: true, positive: true });
+    parseNumber('cod_amount', 'COD', { fallback: 0 });
+    parseNumber('item_value', 'giá trị hàng', { fallback: 0 });
+    parseNumber('service_fee', 'phí dịch vụ', { fallback: 0 });
+    parseNumber('distance_km', 'khoảng cách', { positive: true, fallback: 5 });
+
+    if (shopLat !== null && (shopLat > 90 || shopLat < -90) || shopLng !== null && (shopLng > 180 || shopLng < -180)) {
+      errors.push('Tọa độ Shop ngoài giới hạn');
+    } else if (shopLat !== null && shopLng !== null && !isWithinHcmcBoundary(shopLat, shopLng)) {
+      errors.push('Vị trí Shop ngoài vùng phục vụ TP. Hồ Chí Minh');
+    }
+    if (receiverLat !== null && (receiverLat > 90 || receiverLat < -90) || receiverLng !== null && (receiverLng > 180 || receiverLng < -180)) {
+      errors.push('Tọa độ người nhận ngoài giới hạn');
+    } else if (receiverLat !== null && receiverLng !== null && !isWithinHcmcBoundary(receiverLat, receiverLng)) {
+      errors.push('Vị trí người nhận ngoài vùng phục vụ TP. Hồ Chí Minh');
+    }
+    if (weight !== null && length !== null && width !== null && height !== null
+      && (weight > 100 || length * width * height > 1000000)) {
+      order.vehicle_type = 'truck';
+    }
+    order.shop_province = String(order.shop_province || 'Thành phố Hồ Chí Minh').trim();
+    order.destination_province = String(order.destination_province || 'Quận 1').trim();
+    order.service_type = String(order.service_type || 'standard').trim().toLowerCase();
+    order.fee_payer = String(order.fee_payer || 'sender').trim().toLowerCase();
+    if (!['economy', 'standard', 'express'].includes(order.service_type)) errors.push('Loại dịch vụ phải là economy, standard hoặc express');
+    if (!['sender', 'receiver'].includes(order.fee_payer)) errors.push('fee_payer phải là sender hoặc receiver');
+    const parseBoolean = (value, label) => {
+      const normalized = String(value ?? '').trim().toLowerCase();
+      if (!normalized || ['false', '0', 'no', 'khong', 'không'].includes(normalized)) return false;
+      if (['true', '1', 'yes', 'co', 'có'].includes(normalized)) return true;
+      errors.push(`${label} phải là true/false`);
+      return false;
+    };
+    order.is_fragile = parseBoolean(order.is_fragile, 'is_fragile');
+    order.is_remote_area = parseBoolean(order.is_remote_area, 'is_remote_area');
+    order.rowNumber = rowNumber;
+    return { order, errors };
+  };
+
+  const parseBulkFile = async (file) => {
+    setBulkError('');
+    setBulkRows([]);
+    setBulkFileName(file?.name || '');
+    if (!file) return;
+    if (!/\.(xlsx|xls|csv)$/i.test(file.name)) {
+      setBulkError('Chỉ chấp nhận file .xlsx, .xls hoặc .csv.');
+      return;
+    }
+    if (file.size > 10 * 1024 * 1024) {
+      setBulkError('File import không được vượt quá 10 MB.');
+      return;
+    }
+    try {
+      const workbook = XLSX.read(await file.arrayBuffer(), { type: 'array', cellDates: false });
+      const sheet = workbook.Sheets[workbook.SheetNames[0]];
+      if (!sheet) throw new Error('File không có trang tính dữ liệu.');
+      const [headerRow, ...dataRows] = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '', raw: false });
+      if (!headerRow?.length) throw new Error('Không tìm thấy hàng tiêu đề trong file.');
+      const headerIndices = new Map(headerRow.map((header, index) => [normalizeImportHeader(header), index]));
+      const missingHeaders = BULK_ORDER_HEADERS
+        .filter((header) => !['customer_email', 'service_fee', 'item_value', 'distance_km', 'shop_province', 'destination_province', 'fee_payer', 'service_type', 'is_fragile', 'is_remote_area'].includes(header))
+        .filter((header) => !headerIndices.has(normalizeImportHeader(header)));
+      if (missingHeaders.length) throw new Error(`Thiếu cột bắt buộc: ${missingHeaders.join(', ')}`);
+      const nonEmptyRows = dataRows.filter((row) => row.some((cell) => String(cell ?? '').trim() !== ''));
+      if (!nonEmptyRows.length) throw new Error('File chưa có dòng đơn hàng nào.');
+      if (nonEmptyRows.length > BULK_ORDER_LIMIT) throw new Error(`Mỗi lần chỉ nhập tối đa ${BULK_ORDER_LIMIT} đơn hàng.`);
+
+      setBulkRows(nonEmptyRows.map((row, index) => {
+        const source = Object.fromEntries(BULK_ORDER_HEADERS.map((header) => {
+          const columnIndex = headerIndices.get(normalizeImportHeader(header));
+          return [header, columnIndex === undefined ? '' : row[columnIndex]];
+        }));
+        const { order, errors } = validateBulkOrder(source, index + 2);
+        return { rowNumber: index + 2, order, errors, status: errors.length ? 'invalid' : 'ready', result: '' };
+      }));
+    } catch (error) {
+      setBulkError(error.message || 'Không đọc được file import.');
+    }
+  };
+
+  const importBulkOrders = async () => {
+    const readyRows = bulkRows.filter((row) => row.status === 'ready');
+    if (!readyRows.length) {
+      setBulkError('Không có dòng hợp lệ để tạo đơn.');
+      return;
+    }
+    setBulkBusy(true);
+    setBulkError('');
+    const queue = [...readyRows];
+    const worker = async () => {
+      while (queue.length) {
+        const currentRow = queue.shift();
+        if (!currentRow) return;
+        setBulkRows((currentRows) => currentRows.map((row) => (
+          row.rowNumber === currentRow.rowNumber ? { ...row, status: 'creating', result: '' } : row
+        )));
+        try {
+          const response = await fetch(`${API_URL}/api/orders`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(currentRow.order)
+          });
+          const data = await response.json();
+          if (!response.ok || !data.success) throw new Error(data.message || 'Không tạo được đơn.');
+          setBulkRows((currentRows) => currentRows.map((row) => (
+            row.rowNumber === currentRow.rowNumber
+              ? { ...row, status: 'success', result: `${data.tracking_code} · ${Number(data.shipping_fee || 0).toLocaleString('vi-VN')} đ` }
+              : row
+          )));
+        } catch (error) {
+          setBulkRows((currentRows) => currentRows.map((row) => (
+            row.rowNumber === currentRow.rowNumber ? { ...row, status: 'failed', result: error.message || 'Lỗi kết nối.' } : row
+          )));
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(4, queue.length) }, () => worker()));
+    setBulkBusy(false);
+    taiDuLieu();
+  };
+
   useEffect(() => {
     const orderId = donHangDangChon?.id;
     if (!modalMo || !orderId) return undefined;
@@ -220,7 +590,7 @@ export default function QuanLyDonHang() {
     let socket;
     const taiRoute = async () => {
       try {
-        const res = await fetch(`http://localhost:5000/api/orders/${orderId}/route`);
+        const res = await fetch(`${API_URL}/api/orders/${orderId}/route`);
         const data = await res.json();
         if (data.success) {
           setRouteTheoDoi(data.data);
@@ -232,7 +602,10 @@ export default function QuanLyDonHang() {
     };
 
     taiRoute();
-    socket = io('http://localhost:5000');
+    socket = io(API_URL, {
+      auth: { token: localStorage.getItem('access_token') }
+    });
+    socket.emit('join_order_tracking', { order_id: orderId });
     socket.on('driver_location_changed', (data) => {
       if (String(data?.order_id) !== String(orderId)) return;
       setViTriTaiXe({
@@ -251,7 +624,7 @@ export default function QuanLyDonHang() {
 
   const taiDuLieu = async () => {
     try {
-      const res = await fetch('http://localhost:5000/api/orders');
+      const res = await fetch(`${API_URL}/api/orders`);
       const data = await res.json();
       if (data.success && Array.isArray(data.data)) {
         // Lọc đúng đơn hàng của Shop đang đăng nhập, tránh lộ dữ liệu
@@ -269,7 +642,7 @@ export default function QuanLyDonHang() {
   const taiThongBao = async () => {
     if (!shopId) return;
     try {
-      const res = await fetch(`http://localhost:5000/api/notifications/${shopId}`);
+      const res = await fetch(`${API_URL}/api/notifications/${shopId}`);
       const data = await res.json();
       if (data.success) setThongBaoShop(data.data || []);
     } catch (error) {
@@ -303,7 +676,9 @@ export default function QuanLyDonHang() {
   useEffect(() => {
     taiDuLieu();
     taiThongBao();
-    const socket = io('http://localhost:5000');
+    const socket = io(API_URL, {
+      auth: { token: localStorage.getItem('access_token') }
+    });
     socket.on('order_status_changed', (data) => {
       setDonHang((currentOrders) => currentOrders.map((order) => (
         String(order.id) === String(data?.order_id)
@@ -317,7 +692,7 @@ export default function QuanLyDonHang() {
 
   const danhDauDaDoc = async (notification) => {
     if (!notification.is_read) {
-      await fetch(`http://localhost:5000/api/notifications/${notification.id}/read`, {
+      await fetch(`${API_URL}/api/notifications/${notification.id}/read`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ user_id: shopId })
@@ -526,7 +901,7 @@ export default function QuanLyDonHang() {
       return alert('Vui lòng chọn đúng vị trí Shop và điểm giao trên bản đồ để hệ thống định tuyến qua kho con.');
     }
     try {
-      const res = await fetch('http://localhost:5000/api/orders', {
+      const res = await fetch(`${API_URL}/api/orders`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
@@ -704,6 +1079,32 @@ export default function QuanLyDonHang() {
                 <ListOrdered size={20} className={tabHienTai === 'danhsach' ? 'text-white' : 'text-slate-400 group-hover:text-blue-500'} />
                 Quản Lý Vận Đơn
               </button>
+
+              <button
+                onClick={() => setTabHienTai('import')}
+                className={`px-5 py-4 rounded-2xl font-bold text-left transition-all duration-300 flex items-center gap-4 group ${tabHienTai === 'import' ? 'bg-gradient-to-r from-blue-600 to-blue-500 text-white shadow-lg shadow-blue-200' : 'bg-transparent text-slate-500 hover:bg-blue-50 hover:text-blue-600'}`}
+              >
+                <FileSpreadsheet size={20} className={tabHienTai === 'import' ? 'text-white' : 'text-slate-400 group-hover:text-blue-500'} />
+                Import đơn hàng
+              </button>
+
+              <button
+                onClick={() => setTabHienTai('rma')}
+                className={`px-5 py-4 rounded-2xl font-bold text-left transition-all duration-300 flex items-center gap-4 group ${tabHienTai === 'rma' ? 'bg-gradient-to-r from-orange-500 to-amber-500 text-white shadow-lg shadow-orange-200' : 'bg-transparent text-slate-500 hover:bg-orange-50 hover:text-orange-600'}`}
+              >
+                <RotateCw size={20} className={tabHienTai === 'rma' ? 'text-white' : 'text-slate-400 group-hover:text-orange-500'} />
+                <span className="flex-1">Hàng hoàn / RMA</span>
+                {rmaOrders.length > 0 && <span className={`rounded-full px-2 py-0.5 text-xs font-black ${tabHienTai === 'rma' ? 'bg-white/20 text-white' : 'bg-orange-100 text-orange-700'}`}>{rmaOrders.length}</span>}
+              </button>
+
+              <button
+                onClick={() => setTabHienTai('integrations')}
+                className={`px-5 py-4 rounded-2xl font-bold text-left transition-all duration-300 flex items-center gap-4 group ${tabHienTai === 'integrations' ? 'bg-gradient-to-r from-blue-600 to-blue-500 text-white shadow-lg shadow-blue-200' : 'bg-transparent text-slate-500 hover:bg-blue-50 hover:text-blue-600'}`}
+              >
+                <KeyRound size={20} className={tabHienTai === 'integrations' ? 'text-white' : 'text-slate-400 group-hover:text-blue-500'} />
+                API & Webhook
+              </button>
+
               <button
                 onClick={() => setTabHienTai('thongbao')}
                 className={`px-5 py-4 rounded-2xl font-bold text-left transition-all duration-300 flex items-center gap-4 group ${tabHienTai === 'thongbao' ? 'bg-gradient-to-r from-blue-600 to-blue-500 text-white shadow-lg shadow-blue-200' : 'bg-transparent text-slate-500 hover:bg-blue-50 hover:text-blue-600'}`}
@@ -731,13 +1132,319 @@ export default function QuanLyDonHang() {
           <div className="mb-8 flex justify-between items-end">
             <div>
               <h1 className="text-3xl font-black text-slate-800 tracking-tight">
-                {tabHienTai === 'taodon' ? 'Khởi Tạo Vận Đơn Mới' : tabHienTai === 'thongbao' ? 'Thông Báo Vận Đơn' : 'Danh Sách Vận Đơn'}
+                {tabHienTai === 'taodon' ? 'Khởi Tạo Vận Đơn Mới' : tabHienTai === 'thongbao' ? 'Thông Báo Vận Đơn' : tabHienTai === 'import' ? 'Import Đơn Hàng Hàng Loạt' : tabHienTai === 'integrations' ? 'API & Webhook' : tabHienTai === 'rma' ? 'Quản Lý Hàng Hoàn · RMA' : 'Danh Sách Vận Đơn'}
               </h1>
               <p className="text-slate-500 mt-2">
-                {tabHienTai === 'taodon' ? 'Lựa chọn gói dịch vụ và nhập thông tin để tính cước tự động.' : tabHienTai === 'thongbao' ? 'Cập nhật mới nhất về các vận đơn của cửa hàng.' : 'Theo dõi tiến độ giao hàng và in mã vạch vận chuyển.'}
+                {tabHienTai === 'taodon' ? 'Lựa chọn gói dịch vụ và nhập thông tin để tính cước tự động.' : tabHienTai === 'thongbao' ? 'Cập nhật mới nhất về các vận đơn của cửa hàng.' : tabHienTai === 'import' ? 'Tải Excel/CSV, xem trước lỗi từng dòng và chỉ gửi đơn hợp lệ.' : tabHienTai === 'integrations' ? 'Quản lý khóa tích hợp riêng của Shop và webhook cập nhật đơn.' : tabHienTai === 'rma' ? 'Theo dõi lý do giao thất bại, bằng chứng tài xế và gửi yêu cầu giao lại.' : 'Theo dõi tiến độ giao hàng và in mã vạch vận chuyển.'}
               </p>
             </div>
           </div>
+
+          {tabHienTai === 'integrations' && (
+            <section className="max-w-6xl space-y-5">
+              {(integrationError || integrationMessage) && (
+                <p role={integrationError ? 'alert' : 'status'} className={`rounded-lg p-3 text-sm font-semibold ${integrationError ? 'bg-rose-50 text-rose-700' : 'bg-emerald-50 text-emerald-700'}`}>
+                  {integrationError || integrationMessage}
+                </p>
+              )}
+              {revealedCredential && (
+                <div className="rounded-xl border border-amber-300 bg-amber-50 p-5">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <h2 className="font-black text-amber-900">{revealedCredential.label}</h2>
+                      <p className="mt-1 text-sm text-amber-800">Thông tin này chỉ hiển thị một lần. Hãy lưu ở kho bí mật an toàn.</p>
+                    </div>
+                    <button type="button" onClick={copyCredential} className="inline-flex items-center gap-2 rounded-lg border border-amber-400 px-3 py-2 text-sm font-black text-amber-900 hover:bg-amber-100">
+                      <Copy size={16} /> Sao chép
+                    </button>
+                  </div>
+                  <code className="mt-3 block select-all break-all rounded-lg bg-white p-3 text-sm text-slate-800">{revealedCredential.value}</code>
+                </div>
+              )}
+
+              <div className="grid gap-5 lg:grid-cols-2">
+                <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+                  <div className="flex items-start gap-3">
+                    <KeyRound className="mt-1 text-blue-700" />
+                    <div>
+                      <h2 className="text-lg font-black">API key riêng của Shop</h2>
+                      <p className="mt-1 text-sm text-slate-500">Dùng để đẩy đơn từ website hoặc nền tảng bán hàng. Mỗi Shop tối đa 10 khóa đang hoạt động.</p>
+                    </div>
+                  </div>
+                  <form onSubmit={createShopApiKey} className="mt-5 flex flex-wrap gap-2">
+                    <input required maxLength={100} value={apiKeyName} onChange={(event) => setApiKeyName(event.target.value)} placeholder="Tên tích hợp, ví dụ WooCommerce" className="min-w-0 flex-1 rounded-lg border border-slate-300 px-3 py-2.5 text-sm" />
+                    <button disabled={integrationBusy} className="rounded-lg bg-blue-700 px-4 py-2.5 text-sm font-black text-white hover:bg-blue-800 disabled:opacity-50">Tạo API key</button>
+                  </form>
+                  <div className="mt-5 overflow-x-auto">
+                    <table className="w-full min-w-[430px] text-left text-sm">
+                      <thead className="border-b text-xs uppercase text-slate-400"><tr><th className="py-2">Tên / Prefix</th><th className="py-2">Sử dụng gần nhất</th><th className="py-2">Thao tác</th></tr></thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {shopApiKeys.map((key) => (
+                          <tr key={key.id}>
+                            <td className="py-3"><span className="block font-bold">{key.name}</span><code className="text-xs text-slate-500">{key.key_prefix}...</code></td>
+                            <td className="py-3 text-xs text-slate-500">{key.last_used_at ? new Date(key.last_used_at).toLocaleString('vi-VN') : 'Chưa sử dụng'}</td>
+                            <td className="py-3"><button type="button" disabled={integrationBusy} onClick={() => revokeShopApiKey(key)} className="font-bold text-rose-700 hover:underline disabled:opacity-50">Thu hồi</button></td>
+                          </tr>
+                        ))}
+                        {!integrationBusy && !shopApiKeys.length && <tr><td colSpan="3" className="py-6 text-center text-slate-400">Chưa có API key.</td></tr>}
+                      </tbody>
+                    </table>
+                    {integrationBusy && <p role="status" className="mt-3 text-xs text-slate-500">Đang xử lý...</p>}
+                  </div>
+                </section>
+
+                <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+                  <div className="flex items-start gap-3">
+                    <Webhook className="mt-1 text-emerald-700" />
+                    <div>
+                      <h2 className="text-lg font-black">Webhook trạng thái đơn</h2>
+                      <p className="mt-1 text-sm text-slate-500">Hệ thống gửi sự kiện `order.delivered` qua HTTPS khi đơn được giao thành công.</p>
+                    </div>
+                  </div>
+                  <form onSubmit={saveShopWebhook} className="mt-5 space-y-3">
+                    <label className="block text-sm font-bold text-slate-700">Endpoint HTTPS công khai
+                      <input type="url" value={shopWebhook.target_url} onChange={(event) => setShopWebhook((current) => ({ ...current, target_url: event.target.value }))} placeholder="https://shop.example.com/webhooks/logistics" className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2.5 font-normal" />
+                    </label>
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <span className={`text-sm font-bold ${shopWebhook.enabled ? 'text-emerald-700' : 'text-slate-500'}`}>{shopWebhook.enabled ? 'Webhook đang bật' : 'Webhook đang tắt'}</span>
+                      <button type="submit" disabled={integrationBusy} className="rounded-lg border border-slate-300 px-4 py-2.5 text-sm font-black hover:bg-slate-50 disabled:opacity-50">Lưu endpoint</button>
+                    </div>
+                  </form>
+                  <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 pt-4">
+                    <p className="text-xs text-slate-500">{shopWebhook.secret_configured ? 'Đã có signing secret; tạo lại sẽ vô hiệu secret cũ.' : 'Chưa có signing secret.'}</p>
+                    <button type="button" disabled={integrationBusy || !shopWebhook.target_url} onClick={createWebhookSecret} className="inline-flex items-center gap-2 rounded-lg bg-emerald-700 px-4 py-2.5 text-sm font-black text-white hover:bg-emerald-800 disabled:opacity-50">
+                      <RotateCw size={15} /> {shopWebhook.secret_configured ? 'Tạo lại secret' : 'Tạo secret'}
+                    </button>
+                  </div>
+                </section>
+              </div>
+
+              <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+                <h2 className="text-lg font-black">Tích hợp API tạo đơn</h2>
+                <p className="mt-1 text-sm text-slate-500">Gửi `POST {API_URL}/api/v1/orders`, header `x-api-key`. Chủ Shop được xác định từ API key; không cần gửi shop_id.</p>
+                <pre className="mt-4 overflow-x-auto rounded-xl bg-slate-950 p-4 text-xs leading-relaxed text-emerald-100">{`{
+  "shop_address": "12 Nguyễn Huệ, Quận 1",
+  "shop_lat": 10.7731,
+  "shop_lng": 106.703,
+  "receiver_name": "Nguyễn Văn A",
+  "receiver_phone": "0901234567",
+  "receiver_address": "1 Lê Duẩn, Quận 1",
+  "receiver_lat": 10.7798,
+  "receiver_lng": 106.699,
+  "weight_kg": 1,
+  "length": 10,
+  "width": 10,
+  "height": 10,
+  "service_type": "standard",
+  "fee_payer": "sender"
+}`}</pre>
+                <p className="mt-3 text-xs text-slate-500">
+                  Webhook ký HMAC-SHA256 trên raw request body, gửi trong header <code>X-SmartLogistics-Signature: sha256=&lt;hex&gt;</code>.
+                  Dùng HTTPS và xác minh chữ ký ở hệ thống nhận trước khi xử lý.
+                </p>
+                {integrationBusy && <p role="status" className="mt-3 text-xs text-slate-500">Đang tải cấu hình...</p>}
+              </section>
+            </section>
+          )}
+
+          {tabHienTai === 'rma' && (
+            <section className="max-w-6xl space-y-5">
+              {(rmaError || rmaMessage) && (
+                <p role={rmaError ? 'alert' : 'status'} className={`rounded-lg p-3 text-sm font-semibold ${rmaError ? 'bg-rose-50 text-rose-700' : 'bg-emerald-50 text-emerald-700'}`}>
+                  {rmaError || rmaMessage}
+                </p>
+              )}
+              <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+                <div className="rounded-2xl border border-orange-100 bg-white p-5 shadow-sm">
+                  <p className="text-xs font-black uppercase tracking-wide text-slate-500">Đơn đang hoàn</p>
+                  <p className="mt-2 text-3xl font-black text-orange-600">{rmaOrders.length}</p>
+                </div>
+                <div className="rounded-2xl border border-rose-100 bg-white p-5 shadow-sm">
+                  <p className="text-xs font-black uppercase tracking-wide text-slate-500">Tỷ lệ đơn đang hoàn</p>
+                  <p className="mt-2 text-3xl font-black text-rose-600">{donHang.length ? `${((rmaOrders.length / donHang.length) * 100).toFixed(1)}%` : '0%'}</p>
+                </div>
+                <div className="rounded-2xl border border-amber-100 bg-white p-5 shadow-sm">
+                  <p className="text-xs font-black uppercase tracking-wide text-slate-500">Chờ duyệt giao lại</p>
+                  <p className="mt-2 text-3xl font-black text-amber-600">{rmaOrders.filter((order) => order.redelivery_status === 'pending').length}</p>
+                </div>
+                <div className="rounded-2xl border border-emerald-100 bg-white p-5 shadow-sm">
+                  <p className="text-xs font-black uppercase tracking-wide text-slate-500">Đã yêu cầu giao lại</p>
+                  <p className="mt-2 text-3xl font-black text-emerald-600">{rmaOrders.filter((order) => ['pending', 'approved'].includes(order.redelivery_status)).length}</p>
+                </div>
+              </div>
+              {rmaLoading ? (
+                <div role="status" className="rounded-2xl border border-slate-200 bg-white p-10 text-center font-semibold text-slate-500">Đang tải hồ sơ hàng hoàn...</div>
+              ) : rmaOrders.length === 0 ? (
+                <div className="rounded-2xl border border-dashed border-slate-300 bg-white p-10 text-center">
+                  <CheckCircle className="mx-auto text-emerald-500" size={36} />
+                  <p className="mt-3 font-black text-slate-800">Chưa có đơn hàng hoàn</p>
+                  <p className="mt-1 text-sm text-slate-500">Đơn giao thất bại sẽ xuất hiện tại đây cùng lý do và bằng chứng.</p>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {rmaOrders.map((order) => (
+                    <article key={order.id} className="overflow-hidden rounded-2xl border border-orange-100 bg-white shadow-sm">
+                      <div className="flex flex-wrap items-start justify-between gap-4 border-b border-slate-100 p-5">
+                        <div>
+                          <p className="text-xs font-bold uppercase tracking-wide text-slate-400">Mã vận đơn</p>
+                          <h2 className="mt-1 text-xl font-black text-slate-800">{order.tracking_code}</h2>
+                          <p className="mt-1 text-sm text-slate-500">Cập nhật {new Date(order.updated_at).toLocaleString('vi-VN')}</p>
+                        </div>
+                        <span className={`rounded-full px-3 py-1.5 text-xs font-black ${order.redelivery_status === 'pending' ? 'bg-amber-100 text-amber-800' : order.redelivery_status === 'approved' ? 'bg-emerald-100 text-emerald-800' : order.redelivery_status === 'rejected' ? 'bg-rose-100 text-rose-800' : 'bg-orange-100 text-orange-800'}`}>
+                          {order.redelivery_status === 'pending' ? 'Yêu cầu chờ duyệt' : order.redelivery_status === 'approved' ? 'Đã duyệt yêu cầu' : order.redelivery_status === 'rejected' ? 'Yêu cầu bị từ chối' : 'Đang hoàn hàng'}
+                        </span>
+                      </div>
+                      <div className="grid gap-5 p-5 lg:grid-cols-[1fr_1fr]">
+                        <div className="space-y-4">
+                          <div className="rounded-xl border border-rose-100 bg-rose-50 p-4">
+                            <p className="flex items-center gap-2 text-sm font-black text-rose-800"><AlertCircle size={16} /> Lý do giao thất bại</p>
+                            <p className="mt-2 text-sm text-rose-700">{order.fail_reason || 'Chưa có ghi chú lý do.'}</p>
+                          </div>
+                          <div className="rounded-xl bg-slate-50 p-4 text-sm">
+                            <p><span className="font-bold text-slate-500">Người nhận:</span> {order.receiver_name} · {order.receiver_phone}</p>
+                            <p className="mt-1"><span className="font-bold text-slate-500">Địa chỉ:</span> {order.receiver_address}</p>
+                            <p className="mt-1"><span className="font-bold text-slate-500">COD:</span> {Number(order.cod_amount || 0).toLocaleString('vi-VN')} đ</p>
+                          </div>
+                          {order.redelivery_status === 'rejected' && order.redelivery_review_note && (
+                            <p className="rounded-xl border border-rose-100 bg-rose-50 p-3 text-sm text-rose-700"><strong>Phản hồi điều phối:</strong> {order.redelivery_review_note}</p>
+                          )}
+                          {order.redelivery_status === 'pending' && (
+                            <div className="rounded-xl border border-amber-100 bg-amber-50 p-3 text-sm text-amber-800">
+                              <p className="font-semibold">Yêu cầu đã gửi điều phối. Đơn chưa được tự động chuyển sang lượt giao mới.</p>
+                              {order.redelivery_note && <p className="mt-2"><strong>Ghi chú Shop:</strong> {order.redelivery_note}</p>}
+                            </div>
+                          )}
+                          {order.redelivery_status === 'approved' && order.redelivery_note && (
+                            <p className="rounded-xl border border-emerald-100 bg-emerald-50 p-3 text-sm text-emerald-800"><strong>Yêu cầu đã được duyệt.</strong> Ghi chú Shop: {order.redelivery_note}</p>
+                          )}
+                          {(!order.redelivery_status || order.redelivery_status === 'rejected') && (
+                            <form onSubmit={(event) => guiYeuCauGiaoLai(event, order)} className="space-y-3 rounded-xl border border-blue-100 bg-blue-50/60 p-4">
+                              <label className="block text-sm font-black text-slate-700" htmlFor={`rma-note-${order.id}`}>Ghi chú yêu cầu giao lại</label>
+                              <textarea id={`rma-note-${order.id}`} name="note" required minLength={8} maxLength={1000} rows={3} className="w-full rounded-lg border border-slate-300 bg-white p-3 text-sm" placeholder="Ví dụ: Đã liên hệ khách, khách xác nhận nhận hàng sau 18:00..." />
+                              <label className="flex items-start gap-2 text-xs font-semibold text-slate-600">
+                                <input name="customer_confirmed" type="checkbox" required className="mt-0.5 accent-blue-700" />
+                                Tôi xác nhận đã trao đổi và khách đồng ý nhận lại đơn.
+                              </label>
+                              <button disabled={rmaBusy} className="inline-flex items-center gap-2 rounded-lg bg-blue-700 px-4 py-2.5 text-sm font-black text-white hover:bg-blue-800 disabled:opacity-50">
+                                <RotateCw size={16} /> {rmaBusy ? 'Đang gửi...' : 'Yêu cầu giao lại'}
+                              </button>
+                            </form>
+                          )}
+                        </div>
+                        <div className="space-y-4">
+                          <div>
+                            <p className="mb-2 flex items-center gap-2 text-sm font-black text-slate-800"><Camera size={16} className="text-orange-600" /> Bằng chứng và lịch sử xử lý</p>
+                            <div className="space-y-3">
+                              {(order.status_history || []).length === 0 ? (
+                                <p className="rounded-xl bg-slate-50 p-4 text-sm text-slate-500">Chưa có lịch sử bằng chứng.</p>
+                              ) : order.status_history.map((entry) => (
+                                <div key={`${entry.order_id}-${entry.created_at}`} className="rounded-xl border border-slate-100 p-3">
+                                  <p className="text-xs font-bold text-slate-500">{entry.to_status === 'returning' ? 'Giao thất bại' : entry.to_status} · {new Date(entry.created_at).toLocaleString('vi-VN')}</p>
+                                  {entry.note && <p className="mt-1 text-sm text-slate-700">{entry.note}</p>}
+                                  {entry.proof_image && <a href={`${API_URL}${entry.proof_image}`} target="_blank" rel="noreferrer" className="mt-2 block"><img src={`${API_URL}${entry.proof_image}`} alt={`Bằng chứng ${order.tracking_code}`} className="max-h-52 w-full rounded-lg border border-slate-200 object-contain" /></a>}
+                                  {entry.signature_image && <a href={`${API_URL}${entry.signature_image}`} target="_blank" rel="noreferrer" className="mt-2 block"><img src={`${API_URL}${entry.signature_image}`} alt={`Chữ ký người nhận ${order.tracking_code}`} className="max-h-32 w-full rounded-lg border border-slate-200 bg-white object-contain" /><span className="mt-1 block text-xs font-bold text-emerald-700">Chữ ký người nhận</span></a>}
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              )}
+            </section>
+          )}
+
+          {tabHienTai === 'import' && (
+            <section className="max-w-7xl space-y-5">
+              <div className="rounded-2xl border border-blue-100 bg-white p-6 shadow-sm">
+                <div className="flex flex-wrap items-start justify-between gap-4">
+                  <div>
+                    <h2 className="text-lg font-black text-slate-800">Tải file đơn hàng</h2>
+                    <p className="mt-1 max-w-3xl text-sm text-slate-500">
+                      Hỗ trợ Excel/CSV, tối đa {BULK_ORDER_LIMIT} đơn và 10 MB mỗi file. Mỗi dòng được kiểm tra số điện thoại,
+                      địa chỉ, tọa độ trong TP.HCM, khối lượng, kích thước và thông tin cước trước khi tạo.
+                    </p>
+                  </div>
+                  <button type="button" onClick={downloadBulkTemplate} className="inline-flex items-center gap-2 rounded-xl border border-blue-200 px-4 py-2.5 text-sm font-black text-blue-700 hover:bg-blue-50">
+                    <Download size={17} /> Tải file mẫu
+                  </button>
+                </div>
+                <label className="mt-5 flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed border-slate-300 bg-slate-50 px-5 py-8 text-center hover:border-blue-400 hover:bg-blue-50/50">
+                  <Upload size={26} className="text-blue-600" />
+                  <span className="mt-2 font-bold text-slate-700">{bulkFileName || 'Chọn file Excel hoặc CSV'}</span>
+                  <span className="mt-1 text-xs text-slate-500">Không đổi tên các cột trong file mẫu</span>
+                  <input
+                    type="file"
+                    accept=".xlsx,.xls,.csv"
+                    disabled={bulkBusy}
+                    onChange={(event) => {
+                      parseBulkFile(event.target.files?.[0]);
+                      event.target.value = '';
+                    }}
+                    className="sr-only"
+                  />
+                </label>
+                {bulkError && <p role="alert" className="mt-4 rounded-lg bg-rose-50 p-3 text-sm font-semibold text-rose-700">{bulkError}</p>}
+              </div>
+
+              {bulkRows.length > 0 && (
+                <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+                  <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 p-5">
+                    <div>
+                      <h3 className="font-black text-slate-800">Kiểm tra {bulkRows.length} dòng dữ liệu</h3>
+                      <p className="mt-1 text-sm text-slate-500">
+                        {bulkRows.filter((row) => row.status === 'ready').length} hợp lệ · {bulkRows.filter((row) => row.status === 'invalid').length} lỗi cần sửa · {bulkRows.filter((row) => row.status === 'success').length} đã tạo
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={bulkBusy || !bulkRows.some((row) => row.status === 'ready')}
+                      onClick={importBulkOrders}
+                      className="inline-flex items-center gap-2 rounded-xl bg-blue-700 px-5 py-3 font-black text-white hover:bg-blue-800 disabled:cursor-not-allowed disabled:bg-slate-300"
+                    >
+                      <Upload size={17} /> {bulkBusy ? 'Đang tạo đơn...' : `Tạo ${bulkRows.filter((row) => row.status === 'ready').length} đơn hợp lệ`}
+                    </button>
+                  </div>
+                  <div className="max-h-[65vh] overflow-auto">
+                    <table className="w-full min-w-[850px] text-left text-sm">
+                      <thead className="sticky top-0 bg-slate-50 text-xs uppercase text-slate-500">
+                        <tr>
+                          <th className="px-4 py-3">Dòng</th>
+                          <th className="px-4 py-3">Người nhận</th>
+                          <th className="px-4 py-3">Số điện thoại</th>
+                          <th className="px-4 py-3">Địa chỉ</th>
+                          <th className="px-4 py-3">Kết quả kiểm tra</th>
+                          <th className="px-4 py-3">Trạng thái</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {bulkRows.map((row) => (
+                          <tr key={row.rowNumber} className={row.errors.length || row.status === 'failed' ? 'bg-rose-50' : row.status === 'success' ? 'bg-emerald-50/60' : ''}>
+                            <td className="px-4 py-3 font-bold">{row.rowNumber}</td>
+                            <td className="px-4 py-3">{row.order.receiver_name || '—'}</td>
+                            <td className="px-4 py-3">{row.order.receiver_phone || '—'}</td>
+                            <td className="max-w-xs truncate px-4 py-3" title={row.order.receiver_address}>{row.order.receiver_address || '—'}</td>
+                            <td className="max-w-md px-4 py-3 text-xs">
+                              {row.errors.length ? <span className="font-semibold text-rose-700">{row.errors.join(' · ')}</span> : row.result || <span className="text-emerald-700">Dữ liệu hợp lệ</span>}
+                            </td>
+                            <td className="px-4 py-3 font-bold">
+                              {row.status === 'invalid' ? <span className="text-rose-700">Lỗi dữ liệu</span>
+                                : row.status === 'creating' ? <span className="text-blue-700">Đang tạo...</span>
+                                  : row.status === 'success' ? <span className="text-emerald-700">Đã tạo</span>
+                                    : row.status === 'failed' ? <span className="text-rose-700">Tạo thất bại</span>
+                                      : <span className="text-slate-600">Sẵn sàng</span>}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </section>
+          )}
 
           {tabHienTai === 'thongbao' && (
             <div className="max-w-4xl divide-y divide-slate-100 rounded-2xl border border-slate-200 bg-white">
@@ -1371,11 +2078,19 @@ export default function QuanLyDonHang() {
                   </p>
                   <div className="rounded-2xl overflow-hidden border-2 border-dashed border-slate-200 bg-slate-50 flex justify-center p-2 relative group">
                     <img 
-                      src={`http://localhost:5000${donHangDangChon.proof_image}`} 
+                      src={`${API_URL}${donHangDangChon.proof_image}`}
                       alt="Minh chứng giao hàng" 
                       className="max-h-56 object-contain rounded-xl w-full"
                     />
                   </div>
+                </div>
+              )}
+              {donHangDangChon?.signature_image && (
+                <div className="mb-6">
+                  <p className="mb-2 flex items-center gap-2 text-sm font-bold text-slate-800"><CheckCircle size={16} className="text-emerald-500" /> Chữ ký người nhận:</p>
+                  <a href={`${API_URL}${donHangDangChon.signature_image}`} target="_blank" rel="noreferrer">
+                    <img src={`${API_URL}${donHangDangChon.signature_image}`} alt="Chữ ký xác nhận nhận hàng" className="max-h-40 w-full rounded-xl border border-slate-200 bg-white object-contain" />
+                  </a>
                 </div>
               )}
 

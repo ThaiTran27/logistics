@@ -1,13 +1,20 @@
+import { apiFetch as fetch } from '../../utils/apiFetch.js';
 import { useState, useEffect } from 'react';
 import { io } from 'socket.io-client';
 import { MapContainer, TileLayer, Marker, Popup, useMap } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
-import { Truck, MapPin, Navigation, Search, PackageSearch, CheckCircle, Clock, Map, FileText, Send, Zap, Users, Package, ShieldCheck } from 'lucide-react';
+import { Truck, MapPin, Navigation, Search, PackageSearch, CheckCircle, Clock, Map, FileText, Send, Zap, Users, Package, ShieldCheck, RotateCw, AlertCircle } from 'lucide-react';
 
 // Fix lỗi mất icon mặc định của Leaflet trong React
 import iconMarkerUrl from 'leaflet/dist/images/marker-icon.png';
 import iconShadowUrl from 'leaflet/dist/images/marker-shadow.png';
+const API_URL = (import.meta.env.VITE_API_URL || 'http://localhost:5000').replace(/\/+$/, '');
+const normalizeAreaText = (value) => String(value || '')
+  .toLocaleLowerCase('vi')
+  .normalize('NFD')
+  .replace(/[\u0300-\u036f]/g, '')
+  .replace(/đ/g, 'd');
 const shipperIcon = new L.Icon({
   iconUrl: iconMarkerUrl,
   shadowUrl: iconShadowUrl,
@@ -16,7 +23,9 @@ const shipperIcon = new L.Icon({
 });
 
 // Khởi tạo kết nối Socket.io tới Backend
-const socket = io('http://localhost:5000');
+const socket = io('http://localhost:5000', {
+  auth: { token: localStorage.getItem('access_token') }
+});
 
 // HÀM FIX LỖI BẢN ĐỒ BỊ XÁM KHI CHUYỂN TAB
 const UpdateMapSize = () => {
@@ -35,6 +44,12 @@ export default function TrungTamDieuPhoi() {
   const [donHang, setDonHang] = useState([]);
   const [allOrders, setAllOrders] = useState([]);
   const [taiXeList, setTaiXeList] = useState([]);
+  const [driverProfiles, setDriverProfiles] = useState([]);
+  const [profileDrafts, setProfileDrafts] = useState({});
+  const [savingProfileId, setSavingProfileId] = useState(null);
+  const [autoDispatchPlan, setAutoDispatchPlan] = useState([]);
+  const [autoDispatchBusy, setAutoDispatchBusy] = useState(false);
+  const [autoDispatchMessage, setAutoDispatchMessage] = useState('');
   const [tuKhoa, setTuKhoa] = useState('');
   const [modalMo, setModalMo] = useState(false);
   const [donDangChon, setDonDangChon] = useState(null);
@@ -44,6 +59,12 @@ export default function TrungTamDieuPhoi() {
   
   const [viTriTaiXeMap, setViTriTaiXeMap] = useState({});
   const [tabHienTai, setTabHienTai] = useState('dieuphoan'); 
+  const [rmaRequests, setRmaRequests] = useState([]);
+  const [rmaLoading, setRmaLoading] = useState(false);
+  const [rmaBusyOrderId, setRmaBusyOrderId] = useState(null);
+  const [rmaReviewNotes, setRmaReviewNotes] = useState({});
+  const [rmaError, setRmaError] = useState('');
+  const [rmaMessage, setRmaMessage] = useState('');
 
   const [formBaoCao, setFormBaoCao] = useState({ title: '', content: '' });
   const [fileBaoCao, setFileBaoCao] = useState(null);
@@ -85,9 +106,94 @@ export default function TrungTamDieuPhoi() {
     return [];
   };
 
+  const taiHoSoTaiXe = async () => {
+    try {
+      const response = await fetch(`${API_URL}/api/dispatcher/driver-profiles`);
+      const result = await response.json();
+      if (!response.ok || !result.success) throw new Error(result.message || 'Không tải được cấu hình tài xế.');
+      setDriverProfiles(result.data || []);
+      setProfileDrafts(Object.fromEntries((result.data || []).map((profile) => [profile.id, {
+        max_active_orders: profile.max_active_orders,
+        max_payload_kg: profile.max_payload_kg,
+        service_areas: profile.service_areas || ''
+      }])));
+    } catch (error) {
+      setAutoDispatchMessage(error.message || 'Không tải được cấu hình tài xế.');
+    }
+  };
+
+  const luuHoSoTaiXe = async (driverId) => {
+    const profile = profileDrafts[driverId];
+    if (!profile) return;
+    setSavingProfileId(driverId);
+    setAutoDispatchMessage('');
+    try {
+      const response = await fetch(`${API_URL}/api/dispatcher/driver-profiles/${driverId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(profile)
+      });
+      const result = await response.json();
+      if (!response.ok || !result.success) throw new Error(result.message || 'Không lưu được cấu hình tài xế.');
+      setAutoDispatchMessage(`${result.message} (${driverProfiles.find((item) => item.id === driverId)?.full_name || driverId})`);
+      await taiHoSoTaiXe();
+    } catch (error) {
+      setAutoDispatchMessage(error.message || 'Không lưu được cấu hình tài xế.');
+    } finally {
+      setSavingProfileId(null);
+    }
+  };
+
+  const taiYeuCauRma = async () => {
+    setRmaLoading(true);
+    setRmaError('');
+    try {
+      const response = await fetch(`${API_URL}/api/dispatcher/rma`);
+      const result = await response.json();
+      if (!response.ok || !result.success) throw new Error(result.message || 'Không tải được yêu cầu RMA.');
+      setRmaRequests(result.data || []);
+    } catch (error) {
+      setRmaError(error.message || 'Không tải được yêu cầu RMA.');
+    } finally {
+      setRmaLoading(false);
+    }
+  };
+
+  const xuLyYeuCauRma = async (request, status) => {
+    const reviewNote = String(rmaReviewNotes[request.order_id] || '').trim();
+    if (status === 'rejected' && reviewNote.length < 5) {
+      setRmaError('Cần ghi lý do từ chối ít nhất 5 ký tự.');
+      return;
+    }
+    setRmaBusyOrderId(request.order_id);
+    setRmaError('');
+    setRmaMessage('');
+    try {
+      const response = await fetch(`${API_URL}/api/dispatcher/rma/${request.order_id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status, review_note: reviewNote })
+      });
+      const result = await response.json();
+      if (!response.ok || !result.success) throw new Error(result.message || 'Không cập nhật được yêu cầu RMA.');
+      setRmaMessage(result.message);
+      setRmaReviewNotes((current) => {
+        const next = { ...current };
+        delete next[request.order_id];
+        return next;
+      });
+      await taiYeuCauRma();
+    } catch (error) {
+      setRmaError(error.message || 'Không cập nhật được yêu cầu RMA.');
+    } finally {
+      setRmaBusyOrderId(null);
+    }
+  };
+
   useEffect(() => {
     taiDuLieu();
     taiDanhSachTaiXe();
+    taiHoSoTaiXe();
     fetch('http://localhost:5000/api/driver/live')
       .then((response) => response.json())
       .then((data) => {
@@ -244,6 +350,93 @@ export default function TrungTamDieuPhoi() {
 
   const donChoLay = safeDonHang.filter(d => d.status === 'pending').length;
   const donChoGiao = safeDonHang.filter(d => d.status === 'at_destination_warehouse').length;
+  const taoKeHoachTuDong = () => {
+    const candidates = allOrders.filter((order) => (
+      driverTaskTab === 'pickup' && order.status === 'pending' && !order.pickup_shipper_id
+      || driverTaskTab === 'transfer' && (
+        order.status === 'at_origin_warehouse' && !order.central_transfer_shipper_id
+        || order.status === 'at_central_warehouse' && !order.destination_transfer_shipper_id
+      )
+      || driverTaskTab === 'delivery' && order.status === 'at_destination_warehouse' && !order.delivery_shipper_id
+    )).sort((first, second) => Number(second.weight_kg || 0) - Number(first.weight_kg || 0));
+    const driverRole = driverTaskTab === 'delivery' ? 'delivery_driver' : 'pickup_driver';
+    const loads = new Map(driverProfiles.filter((profile) => profile.role === driverRole).map((profile) => [profile.id, {
+      count: Number(profile.active_count || 0),
+      weight: Number(profile.active_weight_kg || 0)
+    }]));
+    const plan = candidates.map((order) => {
+      const taskType = order.status === 'pending' ? 'pickup'
+        : order.status === 'at_origin_warehouse' ? 'central_transfer'
+          : order.status === 'at_central_warehouse' ? 'destination_transfer' : 'delivery';
+      const isPickupTask = taskType === 'pickup';
+      const areaText = normalizeAreaText(isPickupTask
+        ? `${order.shop_address || ''} ${order.shop_province || ''}`
+        : `${order.receiver_address || ''} ${order.destination_province || ''}`);
+      const rawLat = isPickupTask ? order.shop_lat : order.receiver_lat;
+      const rawLng = isPickupTask ? order.shop_lng : order.receiver_lng;
+      const hasCoordinates = rawLat !== null && rawLat !== undefined && rawLat !== ''
+        && rawLng !== null && rawLng !== undefined && rawLng !== ''
+        && Number.isFinite(Number(rawLat)) && Number.isFinite(Number(rawLng));
+      const targetDistance = (driver) => {
+        const position = viTriTaiXeMap[driver.id];
+        if (!position || !hasCoordinates) return null;
+        return tinhKhoangCachKm(position.lat, position.lng, rawLat, rawLng);
+      };
+      const weight = Number(order.weight_kg || 0);
+      const eligible = driverProfiles.filter((profile) => {
+        if (profile.role !== driverRole) return false;
+        const load = loads.get(profile.id) || { count: 0, weight: 0 };
+        if (load.count >= Number(profile.max_active_orders) || load.weight + weight > Number(profile.max_payload_kg)) return false;
+        const zones = String(profile.service_areas || '').split(',').map((area) => normalizeAreaText(area.trim())).filter(Boolean);
+        return !zones.length || zones.some((zone) => areaText.includes(zone));
+      }).sort((first, second) => {
+        const firstLoad = loads.get(first.id) || { count: 0, weight: 0 };
+        const secondLoad = loads.get(second.id) || { count: 0, weight: 0 };
+        const firstScore = firstLoad.count / Number(first.max_active_orders)
+          + firstLoad.weight / Number(first.max_payload_kg)
+          + (targetDistance(first) ?? 0) / 100;
+        const secondScore = secondLoad.count / Number(second.max_active_orders)
+          + secondLoad.weight / Number(second.max_payload_kg)
+          + (targetDistance(second) ?? 0) / 100;
+        return firstScore - secondScore;
+      });
+      const driver = eligible[0];
+      if (!driver) return { order, taskType, driverId: null, state: 'blocked', message: 'Không có tài xế còn sức chứa hoặc phù hợp khu vực.' };
+      const load = loads.get(driver.id);
+      load.count += 1;
+      load.weight += weight;
+      return { order, taskType, driverId: driver.id, driverName: driver.full_name, distance: targetDistance(driver), state: 'pending' };
+    });
+    setAutoDispatchPlan(plan);
+    setAutoDispatchMessage(plan.length ? `Tạo được ${plan.filter((item) => item.driverId).length}/${plan.length} đề xuất. Hãy rà soát rồi mới duyệt.` : 'Không có đơn phù hợp trong nhóm nhiệm vụ đang chọn.');
+  };
+
+  const duyetKeHoachTuDong = async () => {
+    const pending = autoDispatchPlan.filter((item) => item.driverId && item.state === 'pending');
+    if (!pending.length || autoDispatchBusy) return;
+    setAutoDispatchBusy(true);
+    setAutoDispatchMessage('');
+    for (const item of pending) {
+      try {
+        const response = await fetch(`${API_URL}/api/orders/${item.order.id}/assign`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ shipper_id: item.driverId, task_type: item.taskType })
+        });
+        const result = await response.json();
+        setAutoDispatchPlan((current) => current.map((entry) => entry.order.id === item.order.id
+          ? { ...entry, state: response.ok && result.success ? 'assigned' : 'failed', message: result.message || 'Không thể phân công.' }
+          : entry));
+      } catch {
+        setAutoDispatchPlan((current) => current.map((entry) => entry.order.id === item.order.id
+          ? { ...entry, state: 'failed', message: 'Lỗi kết nối khi phân công.' }
+          : entry));
+      }
+    }
+    setAutoDispatchBusy(false);
+    setAutoDispatchMessage('Đã xử lý kế hoạch. Các đơn lỗi cần được kiểm tra và thử phân công lại.');
+    await Promise.all([taiDuLieu(), taiHoSoTaiXe()]);
+  };
 
   return (
     <div className="flex min-h-screen bg-[#F8FAFC] font-sans text-slate-700">
@@ -263,6 +456,7 @@ export default function TrungTamDieuPhoi() {
           
           <div className="p-5 mt-2 space-y-3">
             <button onClick={() => setTabHienTai('dieuphoan')} className={`w-full px-5 py-4 rounded-2xl font-bold flex items-center gap-4 transition-all ${tabHienTai === 'dieuphoan' ? 'bg-emerald-50 text-emerald-600 border border-emerald-100' : 'text-slate-500 hover:bg-slate-50'}`}><MapPin size={20} /> Phân Tuyến Tài Xế</button>
+            <button onClick={() => { setTabHienTai('rma'); taiYeuCauRma(); }} className={`w-full px-5 py-4 rounded-2xl font-bold flex items-center gap-4 transition-all ${tabHienTai === 'rma' ? 'bg-orange-50 text-orange-600 border border-orange-100' : 'text-slate-500 hover:bg-slate-50'}`}><RotateCw size={20} /> Yêu Cầu Giao Lại <span className="ml-auto rounded-full bg-orange-100 px-2 py-0.5 text-xs font-black text-orange-700">{rmaRequests.filter((request) => request.status === 'pending').length}</span></button>
             <button onClick={() => setTabHienTai('bandogiamsat')} className={`w-full px-5 py-4 rounded-2xl font-bold flex items-center gap-4 transition-all ${tabHienTai === 'bandogiamsat' ? 'bg-emerald-50 text-emerald-600 border border-emerald-100' : 'text-slate-500 hover:bg-slate-50'}`}><Map size={20} /> Giám Sát Bản Đồ GPS</button>
             <button onClick={() => setTabHienTai('baocao')} className={`w-full px-5 py-4 rounded-2xl font-bold flex items-center gap-4 transition-all ${tabHienTai === 'baocao' ? 'bg-emerald-50 text-emerald-600 border border-emerald-100' : 'text-slate-500 hover:bg-slate-50'}`}><FileText size={20} /> Báo Cáo Giám Đốc</button>
           </div>
@@ -343,6 +537,26 @@ export default function TrungTamDieuPhoi() {
                 })}
                 {!safeTaiXeList.length && <p className="text-sm text-slate-500">Không có tài xế đang hoạt động trong nhóm này.</p>}
               </div>
+              <div className="mt-5 border-t border-slate-100 pt-5">
+                <h3 className="mb-3 font-black text-slate-800">Sức chứa và khu vực phục vụ</h3>
+                <div className="grid gap-3 lg:grid-cols-2">
+                  {driverProfiles.map((profile) => {
+                    const draft = profileDrafts[profile.id] || profile;
+                    return (
+                      <form key={profile.id} onSubmit={(event) => { event.preventDefault(); luuHoSoTaiXe(profile.id); }} className="rounded-xl border border-slate-200 bg-white p-4">
+                        <div className="mb-3 flex justify-between gap-2"><strong>{profile.full_name}</strong><span className="text-xs text-slate-500">{profile.role === 'delivery_driver' ? 'Giao hàng' : 'Nhận / trung chuyển'}</span></div>
+                        <p className="mb-3 text-xs text-slate-500">Đang giữ {profile.active_count} đơn · {Number(profile.active_weight_kg || 0).toLocaleString()} kg</p>
+                        <div className="grid grid-cols-2 gap-2">
+                          <label className="text-xs font-bold text-slate-600">Số đơn tối đa<input type="number" min="1" max="100" required value={draft.max_active_orders} onChange={(event) => setProfileDrafts((current) => ({ ...current, [profile.id]: { ...draft, max_active_orders: event.target.value } }))} className="mt-1 w-full rounded-lg border border-slate-200 p-2 text-sm" /></label>
+                          <label className="text-xs font-bold text-slate-600">Tải trọng tối đa (kg)<input type="number" min="0.1" max="100000" step="0.1" required value={draft.max_payload_kg} onChange={(event) => setProfileDrafts((current) => ({ ...current, [profile.id]: { ...draft, max_payload_kg: event.target.value } }))} className="mt-1 w-full rounded-lg border border-slate-200 p-2 text-sm" /></label>
+                          <label className="col-span-2 text-xs font-bold text-slate-600">Khu vực phụ trách, phân cách bằng dấu phẩy<input value={draft.service_areas || ''} maxLength={500} onChange={(event) => setProfileDrafts((current) => ({ ...current, [profile.id]: { ...draft, service_areas: event.target.value } }))} placeholder="Quận 1, Bình Thạnh · để trống nếu nhận mọi khu vực" className="mt-1 w-full rounded-lg border border-slate-200 p-2 text-sm" /></label>
+                        </div>
+                        <button type="submit" disabled={savingProfileId === profile.id} className="mt-3 rounded-lg bg-slate-800 px-3 py-2 text-xs font-black text-white disabled:opacity-50">{savingProfileId === profile.id ? 'Đang lưu...' : 'Lưu cấu hình tài xế'}</button>
+                      </form>
+                    );
+                  })}
+                </div>
+              </div>
             </section>
 
             <div className="mb-8 flex justify-between items-end">
@@ -355,6 +569,31 @@ export default function TrungTamDieuPhoi() {
                 <input type="text" placeholder="Tìm mã đơn hoặc địa chỉ..." className="w-full pl-11 pr-4 py-3 bg-white border border-slate-200 rounded-xl outline-none focus:border-emerald-400 focus:ring-4 focus:ring-emerald-50 transition-all font-medium" value={tuKhoa} onChange={(e) => setTuKhoa(e.target.value)} />
               </div>
             </div>
+
+            <section className="mb-8 rounded-[24px] border border-indigo-200 bg-indigo-50 p-5 shadow-sm">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div><h2 className="text-lg font-black text-indigo-950">Tự động chia đơn · bản xem trước</h2><p className="mt-1 text-xs text-indigo-800">Cân theo số đơn, tải trọng, khu vực cấu hình và GPS gần nhất. Mỗi nhóm nhiệm vụ được lập kế hoạch riêng.</p></div>
+                <button type="button" onClick={taoKeHoachTuDong} disabled={!driverProfiles.length} className="rounded-xl bg-indigo-700 px-4 py-3 font-black text-white disabled:opacity-50"><Zap size={16} className="mr-2 inline" />Tạo đề xuất</button>
+              </div>
+              {autoDispatchMessage && <p role="status" className="mt-3 rounded-lg bg-white p-3 text-sm font-bold text-indigo-800">{autoDispatchMessage}</p>}
+              {autoDispatchPlan.length > 0 && (
+                <>
+                  <div className="mt-4 max-h-80 overflow-auto rounded-xl border border-indigo-100 bg-white">
+                    <table className="w-full min-w-[620px] text-left text-sm">
+                      <thead className="sticky top-0 bg-white text-xs uppercase text-slate-500"><tr><th className="p-3">Đơn</th><th className="p-3">Nhiệm vụ</th><th className="p-3">Tài xế đề xuất</th><th className="p-3">Tải</th><th className="p-3">Kết quả</th></tr></thead>
+                      <tbody className="divide-y divide-slate-100">{autoDispatchPlan.map((item) => <tr key={item.order.id}>
+                        <td className="p-3 font-mono font-bold">{item.order.tracking_code}</td>
+                        <td className="p-3">{item.taskType.replace('_', ' ')}</td>
+                        <td className="p-3">{item.driverName || '—'}{item.distance !== null && item.distance !== undefined && <span className="block text-xs text-slate-500">{item.distance.toFixed(1)} km GPS</span>}</td>
+                        <td className="p-3">{Number(item.order.weight_kg || 0).toLocaleString()} kg</td>
+                        <td className={`p-3 text-xs font-bold ${item.state === 'blocked' || item.state === 'failed' ? 'text-red-700' : item.state === 'assigned' ? 'text-emerald-700' : 'text-amber-700'}`}>{item.message || (item.state === 'assigned' ? 'Đã duyệt' : item.state === 'failed' ? 'Lỗi' : item.state === 'blocked' ? 'Không đủ điều kiện' : 'Chờ duyệt')}</td>
+                      </tr>)}</tbody>
+                    </table>
+                  </div>
+                  <button type="button" onClick={duyetKeHoachTuDong} disabled={autoDispatchBusy || !autoDispatchPlan.some((item) => item.driverId && item.state === 'pending')} className="mt-4 rounded-xl bg-emerald-700 px-5 py-3 font-black text-white disabled:opacity-50">{autoDispatchBusy ? 'Đang duyệt tuần tự...' : 'Duyệt và phân công đề xuất'}</button>
+                </>
+              )}
+            </section>
 
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
               {donDaLoc.length === 0 ? (
@@ -405,6 +644,97 @@ export default function TrungTamDieuPhoi() {
               )}
             </div>
           </div>
+        )}
+
+        {tabHienTai === 'rma' && (
+          <section className="animate-in fade-in duration-300 flex-1">
+            <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
+              <div>
+                <h1 className="text-3xl font-black text-slate-800 tracking-tight">Duyệt yêu cầu giao lại</h1>
+                <p className="mt-2 font-medium text-slate-500">Kiểm tra xác nhận của Shop và bằng chứng trước khi quyết định. Duyệt không tự phân tài xế.</p>
+              </div>
+              <button type="button" onClick={taiYeuCauRma} disabled={rmaLoading} className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-50">
+                <RotateCw size={16} className={rmaLoading ? 'animate-spin' : ''} /> Làm mới
+              </button>
+            </div>
+            {(rmaError || rmaMessage) && <p role={rmaError ? 'alert' : 'status'} className={`mb-5 rounded-xl p-4 text-sm font-semibold ${rmaError ? 'bg-rose-50 text-rose-700' : 'bg-emerald-50 text-emerald-700'}`}>{rmaError || rmaMessage}</p>}
+            <div className="mb-5 grid gap-4 sm:grid-cols-3">
+              <div className="rounded-2xl border border-amber-100 bg-white p-5 shadow-sm"><p className="text-xs font-black uppercase tracking-wide text-slate-500">Chờ xử lý</p><p className="mt-2 text-3xl font-black text-amber-600">{rmaRequests.filter((request) => request.status === 'pending').length}</p></div>
+              <div className="rounded-2xl border border-emerald-100 bg-white p-5 shadow-sm"><p className="text-xs font-black uppercase tracking-wide text-slate-500">Đã duyệt</p><p className="mt-2 text-3xl font-black text-emerald-600">{rmaRequests.filter((request) => request.status === 'approved').length}</p></div>
+              <div className="rounded-2xl border border-rose-100 bg-white p-5 shadow-sm"><p className="text-xs font-black uppercase tracking-wide text-slate-500">Đã từ chối</p><p className="mt-2 text-3xl font-black text-rose-600">{rmaRequests.filter((request) => request.status === 'rejected').length}</p></div>
+            </div>
+            {rmaLoading && rmaRequests.length === 0 ? (
+              <div role="status" className="rounded-2xl border border-slate-200 bg-white p-10 text-center font-semibold text-slate-500">Đang tải yêu cầu...</div>
+            ) : rmaRequests.length === 0 ? (
+              <div className="rounded-2xl border border-dashed border-slate-300 bg-white p-10 text-center">
+                <CheckCircle className="mx-auto text-emerald-500" size={36} />
+                <p className="mt-3 font-black text-slate-800">Chưa có yêu cầu giao lại</p>
+                <p className="mt-1 text-sm text-slate-500">Các yêu cầu mới từ Shop sẽ xuất hiện ở đây.</p>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {rmaRequests.map((request) => (
+                  <article key={request.order_id} className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+                    <header className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-100 p-5">
+                      <div>
+                        <p className="text-xs font-bold uppercase tracking-wide text-slate-400">Vận đơn · {request.shop_name || `Shop #${request.shop_id}`}</p>
+                        <h2 className="mt-1 text-xl font-black text-slate-800">{request.tracking_code}</h2>
+                        <p className="mt-1 text-xs text-slate-500">Gửi lúc {new Date(request.requested_at).toLocaleString('vi-VN')}</p>
+                      </div>
+                      <span className={`rounded-full px-3 py-1.5 text-xs font-black ${request.status === 'pending' ? 'bg-amber-100 text-amber-800' : request.status === 'approved' ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800'}`}>
+                        {request.status === 'pending' ? 'Chờ xử lý' : request.status === 'approved' ? 'Đã duyệt' : 'Đã từ chối'}
+                      </span>
+                    </header>
+                    <div className="grid gap-5 p-5 lg:grid-cols-2">
+                      <div className="space-y-3">
+                        <div className="rounded-xl bg-slate-50 p-4 text-sm">
+                          <p><strong>Khách nhận:</strong> {request.receiver_name} · {request.receiver_phone}</p>
+                          <p className="mt-1"><strong>Địa chỉ:</strong> {request.receiver_address}</p>
+                          <p className="mt-1"><strong>COD:</strong> {Number(request.cod_amount || 0).toLocaleString('vi-VN')} đ</p>
+                        </div>
+                        <div className="rounded-xl border border-rose-100 bg-rose-50 p-4">
+                          <p className="flex items-center gap-2 text-sm font-black text-rose-800"><AlertCircle size={16} /> Lý do giao thất bại</p>
+                          <p className="mt-1 text-sm text-rose-700">{request.fail_reason || 'Không có thông tin'}</p>
+                        </div>
+                        <div className="rounded-xl border border-blue-100 bg-blue-50 p-4">
+                          <p className="text-sm font-black text-blue-900">Shop xác nhận khách đồng ý nhận lại</p>
+                          <p className="mt-1 whitespace-pre-wrap text-sm text-blue-800">{request.request_note}</p>
+                        </div>
+                      </div>
+                      <div className="space-y-3">
+                        {request.proof_image ? (
+                          <a href={`${API_URL}${request.proof_image}`} target="_blank" rel="noreferrer" className="block">
+                            <img src={`${API_URL}${request.proof_image}`} alt={`Bằng chứng giao thất bại ${request.tracking_code}`} className="max-h-64 w-full rounded-xl border border-slate-200 bg-slate-50 object-contain" />
+                            <span className="mt-1 block text-xs font-semibold text-slate-500">Mở ảnh bằng chứng kích thước đầy đủ</span>
+                          </a>
+                        ) : <p className="rounded-xl bg-slate-50 p-4 text-sm text-slate-500">Đơn chưa có ảnh bằng chứng.</p>}
+                        {request.review_note && <p className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700"><strong>Ghi chú xử lý:</strong> {request.review_note}</p>}
+                        {request.status === 'pending' && (
+                          <div className="space-y-3 rounded-xl border border-slate-200 p-4">
+                            <label htmlFor={`rma-review-${request.order_id}`} className="block text-sm font-black text-slate-700">Ghi chú duyệt / lý do từ chối</label>
+                            <textarea
+                              id={`rma-review-${request.order_id}`}
+                              maxLength={1000}
+                              rows={3}
+                              value={rmaReviewNotes[request.order_id] || ''}
+                              onChange={(event) => setRmaReviewNotes((current) => ({ ...current, [request.order_id]: event.target.value }))}
+                              className="w-full rounded-lg border border-slate-300 p-3 text-sm"
+                              placeholder="Khi từ chối, ghi rõ lý do (tối thiểu 5 ký tự)."
+                            />
+                            <div className="flex flex-wrap gap-2">
+                              <button type="button" disabled={rmaBusyOrderId === request.order_id} onClick={() => xuLyYeuCauRma(request, 'approved')} className="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-black text-white hover:bg-emerald-700 disabled:opacity-50"><CheckCircle size={16} /> Duyệt yêu cầu</button>
+                              <button type="button" disabled={rmaBusyOrderId === request.order_id} onClick={() => xuLyYeuCauRma(request, 'rejected')} className="inline-flex items-center gap-2 rounded-lg bg-rose-600 px-4 py-2.5 text-sm font-black text-white hover:bg-rose-700 disabled:opacity-50"><AlertCircle size={16} /> Từ chối</button>
+                              {rmaBusyOrderId === request.order_id && <span role="status" className="self-center text-xs font-semibold text-slate-500">Đang lưu...</span>}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            )}
+          </section>
         )}
 
         {/* TAB 2: BẢN ĐỒ GIÁM SÁT ĐÃ FIX LỖI XÁM */}

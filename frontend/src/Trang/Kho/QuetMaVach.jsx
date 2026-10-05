@@ -1,6 +1,9 @@
+import { apiFetch as fetch } from '../../utils/apiFetch.js';
 import { useState, useEffect, useRef } from 'react';
 import { ScanLine, Barcode, LogOut, Box, ArrowRightLeft, CheckCircle, AlertCircle, PackageSearch, Camera, ImagePlus, X, MapPin, Save, Plus, Truck } from 'lucide-react';
 import { Html5Qrcode, Html5QrcodeScanner, Html5QrcodeSupportedFormats } from 'html5-qrcode';
+import BarcodeLabel from 'react-barcode';
+import QRCode from 'react-qr-code';
 
 const supportedBarcodeFormats = [
   Html5QrcodeSupportedFormats.QR_CODE,
@@ -31,6 +34,17 @@ export default function QuetMaVach() {
   const [khoDrafts, setKhoDrafts] = useState({});
   const [phuongMoi, setPhuongMoi] = useState('');
   const [warehouseId, setWarehouseId] = useState('');
+  const [binLocations, setBinLocations] = useState([]);
+  const [selectedBinCode, setSelectedBinCode] = useState('');
+  const [crossDockMode, setCrossDockMode] = useState(false);
+  const [binCodeDraft, setBinCodeDraft] = useState('');
+  const [binNameDraft, setBinNameDraft] = useState('');
+  const [creatingBin, setCreatingBin] = useState(false);
+  const [auditId, setAuditId] = useState(null);
+  const [auditScanCode, setAuditScanCode] = useState('');
+  const [auditScannedCount, setAuditScannedCount] = useState(0);
+  const [auditBusy, setAuditBusy] = useState(false);
+  const [auditReport, setAuditReport] = useState(null);
   const [dispatchCode, setDispatchCode] = useState('');
   const [dispatchType, setDispatchType] = useState('');
   const [dispatchDrivers, setDispatchDrivers] = useState([]);
@@ -81,6 +95,22 @@ export default function QuetMaVach() {
     }
   };
 
+  const taiViTriKe = async (selectedWarehouseId = warehouseId) => {
+    if (!selectedWarehouseId) {
+      setBinLocations([]);
+      setSelectedBinCode('');
+      return;
+    }
+    try {
+      const response = await fetch(`http://localhost:5000/api/warehouse/bin-locations?warehouse_id=${selectedWarehouseId}`);
+      const data = await response.json();
+      if (!response.ok || !data.success) throw new Error(data.message || 'Không tải được vị trí kệ.');
+      setBinLocations(data.data || []);
+    } catch (error) {
+      setThongBao({ loai: 'loi', thongDiep: error.message || 'Không tải được vị trí kệ.' });
+    }
+  };
+
   useEffect(() => {
     taiDanhSachKho();
     // Focus vào input trừ khi camera đang mở
@@ -89,7 +119,94 @@ export default function QuetMaVach() {
 
   useEffect(() => {
     taiTonKho(warehouseId);
+    taiViTriKe(warehouseId);
   }, [warehouseId]);
+
+  const taoViTriKe = async (event) => {
+    event.preventDefault();
+    if (!warehouseId || creatingBin) return;
+    setCreatingBin(true);
+    try {
+      const response = await fetch('http://localhost:5000/api/warehouse/bin-locations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ warehouse_id: Number(warehouseId), bin_code: binCodeDraft, bin_name: binNameDraft })
+      });
+      const data = await response.json();
+      if (!response.ok || !data.success) throw new Error(data.message || 'Không tạo được vị trí kệ.');
+      setBinCodeDraft('');
+      setBinNameDraft('');
+      setSelectedBinCode(data.data.bin_code);
+      setThongBao({ loai: 'thanhcong', thongDiep: `Đã tạo vị trí kệ ${data.data.bin_code}.` });
+      await taiViTriKe();
+    } catch (error) {
+      setThongBao({ loai: 'loi', thongDiep: error.message || 'Không tạo được vị trí kệ.' });
+    } finally {
+      setCreatingBin(false);
+    }
+  };
+
+  const batDauKiemKe = async () => {
+    if (!warehouseId || auditBusy) return;
+    setAuditBusy(true);
+    try {
+      const response = await fetch('http://localhost:5000/api/warehouse/inventory-audits', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ warehouse_id: Number(warehouseId) })
+      });
+      const data = await response.json();
+      if (!response.ok || !data.success) throw new Error(data.message || 'Không thể mở phiếu kiểm kê.');
+      setAuditId(data.data.id);
+      setAuditScannedCount(0);
+      setAuditReport(null);
+      setThongBao({ loai: 'thanhcong', thongDiep: data.message });
+    } catch (error) {
+      setThongBao({ loai: 'loi', thongDiep: error.message || 'Không thể mở phiếu kiểm kê.' });
+    } finally {
+      setAuditBusy(false);
+    }
+  };
+
+  const quetKiemKe = async (event) => {
+    event.preventDefault();
+    if (!auditId || !auditScanCode.trim() || auditBusy) return;
+    setAuditBusy(true);
+    try {
+      const response = await fetch(`http://localhost:5000/api/warehouse/inventory-audits/${auditId}/scan`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tracking_code: auditScanCode.trim() })
+      });
+      const data = await response.json();
+      if (!response.ok || !data.success) throw new Error(data.message || 'Không thể ghi nhận mã kiểm kê.');
+      setAuditScannedCount((count) => count + 1);
+      setAuditScanCode('');
+      inputRef.current?.focus();
+      setThongBao({ loai: 'thanhcong', thongDiep: data.message });
+    } catch (error) {
+      setThongBao({ loai: 'loi', thongDiep: error.message || 'Không thể ghi nhận mã kiểm kê.' });
+    } finally {
+      setAuditBusy(false);
+    }
+  };
+
+  const chotKiemKe = async () => {
+    if (!auditId || auditBusy || !window.confirm('Chốt phiếu kiểm kê? Danh sách kiện thiếu và mã dư sẽ được hiển thị.')) return;
+    setAuditBusy(true);
+    try {
+      const response = await fetch(`http://localhost:5000/api/warehouse/inventory-audits/${auditId}/complete`, { method: 'PUT' });
+      const data = await response.json();
+      if (!response.ok || !data.success) throw new Error(data.message || 'Không thể chốt phiếu kiểm kê.');
+      setAuditReport(data.data);
+      setAuditId(null);
+      setThongBao({ loai: 'thanhcong', thongDiep: 'Đã chốt phiếu và đối chiếu tồn kho.' });
+    } catch (error) {
+      setThongBao({ loai: 'loi', thongDiep: error.message || 'Không thể chốt phiếu kiểm kê.' });
+    } finally {
+      setAuditBusy(false);
+    }
+  };
 
   useEffect(() => {
     if (tabKho !== 'outbound' || !selectedWarehouse) return;
@@ -287,10 +404,26 @@ export default function QuetMaVach() {
     setThongBao({ loai: '', thongDiep: '' });
 
     try {
+      if (!crossDockMode) {
+        const lookupParams = new URLSearchParams({ warehouse_id: warehouseId, bin_code: maCanXuly });
+        const binResponse = await fetch(`http://localhost:5000/api/warehouse/bin-locations/lookup?${lookupParams}`);
+        const binData = await binResponse.json();
+        if (!binResponse.ok || !binData.success) throw new Error(binData.message || 'Không thể xác thực mã kệ.');
+        if (binData.matched) {
+          setSelectedBinCode(binData.data.bin_code);
+          setMaVuaDoc(binData.data.bin_code);
+          setThongBao({ loai: 'thanhcong', thongDiep: `Đã nhận diện kệ ${binData.data.bin_code} · ${binData.data.bin_name}. Bây giờ quét mã vận đơn.` });
+          return;
+        }
+      }
+      if (!crossDockMode && !selectedBinCode) {
+        setThongBao({ loai: 'loi', thongDiep: 'Quét mã vạch vị trí kệ trước, sau đó mới quét mã vận đơn.' });
+        return;
+      }
       const res = await fetch('http://localhost:5000/api/warehouse/scan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tracking_code: maCanXuly, warehouse_id: Number(warehouseId) })
+        body: JSON.stringify({ tracking_code: maCanXuly, warehouse_id: Number(warehouseId), bin_code: selectedBinCode, cross_dock: crossDockMode })
       });
       const data = await res.json();
 
@@ -603,7 +736,7 @@ export default function QuetMaVach() {
                   <div className="border-t border-slate-100 pt-4">
                     <h2 className="font-black text-slate-800">Đơn đang nằm tại kho ({anToanTonKho.length})</h2>
                     <div className="mt-3 max-h-72 space-y-2 overflow-y-auto">
-                      {anToanTonKho.map((order) => <button key={order.id} type="button" onClick={() => setDispatchCode(order.tracking_code)} className="flex w-full items-center justify-between rounded-lg border border-slate-100 p-3 text-left hover:border-indigo-200 hover:bg-indigo-50"><span className="font-mono font-bold">{order.tracking_code}</span><span className="text-xs text-slate-500">{order.status}</span></button>)}
+                      {anToanTonKho.map((order) => <button key={order.id} type="button" onClick={() => setDispatchCode(order.tracking_code)} className="flex w-full items-center justify-between rounded-lg border border-slate-100 p-3 text-left hover:border-indigo-200 hover:bg-indigo-50"><span><span className="block font-mono font-bold">{order.tracking_code}</span><span className="mt-1 block text-xs text-indigo-700">Kệ {order.storage_bin_code || 'chưa xác định'}</span></span><span className="text-xs text-slate-500">{order.status}</span></button>)}
                       {!anToanTonKho.length && <p className="text-sm text-slate-500">Kho hiện chưa có đơn chờ xuất.</p>}
                     </div>
                   </div>
@@ -706,10 +839,17 @@ export default function QuetMaVach() {
                   <div className="rounded-2xl border border-slate-200 bg-white p-5">
                     <h2 className="mb-3 font-black">Chuyến xe trung chuyển ({linehaulTrips.length})</h2>
                     <div className="space-y-2">
-                      {linehaulTrips.map((trip) => <article key={trip.id} className="rounded-xl border border-slate-100 p-3">
-                        <div className="flex justify-between gap-2"><strong>{trip.trip_code} · {trip.vehicle_plate}</strong><span className="text-xs font-bold text-slate-500">{trip.status}</span></div>
-                        <p className="mt-1 text-sm text-slate-500">{trip.source_warehouse_name} → {trip.destination_warehouse_name}</p>
-                        <p className="mt-1 text-xs text-slate-400">Tài xế: {trip.driver_name || 'Chưa gán'} · {trip.scanned_bag_count}/{trip.bag_count} bao đã quét</p>
+                      {linehaulTrips.map((trip) => <article key={trip.id} className="flex items-start justify-between gap-3 rounded-xl border border-slate-100 p-3">
+                        <div>
+                          <div className="flex justify-between gap-2"><strong>{trip.trip_code} · {trip.vehicle_plate}</strong><span className="text-xs font-bold text-slate-500">{trip.status}</span></div>
+                          <p className="mt-1 text-sm text-slate-500">{trip.source_warehouse_name} → {trip.destination_warehouse_name}</p>
+                          <p className="mt-1 text-xs text-slate-400">Tài xế: {trip.driver_name || 'Chưa gán'} · {trip.scanned_bag_count}/{trip.bag_count} bao đã quét</p>
+                          <a href={`${API_URL}${trip.manifest_url}`} target="_blank" rel="noreferrer" className="mt-2 inline-block text-xs font-black text-indigo-700 underline">Mở manifest xác thực</a>
+                        </div>
+                        <div className="shrink-0 rounded-lg bg-white p-2" title="Quét QR để xem manifest chuyến xe">
+                          <QRCode value={`${API_URL}${trip.manifest_url}`} size={104} />
+                          <p className="mt-1 text-center text-[10px] font-bold text-slate-500">TRIP MANIFEST</p>
+                        </div>
                       </article>)}
                       {!linehaulTrips.length && <p className="text-sm text-slate-500">Chưa có chuyến xe.</p>}
                     </div>
@@ -721,49 +861,48 @@ export default function QuetMaVach() {
         ) : tabKho === 'kiem-ke' ? (
           <div className="flex-1 p-10">
             <div className="mb-8">
-              <p className="text-xs font-black uppercase tracking-[0.22em] text-indigo-600">Kho bãi</p>
-              <h1 className="mt-3 text-4xl font-black text-slate-800">Báo Cáo Kiểm Kê Định Kỳ</h1>
+              <p className="text-xs font-black uppercase tracking-[0.22em] text-indigo-600">Kiểm kê mù</p>
+              <h1 className="mt-3 text-4xl font-black text-slate-800">Kiểm kê tồn kho bằng máy quét</h1>
+              <p className="mt-2 max-w-3xl text-sm text-slate-500">Hệ thống chụp danh sách tồn đầu kỳ nhưng không hiển thị cho người kiểm kê. Quét tất cả mã kiện, sau đó chốt để xem kiện thiếu và mã dư.</p>
             </div>
-
-            <div className="grid gap-6 md:grid-cols-3">
-              <div className="rounded-[28px] border border-slate-200 bg-white p-6 shadow-sm">
-                <p className="text-xs font-black uppercase tracking-[0.2em] text-slate-500">Tổng đơn đang lưu</p>
-                <h3 className="mt-4 text-4xl font-black text-slate-800">{anToanTonKho.length}</h3>
-              </div>
-              <div className="rounded-[28px] border border-slate-200 bg-white p-6 shadow-sm">
-                <p className="text-xs font-black uppercase tracking-[0.2em] text-slate-500">Số đơn đã xuất</p>
-                <h3 className="mt-4 text-4xl font-black text-emerald-600">{Math.max(0, anToanTonKho.length - 2)}</h3>
-              </div>
-              <div className="rounded-[28px] border border-slate-200 bg-white p-6 shadow-sm">
-                <p className="text-xs font-black uppercase tracking-[0.2em] text-slate-500">Đánh giá</p>
-                <h3 className="mt-4 text-2xl font-black text-indigo-600">Ổn định</h3>
-              </div>
-            </div>
-
-            <div className="mt-8 rounded-[28px] border border-slate-200 bg-white p-6 shadow-sm">
-              <div className="mb-5 flex items-center justify-between">
-                <h3 className="text-xl font-black text-slate-800">Phiếu kiểm kê nhanh</h3>
-                <button onClick={() => setTabKho('scan')} className="rounded-xl bg-slate-100 px-4 py-2 text-sm font-bold text-slate-700 hover:bg-slate-200">Quay lại quét mã</button>
-              </div>
-              <div className="space-y-3">
-                {anToanTonKho.length === 0 ? (
-                  <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 p-8 text-center text-slate-500">Chưa có dữ liệu kiểm kê trong kho.</div>
-                ) : (
-                  anToanTonKho.slice(0, 6).map((item) => (
-                    <div key={item.id} className="flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 p-4">
-                      <div>
-                        <p className="font-black text-slate-800">{item.tracking_code}</p>
-                        <p className="text-sm text-slate-500">{item.receiver_name}</p>
-                      </div>
-                      <div className="text-right">
-                        <p className="text-sm font-bold text-slate-500">{item.status}</p>
-                        <p className="text-xs text-slate-400">{new Date(item.created_at).toLocaleDateString('vi-VN')}</p>
-                      </div>
-                    </div>
-                  ))
-                )}
-              </div>
-            </div>
+            <section className="max-w-4xl rounded-[28px] border border-slate-200 bg-white p-6 shadow-sm">
+              <label className="block text-sm font-bold text-slate-700">Kho kiểm kê
+                <select value={warehouseId} onChange={(event) => setWarehouseId(event.target.value)} disabled={Boolean(auditId)} className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
+                  <option value="">-- Chọn kho --</option>
+                  {danhSachKho.filter((warehouse) => warehouse.is_configured && warehouse.is_active).map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}
+                </select>
+              </label>
+              {!auditId && !auditReport && <button type="button" onClick={batDauKiemKe} disabled={!warehouseId || auditBusy} className="mt-5 rounded-xl bg-indigo-600 px-5 py-3 font-black text-white disabled:opacity-50">{auditBusy ? 'Đang mở phiếu...' : 'Bắt đầu kiểm kê mù'}</button>}
+              {auditId && (
+                <div className="mt-5 space-y-4">
+                  <div className="rounded-xl border border-indigo-100 bg-indigo-50 p-4">
+                    <p className="font-black text-indigo-900">Phiếu #{auditId} đang mở · Đã quét {auditScannedCount} mã</p>
+                    <p className="mt-1 text-xs text-indigo-700">Không hiển thị trạng thái đúng/sai khi quét để giữ chế độ kiểm kê mù.</p>
+                  </div>
+                  <form onSubmit={quetKiemKe} className="flex flex-col gap-3 sm:flex-row">
+                    <input ref={inputRef} autoFocus value={auditScanCode} onChange={(event) => setAuditScanCode(event.target.value.toUpperCase())} placeholder="Quét mã vận đơn hoặc nhập tay" className="min-w-0 flex-1 rounded-xl border border-slate-200 px-4 py-3 font-mono text-lg uppercase" />
+                    <button type="submit" disabled={auditBusy || !auditScanCode.trim()} className="rounded-xl bg-emerald-600 px-5 py-3 font-black text-white disabled:opacity-50">Ghi nhận mã</button>
+                  </form>
+                  <button type="button" onClick={chotKiemKe} disabled={auditBusy} className="rounded-xl border border-red-200 bg-red-50 px-5 py-3 font-black text-red-700 disabled:opacity-50">Chốt kiểm kê và đối chiếu</button>
+                </div>
+              )}
+              {auditReport && (
+                <div className="mt-6 space-y-5">
+                  <div className="grid gap-3 sm:grid-cols-3">
+                    <p className="rounded-xl bg-slate-50 p-4 text-sm">Tồn đầu kỳ: <strong>{auditReport.expected_count}</strong></p>
+                    <p className="rounded-xl bg-slate-50 p-4 text-sm">Mã đã quét: <strong>{auditReport.scanned_count}</strong></p>
+                    <p className="rounded-xl bg-red-50 p-4 text-sm text-red-800">Thiếu: <strong>{auditReport.missing_count}</strong> · Dư: <strong>{auditReport.extra_count}</strong></p>
+                  </div>
+                  <div className="grid gap-5 md:grid-cols-2">
+                    <div><h3 className="mb-2 font-black text-red-700">Kiện thiếu</h3>{auditReport.missing.length ? auditReport.missing.map((item) => <p key={item.order_id} className="border-b border-slate-100 py-2 font-mono text-sm">{item.tracking_code}</p>) : <p className="text-sm text-slate-500">Không thiếu kiện.</p>}</div>
+                    <div><h3 className="mb-2 font-black text-amber-700">Mã dư / không thuộc tồn đầu kỳ</h3>{auditReport.extra.length ? auditReport.extra.map((item) => <p key={item.scan_code} className="border-b border-slate-100 py-2 font-mono text-sm">{item.scan_code}</p>) : <p className="text-sm text-slate-500">Không có mã dư.</p>}</div>
+                  </div>
+                  <button type="button" onClick={() => { setAuditReport(null); setAuditScannedCount(0); }} className="rounded-xl bg-indigo-600 px-5 py-3 font-black text-white">Mở phiếu kiểm kê khác</button>
+                </div>
+              )}
+              <button onClick={() => setTabKho('scan')} className="ml-3 mt-5 rounded-xl bg-slate-100 px-4 py-3 text-sm font-bold text-slate-700 hover:bg-slate-200">Quay lại quét kho</button>
+              {thongBao.thongDiep && <p role="status" className={`mt-4 rounded-xl p-3 text-sm font-bold ${thongBao.loai === 'loi' ? 'bg-red-50 text-red-700' : 'bg-emerald-50 text-emerald-700'}`}>{thongBao.thongDiep}</p>}
+            </section>
           </div>
         ) : (
           <div className="flex-1 p-10 overflow-y-auto flex flex-col xl:flex-row gap-8">
@@ -780,11 +919,40 @@ export default function QuetMaVach() {
             <p className="text-slate-500 text-sm mb-6 font-medium">Đưa trọn mã vạch vào khung quét. Có thể dùng ảnh mã rõ nét, súng quét hoặc nhập mã tay.</p>
 
             <label className="mb-5 block text-left text-sm font-bold text-slate-700">Kho đang thao tác
-              <select value={warehouseId} onChange={(event) => setWarehouseId(event.target.value)} className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 outline-none focus:border-indigo-400">
+              <select value={warehouseId} onChange={(event) => { setSelectedBinCode(''); setWarehouseId(event.target.value); }} className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 outline-none focus:border-indigo-400">
                 <option value="">-- Chọn kho thực tế --</option>
                 {danhSachKho.filter((warehouse) => warehouse.is_configured && warehouse.is_active).map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}
               </select>
             </label>
+            {warehouseId && (
+              <div className="mb-5 space-y-3 text-left">
+                <label className="flex cursor-pointer items-start gap-2 rounded-xl border border-indigo-200 bg-indigo-50 p-3 text-xs text-indigo-900">
+                  <input type="checkbox" checked={crossDockMode} onChange={(event) => setCrossDockMode(event.target.checked)} className="mt-0.5 accent-indigo-600" />
+                  <span><strong>Chuyển tải nhanh (cross-docking)</strong><br />Bỏ qua kệ, chuyển kiện thẳng đến khu xuất để Điều phối gán xe.</span>
+                </label>
+                {!crossDockMode && (
+                <>
+                <div className={`rounded-xl border p-3 ${selectedBinCode ? 'border-emerald-200 bg-emerald-50' : 'border-amber-200 bg-amber-50'}`}>
+                  <p className="text-xs font-black uppercase text-slate-600">Vị trí lưu kho</p>
+                  {selectedBinCode ? (
+                    <>
+                      <p className="mt-1 text-sm font-bold text-emerald-800">Đang nhập vào {selectedBinCode} · {binLocations.find((bin) => bin.bin_code === selectedBinCode)?.bin_name}</p>
+                      <div className="mt-2 overflow-hidden rounded-lg bg-white p-2"><BarcodeLabel value={selectedBinCode} format="CODE128" height={42} margin={2} /></div>
+                    </>
+                  ) : (
+                    <p className="mt-1 text-xs text-amber-800">Quét mã vạch kệ bằng camera hoặc máy quét trước khi quét kiện hàng.</p>
+                  )}
+                </div>
+                <form onSubmit={taoViTriKe} className="grid grid-cols-2 gap-2 rounded-xl border border-slate-200 p-3">
+                  <p className="col-span-2 text-xs font-black uppercase text-slate-600">Tạo nhãn vị trí kệ mới</p>
+                  <input required maxLength={80} pattern="[A-Za-z0-9][A-Za-z0-9._-]{0,79}" value={binCodeDraft} onChange={(event) => setBinCodeDraft(event.target.value.toUpperCase())} placeholder="Mã kệ (A1-03)" className="min-w-0 rounded-lg border border-slate-200 p-2 text-sm uppercase" />
+                  <input required maxLength={120} value={binNameDraft} onChange={(event) => setBinNameDraft(event.target.value)} placeholder="Tên vị trí" className="min-w-0 rounded-lg border border-slate-200 p-2 text-sm" />
+                  <button type="submit" disabled={creatingBin} className="col-span-2 flex items-center justify-center gap-2 rounded-lg bg-slate-800 px-3 py-2 text-xs font-black text-white disabled:opacity-50"><Plus size={14} /> {creatingBin ? 'Đang tạo...' : 'Tạo mã và nhãn mã vạch'}</button>
+                </form>
+                </>
+                )}
+              </div>
+            )}
 
             {/* VÙNG CHỨA CAMERA / NÚT BẬT CAMERA */}
             {!moCamera ? (
@@ -898,6 +1066,7 @@ export default function QuetMaVach() {
                   <tr>
                     <th className="p-5 text-xs font-black text-slate-400 uppercase tracking-wider border-b border-slate-100">Mã Vận Đơn</th>
                     <th className="p-5 text-xs font-black text-slate-400 uppercase tracking-wider border-b border-slate-100">Khách Hàng</th>
+                    <th className="p-5 text-xs font-black text-slate-400 uppercase tracking-wider border-b border-slate-100">Vị trí kệ</th>
                     <th className="p-5 text-xs font-black text-slate-400 uppercase tracking-wider border-b border-slate-100">Cân Nặng</th>
                     <th className="p-5 text-xs font-black text-slate-400 uppercase tracking-wider border-b border-slate-100 text-right">Trạng Thái</th>
                   </tr>
@@ -905,7 +1074,7 @@ export default function QuetMaVach() {
                 <tbody className="divide-y divide-slate-50">
                   {anToanTonKho.length === 0 ? (
                     <tr>
-                      <td colSpan="4" className="p-20 text-center text-slate-400 font-medium">
+                      <td colSpan="5" className="p-20 text-center text-slate-400 font-medium">
                         Kho đang trống. Không có đơn hàng nào đang lưu kho.
                       </td>
                     </tr>
@@ -918,6 +1087,10 @@ export default function QuetMaVach() {
                         <td className="p-5">
                           <p className="font-bold text-slate-800 text-sm">{item?.receiver_name}</p>
                           <p className="text-xs text-slate-500 mt-1 line-clamp-1 max-w-[200px]">{item?.receiver_address}</p>
+                        </td>
+                        <td className="p-5">
+                          <span className={`rounded-md px-3 py-1 font-mono text-xs font-black ${item?.cross_docked ? 'bg-amber-50 text-amber-700' : 'bg-indigo-50 text-indigo-700'}`}>{item?.cross_docked ? 'Cross-docking · khu xuất' : item?.storage_bin_code || 'Chưa gán kệ'}</span>
+                          {item?.storage_bin_name && <p className="mt-1 text-xs text-slate-500">{item.storage_bin_name}</p>}
                         </td>
                         <td className="p-5">
                           <span className="bg-slate-100 text-slate-600 px-3 py-1 rounded-md font-bold text-xs">
