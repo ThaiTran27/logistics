@@ -245,6 +245,7 @@ export default function DoiSoatCOD() {
             <div>
               <h2 className="text-xl font-black text-slate-800 tracking-tight">Kế Toán</h2>
               <p className="text-xs font-bold text-teal-500 uppercase tracking-wider mt-0.5">Kiểm soát dòng tiền</p>
+              <p className="mt-1 max-w-40 truncate text-sm font-bold text-slate-700" title={accountantName}>{accountantName}</p>
             </div>
 
             {hoaDon && (
@@ -347,14 +348,6 @@ export default function DoiSoatCOD() {
         </div>
 
         <div className="p-5 border-t border-slate-100">
-          <div className="flex items-center gap-3 px-5 py-4 mb-2 bg-slate-50 rounded-xl border border-slate-100">
-            <div className="w-10 h-10 rounded-full bg-teal-100 flex items-center justify-center font-black text-teal-600">
-              {(accountantName || 'P').charAt(0)}
-            </div>
-            <div>
-              <p className="text-sm font-bold text-slate-700">{accountantName}</p>
-            </div>
-          </div>
           <button onClick={dangXuat} className="w-full px-5 py-4 rounded-2xl font-bold text-left text-red-500 hover:bg-red-50 transition-colors flex items-center gap-3">
             <LogOut size={20}/> Đăng Xuất
           </button>

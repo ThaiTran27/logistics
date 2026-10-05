@@ -35,7 +35,7 @@ const chatAgentRoles = new Set([
 const driverRoles = new Set(['pickup_driver', 'delivery_driver']);
 const staffRoles = new Set([
   'pickup_driver', 'delivery_driver', 'warehouse_manager', 'fleet_manager',
-  'accountant', 'hr_manager', 'director', 'shop', 'content_manager', 'customer_service'
+  'linehaul_driver', 'accountant', 'hr_manager', 'director', 'shop', 'content_manager', 'customer_service'
 ]);
 const staffStatuses = new Set(['active', 'inactive']);
 const normalizeRole = (value) => {
@@ -84,12 +84,19 @@ const authenticateUser = (req, res, next) => {
   if (!token) return res.status(401).json({ success: false, message: 'Vui lòng đăng nhập lại.' });
   jwt.verify(token, JWT_SECRET, (tokenError, payload) => {
     if (tokenError || !payload?.sub) return res.status(401).json({ success: false, message: 'Phiên đăng nhập không hợp lệ hoặc đã hết hạn.' });
-    db.query('SELECT id, email, full_name, role FROM users WHERE id = ? AND status = "active" LIMIT 1', [payload.sub], (err, users) => {
+    db.query(
+      `SELECT u.id, u.email, u.full_name, u.role, u.warehouse_id, w.warehouse_type
+       FROM users u
+       LEFT JOIN warehouses w ON w.id = u.warehouse_id
+       WHERE u.id = ? AND u.status = "active" LIMIT 1`,
+      [payload.sub],
+      (err, users) => {
       if (err) return res.status(500).json({ success: false, message: 'Không thể xác thực tài khoản.' });
       if (!users.length) return res.status(401).json({ success: false, message: 'Tài khoản không còn hoạt động.' });
       req.authUser = users[0];
       next();
-    });
+      }
+    );
   });
 };
 const publicApiRequest = (req) => {
@@ -131,16 +138,26 @@ const apiRolesForRequest = (req) => {
   if (route === '/api/news/admin' || route.startsWith('/api/news/') && method !== 'GET'
     || route === '/api/news' && method !== 'GET') return new Set(['content_manager', 'director']);
   if (route === '/api/notifications' || route.startsWith('/api/notifications/')) return staffRoles;
-  if (route === '/api/warehouses' && method === 'GET') return staffRoles;
-  if (route === '/api/warehouses' || route.startsWith('/api/warehouses/')) return new Set(['warehouse_manager', 'director']);
+  if (route === '/api/warehouses' && method === 'GET') return new Set([...staffRoles, 'hr_manager']);
+  if (route === '/api/warehouses' && method === 'POST') return new Set(['director', 'warehouse_manager']);
+  if (route === '/api/warehouses' || route.startsWith('/api/warehouses/')) return new Set(['director']);
+  if (route === '/api/trucks' && method === 'GET') return new Set(['fleet_manager', 'director', 'warehouse_manager']);
+  if (route === '/api/linehaul/trips' && method === 'POST'
+    || /^\/api\/linehaul\/trips\/\d+\/bags$/.test(route) && method === 'POST') {
+    return new Set(['fleet_manager', 'director', 'warehouse_manager']);
+  }
   if (route.startsWith('/api/warehouse/') || route === '/api/warehouse') return new Set(['warehouse_manager', 'fleet_manager', 'director']);
-  if (route.startsWith('/api/linehaul/')) return new Set(['warehouse_manager', 'fleet_manager', 'director']);
+  if (route === '/api/warehouse/routes') return new Set(['warehouse_manager', 'fleet_manager', 'director']);
+  if (route === '/api/linehaul/trips' && method === 'GET') return new Set(['warehouse_manager', 'fleet_manager', 'director']);
+  if (route.startsWith('/api/linehaul/')) return new Set(['fleet_manager', 'director']);
   if (route === '/api/shippers') return new Set(['warehouse_manager', 'fleet_manager', 'director']);
   if (route === '/api/driver/live') return new Set(['warehouse_manager', 'fleet_manager', 'director']);
+  if (route === '/api/trucks' || /^\/api\/trucks\/\d+$/.test(route)) return new Set(['fleet_manager', 'director']);
+  if (route === '/api/driver/trips' || route === '/api/driver/trips/scan'
+    || /^\/api\/driver\/trips\/\d+\/(start|arrive|location)$/.test(route)) return new Set(['linehaul_driver']);
   if (route === '/api/driver/location' || route.startsWith('/api/driver/wallet/')
     || route === '/api/driver/cash-remittances' || route === '/api/driver/incidents'
-    || route === '/api/driver/expense-claims'
-    || route === '/api/driver/trips/scan') return driverRoles;
+    || route === '/api/driver/expense-claims') return driverRoles;
   if (route === '/api/orders' && method === 'GET') {
     return new Set(['shop', 'warehouse_manager', 'fleet_manager', 'accountant', 'director']);
   }
@@ -178,6 +195,15 @@ app.use((req, res, next) => {
     }
     if (req.path === '/api/reports' && req.method === 'POST') {
       req.body.created_by = req.authUser.id;
+    }
+    if (role === 'warehouse_manager') {
+      const assignedWarehouseId = Number(req.authUser.warehouse_id);
+      if (!Number.isInteger(assignedWarehouseId) || assignedWarehouseId <= 0) {
+        return res.status(403).json({ success: false, message: 'Tài khoản chưa được gán kho. Vui lòng liên hệ phòng Nhân sự.' });
+      }
+      req.warehouseScopeId = assignedWarehouseId;
+      if (req.body.warehouse_id !== undefined) req.body.warehouse_id = assignedWarehouseId;
+      if (req.body.source_warehouse_id !== undefined) req.body.source_warehouse_id = assignedWarehouseId;
     }
     next();
   });
@@ -351,6 +377,35 @@ const uploadDir = path.join(__dirname, 'public/uploads');
 if (!fs.existsSync(uploadDir)){
     fs.mkdirSync(uploadDir, { recursive: true });
 }
+
+const newsImageStorage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, uploadDir),
+  filename: (req, file, cb) => {
+    const extension = file.mimetype === 'image/jpeg' ? 'jpg' : file.mimetype === 'image/webp' ? 'webp' : 'png';
+    cb(null, `news-${Date.now()}-${crypto.randomBytes(6).toString('hex')}.${extension}`);
+  }
+});
+const newsImageUpload = multer({
+  storage: newsImageStorage,
+  limits: { fileSize: 8 * 1024 * 1024, files: 1 },
+  fileFilter: (req, file, cb) => {
+    const allowedImage = ['image/jpeg', 'image/png', 'image/webp'].includes(file.mimetype)
+      && /\.(jpe?g|png|webp)$/i.test(path.extname(file.originalname));
+    if (!allowedImage) return cb(new Error('Ảnh chỉ chấp nhận định dạng JPG, PNG hoặc WEBP.'));
+    cb(null, true);
+  }
+});
+const parseNewsImage = (req, res, next) => {
+  newsImageUpload.single('image')(req, res, (error) => {
+    if (error) {
+      const message = error.code === 'LIMIT_FILE_SIZE'
+        ? 'Ảnh không được vượt quá 8 MB.'
+        : error.message || 'Không thể tải ảnh lên.';
+      return res.status(400).json({ success: false, message });
+    }
+    next();
+  });
+};
 
 // =========================================
 // CẤU HÌNH UPLOAD ẢNH (MULTER) & EMAIL (NODEMAILER)
@@ -721,6 +776,22 @@ db.connect((err) => {
   }
   console.log('Đã kết nối Database: smart_logistics_v2 🚀');
 
+  db.query('ALTER TABLE users ADD COLUMN warehouse_id INT NULL', (alterErr) => {
+    if (alterErr && alterErr.code !== 'ER_DUP_FIELDNAME') {
+      console.error('Lỗi bổ sung kho được phân công cho tài khoản:', alterErr);
+    }
+  });
+  db.query('ALTER TABLE linehaul_trips ADD COLUMN truck_id INT NULL', (alterErr) => {
+    if (alterErr && alterErr.code !== 'ER_DUP_FIELDNAME' && alterErr.code !== 'ER_NO_SUCH_TABLE') {
+      console.error('Lỗi bổ sung xe tải cho chuyến line-haul:', alterErr);
+    }
+  });
+  db.query('ALTER TABLE linehaul_trips MODIFY status ENUM("planned","loading","in_transit","arrived","completed","cancelled") NOT NULL DEFAULT "planned"', (alterErr) => {
+    if (alterErr && alterErr.code !== 'ER_NO_SUCH_TABLE') {
+      console.error('Lỗi cập nhật trạng thái chuyến line-haul:', alterErr);
+    }
+  });
+
   const setupTables = [
     `
       CREATE TABLE IF NOT EXISTS chat_sessions (
@@ -736,6 +807,16 @@ db.connect((err) => {
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         KEY idx_chat_sessions_queue (mode, status, updated_at),
         KEY idx_chat_sessions_agent (assigned_agent_id, status)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `,
+    `
+      CREATE TABLE IF NOT EXISTS linehaul_trip_positions (
+        trip_id BIGINT PRIMARY KEY,
+        driver_id INT NOT NULL,
+        lat DOUBLE NOT NULL,
+        lng DOUBLE NOT NULL,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        KEY idx_linehaul_position_driver (driver_id)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `,
     `
@@ -947,14 +1028,26 @@ db.connect((err) => {
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `,
     `
+      CREATE TABLE IF NOT EXISTS trucks (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        vehicle_plate VARCHAR(30) NOT NULL UNIQUE,
+        max_payload_kg DECIMAL(10,2) NOT NULL DEFAULT 0,
+        status ENUM('ready','in_transit','maintenance') NOT NULL DEFAULT 'ready',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        KEY idx_trucks_status (status)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `,
+    `
       CREATE TABLE IF NOT EXISTS linehaul_trips (
         id BIGINT AUTO_INCREMENT PRIMARY KEY,
         trip_code VARCHAR(40) NOT NULL UNIQUE,
         vehicle_plate VARCHAR(30) NOT NULL,
+        truck_id INT DEFAULT NULL,
         driver_id INT DEFAULT NULL,
         source_warehouse_id INT NOT NULL,
         destination_warehouse_id INT NOT NULL,
-        status ENUM('planned','loading','in_transit','completed','cancelled') NOT NULL DEFAULT 'planned',
+        status ENUM('planned','loading','in_transit','arrived','completed','cancelled') NOT NULL DEFAULT 'planned',
         departed_at DATETIME DEFAULT NULL,
         arrived_at DATETIME DEFAULT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -1156,6 +1249,19 @@ db.connect((err) => {
            ON DUPLICATE KEY UPDATE warehouse_type = VALUES(warehouse_type)`,
           (warehouseErr) => {
             if (warehouseErr) console.error('Lỗi tạo kho tổng:', warehouseErr);
+            if (!warehouseErr) {
+              db.query(
+                `UPDATE users u
+                 JOIN warehouses w ON w.warehouse_type = 'central' AND w.ward_name = '__CENTRAL__'
+                 SET u.warehouse_id = w.id
+                 WHERE u.email = 'kho@smartlogistics.vn'
+                   AND u.role = 'warehouse_manager'
+                   AND u.warehouse_id IS NULL`,
+                (assignErr) => {
+                  if (assignErr) console.error('Lỗi gán tài khoản thủ kho mẫu vào Kho Tổng:', assignErr);
+                }
+              );
+            }
           }
         );
       }
@@ -1452,7 +1558,9 @@ app.post('/api/login', (req, res) => {
   if (!email || email.length > 255 || !password || password.length > 1024) {
     return res.status(400).json({ success: false, message: 'Email hoặc mật khẩu không hợp lệ.' });
   }
-  const sql = 'SELECT id, email, full_name, role, password FROM users WHERE email = ? AND status = "active" LIMIT 1';
+  const sql = `SELECT u.id, u.email, u.full_name, u.role, u.password, u.warehouse_id, w.warehouse_type
+    FROM users u LEFT JOIN warehouses w ON w.id = u.warehouse_id
+    WHERE u.email = ? AND u.status = "active" LIMIT 1`;
 
   db.query(sql, [email], async (err, results) => {
     if (err) return res.status(500).json({ success: false, message: 'Lỗi server: ' + err.sqlMessage });
@@ -1485,7 +1593,14 @@ app.post('/api/login', (req, res) => {
       }
     }
 
-    const user = { id: record.id, email: record.email, full_name: record.full_name, role: record.role };
+    const user = {
+      id: record.id,
+      email: record.email,
+      full_name: record.full_name,
+      role: record.role,
+      warehouse_id: record.warehouse_id,
+      warehouse_type: record.warehouse_type
+    };
     const token = jwt.sign({ sub: user.id }, JWT_SECRET, { expiresIn: '12h' });
     res.json({ success: true, user, token });
   });
@@ -2347,10 +2462,44 @@ app.put('/api/notifications/:id/read', (req, res) => {
 });
 
 app.get('/api/warehouses', (req, res) => {
-  db.query('SELECT * FROM warehouses ORDER BY warehouse_type, ward_name', (err, warehouses) => {
+  const sql = req.warehouseScopeId
+    ? 'SELECT * FROM warehouses WHERE id = ? ORDER BY warehouse_type, ward_name'
+    : 'SELECT * FROM warehouses ORDER BY warehouse_type, ward_name';
+  db.query(sql, req.warehouseScopeId ? [req.warehouseScopeId] : [], (err, warehouses) => {
     if (err) return res.status(500).json({ success: false, message: err.sqlMessage });
     res.json({ success: true, data: warehouses });
   });
+});
+
+app.get('/api/warehouse/routes', (req, res) => {
+  const warehouseId = req.warehouseScopeId || Number(req.query.warehouse_id);
+  if (req.authRole === 'warehouse_manager') {
+    db.query(
+      `SELECT destination.id, destination.name, destination.warehouse_type, destination.ward_name,
+         destination.address, destination.lat, destination.lng, destination.is_configured, destination.is_active
+       FROM warehouses source
+       JOIN warehouses destination ON destination.warehouse_type <> source.warehouse_type
+       WHERE source.id = ? AND source.is_active = 1 AND destination.is_active = 1
+       ORDER BY destination.warehouse_type, destination.ward_name`,
+      [req.warehouseScopeId],
+      (err, destinations) => {
+        if (err) return res.status(500).json({ success: false, message: 'Không tải được tuyến kho: ' + err.sqlMessage });
+        res.json({ success: true, data: destinations });
+      }
+    );
+    return;
+  }
+  if (!Number.isInteger(warehouseId) || warehouseId <= 0) {
+    return res.status(400).json({ success: false, message: 'Chọn kho nguồn hợp lệ để tải các tuyến kho.' });
+  }
+  db.query(
+    `SELECT id, name, warehouse_type, ward_name FROM warehouses
+     WHERE is_active = 1 ORDER BY warehouse_type, ward_name`,
+    (err, warehouses) => {
+      if (err) return res.status(500).json({ success: false, message: 'Không tải được tuyến kho: ' + err.sqlMessage });
+      res.json({ success: true, data: warehouses });
+    }
+  );
 });
 
 app.post('/api/warehouses', (req, res) => {
@@ -2358,13 +2507,48 @@ app.post('/api/warehouses', (req, res) => {
   if (!wardName || wardName === '__CENTRAL__') {
     return res.status(400).json({ success: false, message: 'Nhập tên phường hợp lệ cho kho con.' });
   }
+  const hasLocationDetails = req.body.address !== undefined || req.body.lat !== undefined || req.body.lng !== undefined;
+  const address = String(req.body.address || '').trim();
+  const lat = Number(req.body.lat);
+  const lng = Number(req.body.lng);
+  if (hasLocationDetails && (!address || address.length > 1000
+    || !Number.isFinite(lat) || Math.abs(lat) > 90
+    || !Number.isFinite(lng) || Math.abs(lng) > 180)) {
+    return res.status(400).json({ success: false, message: 'Cần nhập địa chỉ và tọa độ hợp lệ để kích hoạt kho con.' });
+  }
+  const isConfigured = hasLocationDetails ? 1 : 0;
+  const createWarehouse = () => db.query(
+      `INSERT INTO warehouses (warehouse_type, ward_name, name, address, lat, lng, is_configured, is_active)
+       VALUES ('ward', ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        wardName,
+        `Kho con ${wardName}`,
+        hasLocationDetails ? address : null,
+        hasLocationDetails ? lat : null,
+        hasLocationDetails ? lng : null,
+        isConfigured,
+        isConfigured
+      ],
+      (err, result) => {
+        if (err?.code === 'ER_DUP_ENTRY') return res.status(409).json({ success: false, message: 'Phường này đã có một kho con.' });
+        if (err) return res.status(500).json({ success: false, message: err.sqlMessage });
+        res.status(201).json({
+          success: true,
+          warehouseId: result.insertId,
+          message: isConfigured ? 'Đã tạo và kích hoạt kho con.' : 'Đã tạo kho chờ cấu hình vị trí.'
+        });
+      }
+    );
+  if (req.authRole !== 'warehouse_manager') return createWarehouse();
   db.query(
-    "INSERT INTO warehouses (warehouse_type, ward_name, name) VALUES ('ward', ?, ?)",
-    [wardName, `Kho phường ${wardName}`],
-    (err, result) => {
-      if (err?.code === 'ER_DUP_ENTRY') return res.status(409).json({ success: false, message: 'Phường này đã có một kho con.' });
-      if (err) return res.status(500).json({ success: false, message: err.sqlMessage });
-      res.status(201).json({ success: true, warehouseId: result.insertId, message: 'Đã tạo kho chờ cấu hình vị trí.' });
+    "SELECT warehouse_type FROM warehouses WHERE id = ? AND is_active = 1 LIMIT 1",
+    [req.warehouseScopeId],
+    (warehouseErr, rows) => {
+      if (warehouseErr) return res.status(500).json({ success: false, message: 'Không thể xác minh quyền Kho Tổng: ' + warehouseErr.sqlMessage });
+      if (!rows.length || rows[0].warehouse_type !== 'central') {
+        return res.status(403).json({ success: false, message: 'Chỉ tài khoản Kho Tổng mới được tạo kho con.' });
+      }
+      createWarehouse();
     }
   );
 });
@@ -2391,9 +2575,13 @@ app.put('/api/warehouses/:id', (req, res) => {
 });
 
 app.get('/api/orders', (req, res) => {
-  const sql = 'SELECT * FROM orders WHERE (? IS NULL OR shop_id = ?) ORDER BY created_at DESC';
+  const sql = `SELECT * FROM orders
+    WHERE (? IS NULL OR shop_id = ?)
+      AND (? IS NULL OR current_warehouse_id = ?)
+    ORDER BY created_at DESC`;
   const shopId = req.shopScopeId || null;
-  db.query(sql, [shopId, shopId], (err, results) => {
+  const warehouseId = req.warehouseScopeId || null;
+  db.query(sql, [shopId, shopId, warehouseId, warehouseId], (err, results) => {
     if (err) return res.status(500).json({ success: false, message: 'Lỗi tải dữ liệu: ' + err.sqlMessage });
     res.json({ success: true, data: redactDeliveryOtp(results) });
   });
@@ -2494,10 +2682,26 @@ app.get('/api/news/:id', (req, res) => {
   });
 });
 
-app.post('/api/news', (req, res) => {
+function removeNewsUpload(file) {
+  if (!file) return;
+  fs.unlink(file.path, (err) => {
+    if (err && err.code !== 'ENOENT') console.error('Không thể xóa ảnh tin tức không được lưu:', err);
+  });
+}
+
+function removeNewsImage(imageUrl) {
+  const value = String(imageUrl || '');
+  if (!/^\/uploads\/news-[\w-]+\.(?:jpg|png|webp)$/i.test(value)) return;
+  fs.unlink(path.join(uploadDir, path.basename(value)), (err) => {
+    if (err && err.code !== 'ENOENT') console.error('Không thể xóa ảnh tin tức:', err);
+  });
+}
+
+app.post('/api/news', parseNewsImage, (req, res) => {
   const { title, summary, content, image_url, category, created_by, status } = req.body;
 
   if (!title || !summary || !content) {
+    removeNewsUpload(req.file);
     return res.status(400).json({ success: false, message: 'Thiếu tiêu đề, mô tả hoặc nội dung.' });
   }
 
@@ -2515,16 +2719,21 @@ app.post('/api/news', (req, res) => {
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `;
 
-  db.query(sql, [title, slug, summary, content, image_url || null, category || 'Tin tức', created_by || 'content_team', status || 'published'], (err, result) => {
-    if (err) return res.status(500).json({ success: false, message: 'Lỗi lưu tin tức: ' + err.sqlMessage });
+  const savedImageUrl = req.file ? `/uploads/${req.file.filename}` : image_url || null;
+  db.query(sql, [title, slug, summary, content, savedImageUrl, category || 'Tin tức', created_by || 'content_team', status || 'published'], (err, result) => {
+    if (err) {
+      removeNewsUpload(req.file);
+      return res.status(500).json({ success: false, message: 'Lỗi lưu tin tức: ' + err.sqlMessage });
+    }
     res.json({ success: true, message: 'Đã lưu tin tức thành công.', articleId: result.insertId });
   });
 });
 
-app.put('/api/news/:id', (req, res) => {
+app.put('/api/news/:id', parseNewsImage, (req, res) => {
   const { title, summary, content, image_url, category, status } = req.body;
 
   if (!title || !summary || !content) {
+    removeNewsUpload(req.file);
     return res.status(400).json({ success: false, message: 'Thiếu tiêu đề, mô tả hoặc nội dung.' });
   }
 
@@ -2537,22 +2746,45 @@ app.put('/api/news/:id', (req, res) => {
     .replace(/\s+/g, '-')
     .replace(/-+/g, '-');
 
-  const sql = `
-    UPDATE news_articles
-    SET title = ?, slug = ?, summary = ?, content = ?, image_url = ?, category = ?, status = ?
-    WHERE id = ?
-  `;
+  db.query('SELECT image_url FROM news_articles WHERE id = ? LIMIT 1', [req.params.id], (selectErr, articles) => {
+    if (selectErr) {
+      removeNewsUpload(req.file);
+      return res.status(500).json({ success: false, message: 'Lỗi tải tin tức cần cập nhật: ' + selectErr.sqlMessage });
+    }
+    if (!articles.length) {
+      removeNewsUpload(req.file);
+      return res.status(404).json({ success: false, message: 'Không tìm thấy bài tin tức.' });
+    }
 
-  db.query(sql, [title, slug, summary, content, image_url || null, category || 'Tin tức', status || 'published', req.params.id], (err) => {
-    if (err) return res.status(500).json({ success: false, message: 'Lỗi cập nhật tin tức: ' + err.sqlMessage });
-    res.json({ success: true, message: 'Đã cập nhật bài tin tức thành công.' });
+    const previousImageUrl = articles[0].image_url;
+    const savedImageUrl = req.file ? `/uploads/${req.file.filename}` : image_url || null;
+    const sql = `
+      UPDATE news_articles
+      SET title = ?, slug = ?, summary = ?, content = ?, image_url = ?, category = ?, status = ?
+      WHERE id = ?
+    `;
+
+    db.query(sql, [title, slug, summary, content, savedImageUrl, category || 'Tin tức', status || 'published', req.params.id], (err) => {
+      if (err) {
+        removeNewsUpload(req.file);
+        return res.status(500).json({ success: false, message: 'Lỗi cập nhật tin tức: ' + err.sqlMessage });
+      }
+      if (req.file && previousImageUrl !== savedImageUrl) removeNewsImage(previousImageUrl);
+      res.json({ success: true, message: 'Đã cập nhật bài tin tức thành công.' });
+    });
   });
 });
 
 app.delete('/api/news/:id', (req, res) => {
-  db.query('DELETE FROM news_articles WHERE id = ?', [req.params.id], (err) => {
-    if (err) return res.status(500).json({ success: false, message: 'Lỗi xóa tin tức: ' + err.sqlMessage });
-    res.json({ success: true, message: 'Đã xóa bài tin tức thành công.' });
+  db.query('SELECT image_url FROM news_articles WHERE id = ? LIMIT 1', [req.params.id], (selectErr, articles) => {
+    if (selectErr) return res.status(500).json({ success: false, message: 'Lỗi tải tin tức cần xóa: ' + selectErr.sqlMessage });
+    if (!articles.length) return res.status(404).json({ success: false, message: 'Không tìm thấy bài tin tức.' });
+
+    db.query('DELETE FROM news_articles WHERE id = ?', [req.params.id], (err) => {
+      if (err) return res.status(500).json({ success: false, message: 'Lỗi xóa tin tức: ' + err.sqlMessage });
+      removeNewsImage(articles[0].image_url);
+      res.json({ success: true, message: 'Đã xóa bài tin tức thành công.' });
+    });
   });
 });
 
@@ -2817,10 +3049,10 @@ app.put('/api/dispatcher/driver-profiles/:driverId', (req, res) => {
 
 app.get('/api/shippers', (req, res) => {
   const taskType = req.query.type;
-  if (!['pickup', 'central_transfer', 'destination_transfer', 'delivery'].includes(taskType)) {
+  if (!['pickup', 'central_transfer', 'destination_transfer', 'delivery', 'linehaul'].includes(taskType)) {
     return res.status(400).json({ success: false, message: 'Loại nhiệm vụ điều phối không hợp lệ.' });
   }
-  const role = taskType === 'delivery' ? 'delivery_driver' : 'pickup_driver';
+  const role = taskType === 'linehaul' ? 'linehaul_driver' : taskType === 'delivery' ? 'delivery_driver' : 'pickup_driver';
   const sql = 'SELECT id, full_name, email, role FROM users WHERE role = ? AND status = "active"';
   db.query(sql, [role], (err, results) => {
     if (err) return res.status(500).json({ success: false, message: err.sqlMessage });
@@ -3369,7 +3601,7 @@ app.put('/api/orders/:id/status', podUpload.fields([
 // 4. API KHO BÃI
 // =========================================
 app.get('/api/warehouse/bin-locations', (req, res) => {
-  const warehouseId = Number(req.query.warehouse_id);
+  const warehouseId = Number(req.warehouseScopeId || req.query.warehouse_id);
   if (!Number.isInteger(warehouseId) || warehouseId <= 0) {
     return res.status(400).json({ success: false, message: 'Mã kho không hợp lệ.' });
   }
@@ -3384,7 +3616,7 @@ app.get('/api/warehouse/bin-locations', (req, res) => {
 });
 
 app.get('/api/warehouse/bin-locations/lookup', (req, res) => {
-  const warehouseId = Number(req.query.warehouse_id);
+  const warehouseId = Number(req.warehouseScopeId || req.query.warehouse_id);
   const binCode = String(req.query.bin_code || '').trim().toUpperCase();
   if (!Number.isInteger(warehouseId) || warehouseId <= 0 || !/^[A-Z0-9][A-Z0-9._-]{0,79}$/.test(binCode)) {
     return res.status(400).json({ success: false, message: 'Mã kho hoặc mã vị trí kệ không hợp lệ.' });
@@ -3652,13 +3884,14 @@ app.post('/api/warehouse/scan', (req, res) => {
 });
 
 app.get('/api/warehouse/bags', (req, res) => {
-  const warehouseId = req.query.warehouse_id ? Number(req.query.warehouse_id) : null;
+  const warehouseId = req.warehouseScopeId || (req.query.warehouse_id ? Number(req.query.warehouse_id) : null);
   if (req.query.warehouse_id && (!Number.isInteger(warehouseId) || warehouseId <= 0)) {
     return res.status(400).json({ success: false, message: 'Mã kho không hợp lệ.' });
   }
   const sql = `
     SELECT b.*, source.name AS source_warehouse_name, destination.name AS destination_warehouse_name,
-      COUNT(bo.order_id) AS order_count
+      COUNT(bo.order_id) AS order_count,
+      EXISTS (SELECT 1 FROM linehaul_trip_bags assigned WHERE assigned.bag_id = b.id) AS is_assigned_to_trip
     FROM shipment_bags b
     JOIN warehouses source ON source.id = b.source_warehouse_id
     JOIN warehouses destination ON destination.id = b.destination_warehouse_id
@@ -3708,7 +3941,9 @@ app.post('/api/warehouse/bags/:id/scan', (req, res) => {
   if (!Number.isSafeInteger(bagId) || bagId <= 0 || !trackingCode) {
     return res.status(400).json({ success: false, message: 'Mã bao hoặc mã vận đơn không hợp lệ.' });
   }
-  db.query('SELECT * FROM shipment_bags WHERE id = ? AND status = "open"', [bagId], (bagErr, bags) => {
+  const bagSql = `SELECT * FROM shipment_bags
+    WHERE id = ? AND status = "open" AND (? IS NULL OR source_warehouse_id = ?)`;
+  db.query(bagSql, [bagId, req.warehouseScopeId || null, req.warehouseScopeId || null], (bagErr, bags) => {
     if (bagErr) return res.status(500).json({ success: false, message: bagErr.sqlMessage });
     if (!bags.length) return res.status(409).json({ success: false, message: 'Bao không tồn tại hoặc đã niêm phong.' });
     const bag = bags[0];
@@ -3755,14 +3990,25 @@ app.post('/api/warehouse/bags/:id/scan', (req, res) => {
 
 app.put('/api/warehouse/bags/:id/seal', (req, res) => {
   const bagId = Number(req.params.id);
-  db.query('SELECT COUNT(*) AS order_count FROM shipment_bag_orders WHERE bag_id = ?', [bagId], (countErr, rows) => {
+  db.query(
+    `SELECT COUNT(bo.order_id) AS order_count
+     FROM shipment_bag_orders bo
+     JOIN shipment_bags b ON b.id = bo.bag_id
+     WHERE b.id = ? AND (? IS NULL OR b.source_warehouse_id = ?)`,
+    [bagId, req.warehouseScopeId || null, req.warehouseScopeId || null],
+    (countErr, rows) => {
     if (countErr) return res.status(500).json({ success: false, message: countErr.sqlMessage });
     if (!rows[0]?.order_count) return res.status(409).json({ success: false, message: 'Không thể niêm phong bao rỗng.' });
-    db.query('UPDATE shipment_bags SET status = "sealed", sealed_at = CURRENT_TIMESTAMP WHERE id = ? AND status = "open"', [bagId], (err, result) => {
+    db.query(
+      `UPDATE shipment_bags SET status = "sealed", sealed_at = CURRENT_TIMESTAMP
+       WHERE id = ? AND status = "open" AND (? IS NULL OR source_warehouse_id = ?)`,
+      [bagId, req.warehouseScopeId || null, req.warehouseScopeId || null],
+      (err, result) => {
       if (err) return res.status(500).json({ success: false, message: err.sqlMessage });
       if (!result.affectedRows) return res.status(409).json({ success: false, message: 'Bao đã được niêm phong hoặc không tồn tại.' });
       res.json({ success: true, order_count: rows[0].order_count, message: 'Đã niêm phong bao hàng.' });
-    });
+      }
+    );
   });
 });
 
@@ -3776,10 +4022,11 @@ app.get('/api/linehaul/trips', (req, res) => {
     JOIN warehouses destination ON destination.id = t.destination_warehouse_id
     LEFT JOIN users driver ON driver.id = t.driver_id
     LEFT JOIN linehaul_trip_bags tb ON tb.trip_id = t.id
+    WHERE (? IS NULL OR t.source_warehouse_id = ? OR t.destination_warehouse_id = ?)
     GROUP BY t.id
     ORDER BY t.created_at DESC
   `;
-  db.query(sql, (err, rows) => {
+  db.query(sql, [req.warehouseScopeId || null, req.warehouseScopeId || null, req.warehouseScopeId || null], (err, rows) => {
     if (err) return res.status(500).json({ success: false, message: err.sqlMessage });
     const data = rows.map((trip) => ({
       ...trip,
@@ -3791,6 +4038,61 @@ app.get('/api/linehaul/trips', (req, res) => {
     }));
     res.json({ success: true, data });
   });
+});
+
+app.get('/api/linehaul/positions', (req, res) => {
+  const sql = `
+    SELECT t.id AS trip_id, t.trip_code, t.vehicle_plate, t.status, t.driver_id,
+      u.full_name AS driver_name, source.name AS source_warehouse_name,
+      destination.name AS destination_warehouse_name, p.lat, p.lng, p.updated_at
+    FROM linehaul_trips t
+    JOIN users u ON u.id = t.driver_id
+    JOIN warehouses source ON source.id = t.source_warehouse_id
+    JOIN warehouses destination ON destination.id = t.destination_warehouse_id
+    JOIN linehaul_trip_positions p ON p.trip_id = t.id
+    WHERE t.status IN ("in_transit","arrived")
+    ORDER BY p.updated_at DESC
+  `;
+  db.query(sql, (err, positions) => {
+    if (err) return res.status(500).json({ success: false, message: 'Không tải được vị trí xe tải: ' + err.sqlMessage });
+    res.json({ success: true, data: positions });
+  });
+});
+
+app.get('/api/driver/trips', (req, res) => {
+  db.query(
+    `SELECT t.*, source.name AS source_warehouse_name, destination.name AS destination_warehouse_name,
+      COUNT(tb.bag_id) AS bag_count,
+      SUM(CASE WHEN tb.driver_scanned_at IS NOT NULL THEN 1 ELSE 0 END) AS scanned_bag_count
+     FROM linehaul_trips t
+     JOIN warehouses source ON source.id = t.source_warehouse_id
+     JOIN warehouses destination ON destination.id = t.destination_warehouse_id
+     LEFT JOIN linehaul_trip_bags tb ON tb.trip_id = t.id
+     WHERE t.driver_id = ? AND t.status NOT IN ("completed","cancelled")
+     GROUP BY t.id ORDER BY t.created_at DESC`,
+    [req.authUser.id],
+    (err, trips) => {
+      if (err) return res.status(500).json({ success: false, message: 'Không tải được chuyến được giao: ' + err.sqlMessage });
+      if (!trips.length) return res.json({ success: true, data: [] });
+      const tripIds = trips.map((trip) => Number(trip.id));
+      db.query(
+        `SELECT tb.trip_id, b.id AS bag_id, b.bag_code, b.status, tb.driver_scanned_at
+         FROM linehaul_trip_bags tb JOIN shipment_bags b ON b.id = tb.bag_id
+         WHERE tb.trip_id IN (?) ORDER BY b.bag_code`,
+        [tripIds],
+        (bagsErr, bags) => {
+          if (bagsErr) return res.status(500).json({ success: false, message: 'Không tải được bao của chuyến: ' + bagsErr.sqlMessage });
+          const bagsByTrip = new Map();
+          for (const bag of bags) {
+            const list = bagsByTrip.get(Number(bag.trip_id)) || [];
+            list.push(bag);
+            bagsByTrip.set(Number(bag.trip_id), list);
+          }
+          res.json({ success: true, data: trips.map((trip) => ({ ...trip, bags: bagsByTrip.get(Number(trip.id)) || [] })) });
+        }
+      );
+    }
+  );
 });
 
 app.get('/api/public/linehaul-manifests/:token', (req, res) => {
@@ -3870,20 +4172,104 @@ app.get('/api/public/linehaul-manifests/:token', (req, res) => {
   });
 });
 
-app.post('/api/linehaul/trips', (req, res) => {
+app.get('/api/trucks', (req, res) => {
+  const sql = req.authRole === 'warehouse_manager'
+    ? `SELECT * FROM trucks truck WHERE truck.status = "ready"
+       AND NOT EXISTS (
+         SELECT 1 FROM linehaul_trips active_trip
+         WHERE active_trip.truck_id = truck.id AND active_trip.status NOT IN ("completed","cancelled")
+       )
+       ORDER BY vehicle_plate`
+    : 'SELECT * FROM trucks ORDER BY vehicle_plate';
+  if (req.authRole !== 'warehouse_manager') {
+    return db.query(sql, (err, trucks) => {
+      if (err) return res.status(500).json({ success: false, message: 'Không tải được danh sách xe tải: ' + err.sqlMessage });
+      res.json({ success: true, data: trucks });
+    });
+  }
+  db.query(
+    'SELECT warehouse_type FROM warehouses WHERE id = ? AND is_active = 1 LIMIT 1',
+    [req.warehouseScopeId],
+    (warehouseErr, warehouses) => {
+      if (warehouseErr) return res.status(500).json({ success: false, message: 'Không thể xác minh quyền xem xe tải: ' + warehouseErr.sqlMessage });
+      if (!warehouses.length || warehouses[0].warehouse_type !== 'central') {
+        return res.status(403).json({ success: false, message: 'Chỉ Kho Tổng được xem xe sẵn sàng điều phối.' });
+      }
+      db.query(sql, (err, trucks) => {
+    if (err) return res.status(500).json({ success: false, message: 'Không tải được danh sách xe tải: ' + err.sqlMessage });
+    res.json({ success: true, data: trucks });
+      });
+    }
+  );
+});
+
+app.post('/api/trucks', (req, res) => {
   const vehiclePlate = String(req.body.vehicle_plate || '').trim().toUpperCase();
+  const maxPayloadKg = Number(req.body.max_payload_kg);
+  if (!vehiclePlate || vehiclePlate.length > 30 || !Number.isFinite(maxPayloadKg) || maxPayloadKg <= 0) {
+    return res.status(400).json({ success: false, message: 'Biển số xe và trọng tải tối đa phải hợp lệ.' });
+  }
+  db.query('INSERT INTO trucks (vehicle_plate, max_payload_kg) VALUES (?, ?)', [vehiclePlate, maxPayloadKg], (err, result) => {
+    if (err?.code === 'ER_DUP_ENTRY') return res.status(409).json({ success: false, message: 'Biển số xe đã tồn tại.' });
+    if (err) return res.status(500).json({ success: false, message: 'Không thể thêm xe tải: ' + err.sqlMessage });
+    res.status(201).json({ success: true, data: { id: result.insertId, vehicle_plate: vehiclePlate, max_payload_kg: maxPayloadKg, status: 'ready' } });
+  });
+});
+
+app.put('/api/trucks/:id', (req, res) => {
+  const truckId = Number(req.params.id);
+  const vehiclePlate = String(req.body.vehicle_plate || '').trim().toUpperCase();
+  const maxPayloadKg = Number(req.body.max_payload_kg);
+  const status = String(req.body.status || '');
+  if (!Number.isInteger(truckId) || truckId <= 0 || !vehiclePlate || vehiclePlate.length > 30
+    || !Number.isFinite(maxPayloadKg) || maxPayloadKg <= 0
+    || !['ready', 'in_transit', 'maintenance'].includes(status)) {
+    return res.status(400).json({ success: false, message: 'Thông tin xe tải không hợp lệ.' });
+  }
+  db.query('SELECT id FROM linehaul_trips WHERE truck_id = ? AND status NOT IN ("completed","cancelled") LIMIT 1', [truckId], (activeTripErr, activeTrips) => {
+    if (activeTripErr) return res.status(500).json({ success: false, message: 'Không thể kiểm tra chuyến xe: ' + activeTripErr.sqlMessage });
+    if (activeTrips.length) return res.status(409).json({ success: false, message: 'Không thể sửa xe đang được gán vào chuyến chưa hoàn tất.' });
+    db.query(
+    'UPDATE trucks SET vehicle_plate = ?, max_payload_kg = ?, status = ? WHERE id = ?',
+    [vehiclePlate, maxPayloadKg, status, truckId],
+    (err, result) => {
+      if (err?.code === 'ER_DUP_ENTRY') return res.status(409).json({ success: false, message: 'Biển số xe đã tồn tại.' });
+      if (err) return res.status(500).json({ success: false, message: 'Không thể cập nhật xe tải: ' + err.sqlMessage });
+      if (!result.affectedRows) return res.status(404).json({ success: false, message: 'Không tìm thấy xe tải.' });
+      res.json({ success: true, message: 'Đã cập nhật xe tải.' });
+    }
+    );
+  });
+});
+
+app.delete('/api/trucks/:id', (req, res) => {
+  const truckId = Number(req.params.id);
+  if (!Number.isInteger(truckId) || truckId <= 0) return res.status(400).json({ success: false, message: 'Mã xe tải không hợp lệ.' });
+  db.query('SELECT id FROM linehaul_trips WHERE truck_id = ? AND status NOT IN ("completed","cancelled") LIMIT 1', [truckId], (tripErr, trips) => {
+    if (tripErr) return res.status(500).json({ success: false, message: 'Không thể kiểm tra chuyến xe: ' + tripErr.sqlMessage });
+    if (trips.length) return res.status(409).json({ success: false, message: 'Không thể xóa xe đang được gán vào chuyến chưa hoàn tất.' });
+    db.query('DELETE FROM trucks WHERE id = ?', [truckId], (err, result) => {
+      if (err) return res.status(500).json({ success: false, message: 'Không thể xóa xe tải: ' + err.sqlMessage });
+      if (!result.affectedRows) return res.status(404).json({ success: false, message: 'Không tìm thấy xe tải.' });
+      res.json({ success: true, message: 'Đã xóa xe tải.' });
+    });
+  });
+});
+
+app.post('/api/linehaul/trips', (req, res) => {
+  const truckId = Number(req.body.truck_id);
   const sourceId = Number(req.body.source_warehouse_id);
   const destinationId = Number(req.body.destination_warehouse_id);
   const driverId = req.body.driver_id ? Number(req.body.driver_id) : null;
-  if (!vehiclePlate || vehiclePlate.length > 30 || !Number.isInteger(sourceId) || !Number.isInteger(destinationId)
+  if (!Number.isInteger(truckId) || truckId <= 0 || !Number.isInteger(sourceId) || !Number.isInteger(destinationId)
     || sourceId <= 0 || destinationId <= 0 || sourceId === destinationId
     || (driverId !== null && (!Number.isInteger(driverId) || driverId <= 0))) {
     return res.status(400).json({ success: false, message: 'Thông tin chuyến xe không hợp lệ.' });
   }
   const tripCode = `TRIP-${Date.now().toString(36).toUpperCase()}-${crypto.randomBytes(2).toString('hex').toUpperCase()}`;
-  const insertTrip = () => db.query(
-    'INSERT INTO linehaul_trips (trip_code, vehicle_plate, driver_id, source_warehouse_id, destination_warehouse_id) VALUES (?, ?, ?, ?, ?)',
-    [tripCode, vehiclePlate, driverId, sourceId, destinationId],
+  const insertTrip = (truck) => db.query(
+    'INSERT INTO linehaul_trips (trip_code, vehicle_plate, truck_id, driver_id, source_warehouse_id, destination_warehouse_id) VALUES (?, ?, ?, ?, ?, ?)',
+    [tripCode, truck.vehicle_plate, truck.id, driverId, sourceId, destinationId],
     (err, result) => {
       if (err) return res.status(500).json({ success: false, message: err.sqlMessage });
       res.status(201).json({ success: true, data: { id: result.insertId, trip_code: tripCode }, message: 'Đã tạo chuyến xe.' });
@@ -3899,11 +4285,37 @@ app.post('/api/linehaul/trips', (req, res) => {
         || (sourceWarehouse.warehouse_type === 'central' && destinationWarehouse.warehouse_type === 'ward'))) {
       return res.status(400).json({ success: false, message: 'Chuyến trung chuyển phải đi giữa kho phường và kho tổng.' });
     }
-    if (!driverId) return insertTrip();
-    db.query('SELECT id FROM users WHERE id = ? AND status = "active" AND role IN ("pickup_driver","linehaul_driver")', [driverId], (driverErr, drivers) => {
+    if (req.authRole === 'warehouse_manager'
+      && (sourceId !== Number(req.warehouseScopeId) || sourceWarehouse.warehouse_type !== 'central'
+        || destinationWarehouse.warehouse_type !== 'ward')) {
+      return res.status(403).json({ success: false, message: 'Kho Tổng chỉ được tạo chuyến từ kho được phân công đến một kho con.' });
+    }
+    db.query(
+      `SELECT truck.id, truck.vehicle_plate FROM trucks truck
+       WHERE truck.id = ? AND truck.status = "ready"
+         AND NOT EXISTS (
+           SELECT 1 FROM linehaul_trips active_trip
+           WHERE active_trip.truck_id = truck.id AND active_trip.status NOT IN ("completed","cancelled")
+         )
+       LIMIT 1`,
+      [truckId],
+      (truckErr, trucks) => {
+      if (truckErr) return res.status(500).json({ success: false, message: truckErr.sqlMessage });
+      if (!trucks.length) return res.status(409).json({ success: false, message: 'Xe tải không tồn tại hoặc hiện không sẵn sàng.' });
+      if (!driverId) return insertTrip(trucks[0]);
+      db.query(
+        `SELECT driver.id FROM users driver
+         WHERE driver.id = ? AND driver.status = "active" AND driver.role = "linehaul_driver"
+           AND NOT EXISTS (
+             SELECT 1 FROM linehaul_trips active_trip
+             WHERE active_trip.driver_id = driver.id AND active_trip.status NOT IN ("completed","cancelled")
+           )`,
+        [driverId],
+        (driverErr, drivers) => {
       if (driverErr) return res.status(500).json({ success: false, message: driverErr.sqlMessage });
-      if (!drivers.length) return res.status(400).json({ success: false, message: 'Tài xế trung chuyển không hợp lệ.' });
-      insertTrip();
+      if (!drivers.length) return res.status(400).json({ success: false, message: 'Tài xế không hợp lệ hoặc đang được giao một chuyến chưa hoàn tất.' });
+      insertTrip(trucks[0]);
+      });
     });
   });
 });
@@ -3914,10 +4326,22 @@ app.post('/api/linehaul/trips/:id/bags', (req, res) => {
   if (!Number.isSafeInteger(tripId) || tripId <= 0 || !bagCode) {
     return res.status(400).json({ success: false, message: 'Mã chuyến hoặc mã bao không hợp lệ.' });
   }
-  db.query('SELECT * FROM linehaul_trips WHERE id = ? AND status IN ("planned","loading")', [tripId], (tripErr, trips) => {
+  db.query(
+    `SELECT t.*, truck.max_payload_kg, source.warehouse_type AS source_warehouse_type
+     FROM linehaul_trips t
+     JOIN trucks truck ON truck.id = t.truck_id
+     JOIN warehouses source ON source.id = t.source_warehouse_id
+     WHERE t.id = ? AND t.status IN ("planned","loading")`,
+    [tripId],
+    (tripErr, trips) => {
     if (tripErr) return res.status(500).json({ success: false, message: tripErr.sqlMessage });
     if (!trips.length) return res.status(409).json({ success: false, message: 'Chuyến xe không còn nhận bao.' });
     const trip = trips[0];
+    if (req.authRole === 'warehouse_manager'
+      && (Number(trip.source_warehouse_id) !== Number(req.warehouseScopeId)
+        || trip.source_warehouse_type !== 'central')) {
+      return res.status(403).json({ success: false, message: 'Chỉ Kho Tổng được gán bao lên chuyến xuất đi kho con.' });
+    }
     db.query('SELECT * FROM shipment_bags WHERE bag_code = ? AND status = "sealed"', [bagCode], (bagErr, bags) => {
       if (bagErr) return res.status(500).json({ success: false, message: bagErr.sqlMessage });
       if (!bags.length) return res.status(404).json({ success: false, message: 'Không tìm thấy bao đã niêm phong.' });
@@ -3926,22 +4350,35 @@ app.post('/api/linehaul/trips/:id/bags', (req, res) => {
         || Number(bag.destination_warehouse_id) !== Number(trip.destination_warehouse_id)) {
         return res.status(409).json({ success: false, message: 'Tuyến bao không khớp với tuyến chuyến xe.' });
       }
-      db.query('INSERT INTO linehaul_trip_bags (trip_id, bag_id) VALUES (?, ?)', [trip.id, bag.id], (insertErr) => {
-        if (insertErr?.code === 'ER_DUP_ENTRY') return res.status(409).json({ success: false, message: 'Bao đã được gán vào chuyến khác.' });
-        if (insertErr) return res.status(500).json({ success: false, message: insertErr.sqlMessage });
-        db.query('UPDATE linehaul_trips SET status = "loading" WHERE id = ? AND status = "planned"', [trip.id], (updateErr) => {
-          if (updateErr) return res.status(500).json({ success: false, message: updateErr.sqlMessage });
-          res.json({ success: true, message: `Đã gán bao ${bagCode} lên chuyến ${trip.trip_code}.` });
+      db.query(
+        `SELECT
+           (SELECT COALESCE(SUM(o.weight_kg), 0) FROM shipment_bag_orders bo JOIN orders o ON o.id = bo.order_id WHERE bo.bag_id = ?) AS bag_weight,
+           (SELECT COALESCE(SUM(o.weight_kg), 0) FROM linehaul_trip_bags tb JOIN shipment_bag_orders bo ON bo.bag_id = tb.bag_id JOIN orders o ON o.id = bo.order_id WHERE tb.trip_id = ?) AS trip_weight`,
+        [bag.id, trip.id],
+        (weightErr, weights) => {
+          if (weightErr) return res.status(500).json({ success: false, message: 'Không thể kiểm tra tải trọng chuyến: ' + weightErr.sqlMessage });
+          const bagWeight = Number(weights[0].bag_weight || 0);
+          const tripWeight = Number(weights[0].trip_weight || 0);
+          if (tripWeight + bagWeight > Number(trip.max_payload_kg)) {
+            return res.status(409).json({ success: false, message: `Tổng tải trọng vượt giới hạn xe (${tripWeight + bagWeight} kg / ${trip.max_payload_kg} kg).` });
+          }
+          db.query('INSERT INTO linehaul_trip_bags (trip_id, bag_id) VALUES (?, ?)', [trip.id, bag.id], (insertErr) => {
+            if (insertErr?.code === 'ER_DUP_ENTRY') return res.status(409).json({ success: false, message: 'Bao đã được gán vào chuyến khác.' });
+            if (insertErr) return res.status(500).json({ success: false, message: insertErr.sqlMessage });
+            db.query('UPDATE linehaul_trips SET status = "loading" WHERE id = ? AND status = "planned"', [trip.id], (updateErr) => {
+              if (updateErr) return res.status(500).json({ success: false, message: updateErr.sqlMessage });
+              res.json({ success: true, message: `Đã gán bao ${bagCode} lên chuyến ${trip.trip_code}.` });
+            });
+          });
         });
-      });
     });
   });
 });
 
 app.post('/api/driver/trips/scan', (req, res) => {
-  const driverId = Number(req.body.driver_id);
+  const driverId = Number(req.authUser.id);
   const bagCode = String(req.body.bag_code || '').trim().toUpperCase();
-  if (!Number.isInteger(driverId) || driverId !== Number(req.authUser.id) || !bagCode) {
+  if (!bagCode) {
     return res.status(403).json({ success: false, message: 'Tài xế chỉ được quét chuyến được giao cho tài khoản đang đăng nhập.' });
   }
   const findSql = `
@@ -3954,19 +4391,51 @@ app.post('/api/driver/trips/scan', (req, res) => {
   db.query(findSql, [driverId, bagCode], (findErr, rows) => {
     if (findErr) return res.status(500).json({ success: false, message: findErr.sqlMessage });
     if (!rows.length) return res.status(404).json({ success: false, message: 'Bao không thuộc chuyến xe được giao cho tài xế này.' });
-    const { trip_id: tripId, trip_code: tripCode, bag_id: bagId } = rows[0];
+    const { trip_id: tripId, bag_id: bagId } = rows[0];
     db.query('UPDATE linehaul_trip_bags SET driver_scanned_at = CURRENT_TIMESTAMP WHERE trip_id = ? AND bag_id = ? AND driver_scanned_at IS NULL', [tripId, bagId], (scanErr) => {
       if (scanErr) return res.status(500).json({ success: false, message: scanErr.sqlMessage });
       db.query('SELECT COUNT(*) AS total, SUM(driver_scanned_at IS NOT NULL) AS scanned FROM linehaul_trip_bags WHERE trip_id = ?', [tripId], (countErr, counts) => {
         if (countErr) return res.status(500).json({ success: false, message: countErr.sqlMessage });
-        if (Number(counts[0].total) !== Number(counts[0].scanned)) {
-          return res.json({ success: true, trip_started: false, scanned: Number(counts[0].scanned), total: Number(counts[0].total), message: 'Đã xác nhận bao. Quét các bao còn lại để khởi hành.' });
-        }
-        db.query('UPDATE linehaul_trips SET status = "in_transit", departed_at = CURRENT_TIMESTAMP WHERE id = ? AND status IN ("planned","loading")', [tripId], (tripUpdateErr, tripResult) => {
+        const scanned = Number(counts[0].scanned || 0);
+        const total = Number(counts[0].total || 0);
+        res.json({
+          success: true,
+          trip_id: Number(tripId),
+          trip_ready: total > 0 && scanned === total,
+          scanned,
+          total,
+          message: total > 0 && scanned === total
+            ? 'Đã quét đủ bao. Bấm Bắt đầu khởi hành khi đã kiểm tra hàng trên xe.'
+            : `Đã xác nhận bao (${scanned}/${total}). Quét các bao còn lại.`
+        });
+      });
+    });
+  });
+});
+
+app.post('/api/driver/trips/:id/start', (req, res) => {
+  const tripId = Number(req.params.id);
+  if (!Number.isSafeInteger(tripId) || tripId <= 0) return res.status(400).json({ success: false, message: 'Mã chuyến không hợp lệ.' });
+  db.query(
+    `SELECT t.destination_warehouse_id, t.truck_id, COUNT(tb.bag_id) AS total,
+      SUM(tb.driver_scanned_at IS NOT NULL) AS scanned
+     FROM linehaul_trips t LEFT JOIN linehaul_trip_bags tb ON tb.trip_id = t.id
+     WHERE t.id = ? AND t.driver_id = ? AND t.status IN ("planned","loading")
+     GROUP BY t.id`,
+    [tripId, req.authUser.id],
+    (checkErr, rows) => {
+      if (checkErr) return res.status(500).json({ success: false, message: 'Không thể xác minh bao đã quét: ' + checkErr.sqlMessage });
+      if (!rows.length) return res.status(404).json({ success: false, message: 'Không có chuyến đang xếp hàng được giao cho tài khoản này.' });
+      if (!Number(rows[0].total) || Number(rows[0].total) !== Number(rows[0].scanned || 0)) {
+        return res.status(409).json({ success: false, message: 'Cần quét đủ toàn bộ bao được gán trước khi khởi hành.' });
+      }
+      db.query('UPDATE linehaul_trips SET status = "in_transit", departed_at = CURRENT_TIMESTAMP WHERE id = ? AND driver_id = ? AND status IN ("planned","loading")', [tripId, req.authUser.id], (tripUpdateErr, tripResult) => {
           if (tripUpdateErr) return res.status(500).json({ success: false, message: tripUpdateErr.sqlMessage });
           if (!tripResult.affectedRows) return res.status(409).json({ success: false, message: 'Chuyến xe đã được khởi hành hoặc đã thay đổi trạng thái.' });
           db.query('UPDATE shipment_bags b JOIN linehaul_trip_bags tb ON tb.bag_id = b.id SET b.status = "in_transit" WHERE tb.trip_id = ? AND b.status = "sealed"', [tripId], (bagUpdateErr) => {
             if (bagUpdateErr) return res.status(500).json({ success: false, message: bagUpdateErr.sqlMessage });
+            db.query('UPDATE trucks SET status = "in_transit" WHERE id = ?', [rows[0].truck_id], (truckErr) => {
+              if (truckErr) return res.status(500).json({ success: false, message: truckErr.sqlMessage });
             const orderStatusSql = `
               UPDATE orders o
               JOIN shipment_bag_orders bo ON bo.order_id = o.id
@@ -3977,18 +4446,63 @@ app.post('/api/driver/trips/scan', (req, res) => {
             `;
             db.query(orderStatusSql, [rows[0].destination_warehouse_id, tripId], (ordersErr) => {
               if (ordersErr) return res.status(500).json({ success: false, message: ordersErr.sqlMessage });
-              res.json({ success: true, trip_started: true, trip_code: tripCode, message: 'Đã quét đủ bao và bắt đầu chuyến trung chuyển.' });
+              res.json({ success: true, trip_started: true, message: 'Chuyến xe đã bắt đầu trung chuyển.' });
+            });
             });
           });
         });
-      });
-    });
-  });
+    }
+  );
+});
+
+app.post('/api/driver/trips/:id/arrive', (req, res) => {
+  const tripId = Number(req.params.id);
+  if (!Number.isSafeInteger(tripId) || tripId <= 0) return res.status(400).json({ success: false, message: 'Mã chuyến không hợp lệ.' });
+  db.query(
+    'UPDATE linehaul_trips SET status = "arrived", arrived_at = CURRENT_TIMESTAMP WHERE id = ? AND driver_id = ? AND status = "in_transit"',
+    [tripId, req.authUser.id],
+    (err, result) => {
+      if (err) return res.status(500).json({ success: false, message: 'Không thể xác nhận đến kho: ' + err.sqlMessage });
+      if (!result.affectedRows) return res.status(409).json({ success: false, message: 'Chuyến không được giao cho tài khoản này hoặc chưa khởi hành.' });
+      res.json({ success: true, message: 'Đã báo đến kho đích. Vui lòng chờ thủ kho quét nhận bao.' });
+    }
+  );
+});
+
+app.post('/api/driver/trips/:id/location', (req, res) => {
+  const tripId = Number(req.params.id);
+  const lat = Number(req.body.lat);
+  const lng = Number(req.body.lng);
+  if (!Number.isSafeInteger(tripId) || tripId <= 0
+    || !Number.isFinite(lat) || Math.abs(lat) > 90
+    || !Number.isFinite(lng) || Math.abs(lng) > 180) {
+    return res.status(400).json({ success: false, message: 'Mã chuyến hoặc tọa độ GPS không hợp lệ.' });
+  }
+  db.query(
+    `SELECT id FROM linehaul_trips
+     WHERE id = ? AND driver_id = ? AND status IN ("in_transit","arrived") LIMIT 1`,
+    [tripId, req.authUser.id],
+    (tripErr, trips) => {
+      if (tripErr) return res.status(500).json({ success: false, message: 'Không thể xác minh chuyến xe: ' + tripErr.sqlMessage });
+      if (!trips.length) return res.status(404).json({ success: false, message: 'Không có chuyến đang chạy được giao cho tài khoản này.' });
+      db.query(
+        `INSERT INTO linehaul_trip_positions (trip_id, driver_id, lat, lng)
+         VALUES (?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE driver_id = VALUES(driver_id), lat = VALUES(lat), lng = VALUES(lng), updated_at = CURRENT_TIMESTAMP`,
+        [tripId, req.authUser.id, lat, lng],
+        (saveErr) => {
+          if (saveErr) return res.status(500).json({ success: false, message: 'Không lưu được vị trí GPS: ' + saveErr.sqlMessage });
+          io.emit('linehaul_location_changed', { trip_id: tripId, driver_id: Number(req.authUser.id), lat, lng, timestamp: new Date().toISOString() });
+          res.json({ success: true });
+        }
+      );
+    }
+  );
 });
 
 app.post('/api/warehouse/linehaul/scan', (req, res) => {
   const bagCode = String(req.body.bag_code || '').trim().toUpperCase();
-  const warehouseId = Number(req.body.warehouse_id);
+  const warehouseId = Number(req.warehouseScopeId || req.body.warehouse_id);
   if (!bagCode || !Number.isInteger(warehouseId) || warehouseId <= 0) {
     return res.status(400).json({ success: false, message: 'Mã bao hoặc kho nhận không hợp lệ.' });
   }
@@ -3997,9 +4511,10 @@ app.post('/api/warehouse/linehaul/scan', (req, res) => {
     FROM shipment_bags b
     JOIN linehaul_trip_bags tb ON tb.bag_id = b.id
     JOIN linehaul_trips t ON t.id = tb.trip_id
-    WHERE b.bag_code = ? AND b.status = "in_transit" AND t.status = "in_transit"
+    WHERE b.bag_code = ? AND b.status = "in_transit" AND t.status IN ("in_transit","arrived")
+      AND (? IS NULL OR b.destination_warehouse_id = ?)
   `;
-  db.query(bagSql, [bagCode], (bagErr, bags) => {
+  db.query(bagSql, [bagCode, req.warehouseScopeId || null, req.warehouseScopeId || null], (bagErr, bags) => {
     if (bagErr) return res.status(500).json({ success: false, message: bagErr.sqlMessage });
     if (!bags.length) return res.status(404).json({ success: false, message: 'Bao không tồn tại hoặc chưa được tài xế xác nhận xuất phát.' });
     const bag = bags[0];
@@ -4028,7 +4543,10 @@ app.post('/api/warehouse/linehaul/scan', (req, res) => {
               if (!finishTrip) return res.json({ success: true, order_count: orderResult.affectedRows, message: `Đã nhập ${orderResult.affectedRows} đơn trong bao ${bagCode}.` });
               db.query('UPDATE linehaul_trips SET status = "completed", arrived_at = CURRENT_TIMESTAMP WHERE id = ?', [bag.trip_id], (tripErr) => {
                 if (tripErr) return res.status(500).json({ success: false, message: tripErr.sqlMessage });
-                res.json({ success: true, order_count: orderResult.affectedRows, message: `Đã nhập kho ${orderResult.affectedRows} đơn trong bao ${bagCode}; chuyến xe hoàn tất.` });
+                db.query('UPDATE trucks SET status = "ready" WHERE id = (SELECT truck_id FROM linehaul_trips WHERE id = ?)', [bag.trip_id], (truckErr) => {
+                  if (truckErr) return res.status(500).json({ success: false, message: truckErr.sqlMessage });
+                  res.json({ success: true, order_count: orderResult.affectedRows, message: `Đã nhập kho ${orderResult.affectedRows} đơn trong bao ${bagCode}; chuyến xe hoàn tất.` });
+                });
               });
             });
           });
@@ -4040,7 +4558,7 @@ app.post('/api/warehouse/linehaul/scan', (req, res) => {
 
 app.get('/api/warehouse/inventory', (req, res) => {
   const sql = 'SELECT o.*, w.name AS warehouse_name, w.ward_name, b.bin_code AS storage_bin_code, b.bin_name AS storage_bin_name FROM orders o LEFT JOIN warehouses w ON w.id = o.current_warehouse_id LEFT JOIN warehouse_bin_locations b ON b.id = o.storage_bin_id WHERE o.status IN ("at_origin_warehouse", "at_central_warehouse", "at_destination_warehouse") AND (? IS NULL OR o.current_warehouse_id = ?) ORDER BY o.updated_at DESC';
-  const warehouseId = req.query.warehouse_id ? Number(req.query.warehouse_id) : null;
+  const warehouseId = req.warehouseScopeId || (req.query.warehouse_id ? Number(req.query.warehouse_id) : null);
   db.query(sql, [warehouseId, warehouseId], (err, results) => {
     if (err) return res.status(500).json({ success: false, message: err.sqlMessage });
     res.json({ success: true, data: redactDeliveryOtp(results) });
@@ -4591,7 +5109,9 @@ app.post('/api/accountant/settlements/:id/email', (req, res) => {
 // 6. API NHÂN SỰ (HR)
 // =========================================
 app.get('/api/hr/staff', (req, res) => {
-  const sql = 'SELECT id, full_name, email, role, status, created_at FROM users WHERE role != "customer" ORDER BY id DESC';
+  const sql = `SELECT u.id, u.full_name, u.email, u.role, u.status, u.warehouse_id, w.name AS warehouse_name, u.created_at
+    FROM users u LEFT JOIN warehouses w ON w.id = u.warehouse_id
+    WHERE u.role != "customer" ORDER BY u.id DESC`;
   db.query(sql, (err, results) => {
     if (err) return res.status(500).json({ success: false, message: err.sqlMessage });
     res.json({ success: true, data: results });
@@ -4606,6 +5126,7 @@ app.post('/api/hr/staff', (req, res) => {
   }
 
   const normalizedRole = String(role).trim().toLowerCase();
+  const warehouseId = normalizedRole === 'warehouse_manager' ? Number(req.body.warehouse_id) : null;
   const normalizedEmail = String(email).trim();
   const normalizedName = String(full_name).trim();
   const normalizedStatus = status || 'active';
@@ -4614,22 +5135,28 @@ app.post('/api/hr/staff', (req, res) => {
     || !staffRoles.has(normalizedRole) || !staffStatuses.has(normalizedStatus)) {
     return res.status(400).json({ success: false, message: 'Họ tên, email, chức vụ hoặc trạng thái nhân sự không hợp lệ.' });
   }
+  if (normalizedRole === 'warehouse_manager' && (!Number.isInteger(warehouseId) || warehouseId <= 0)) {
+    return res.status(400).json({ success: false, message: 'Vui lòng chọn kho được phân công cho thủ kho.' });
+  }
 
-  const sql = 'INSERT INTO users (full_name, email, password, role, status) VALUES (?, ?, ?, ?, ?)';
-  hashPassword(password).then((passwordHash) => {
-    db.query(sql, [normalizedName, normalizedEmail, passwordHash, normalizedRole, normalizedStatus], (err, result) => {
+  const createStaff = () => hashPassword(password).then((passwordHash) => {
+    const sql = 'INSERT INTO users (full_name, email, password, role, status, warehouse_id) VALUES (?, ?, ?, ?, ?, ?)';
+    db.query(sql, [normalizedName, normalizedEmail, passwordHash, normalizedRole, normalizedStatus, warehouseId], (err, result) => {
       if (err) {
-        if (err.code === 'ER_DUP_ENTRY') {
-          return res.status(409).json({ success: false, message: 'Email đã tồn tại trong hệ thống.' });
-        }
+        if (err.code === 'ER_DUP_ENTRY') return res.status(409).json({ success: false, message: 'Email đã tồn tại trong hệ thống.' });
         return res.status(500).json({ success: false, message: 'Lỗi tạo nhân sự: ' + err.sqlMessage });
       }
-
       res.json({ success: true, message: 'Đã tạo nhân sự mới thành công.', staffId: result.insertId });
     });
   }).catch((error) => {
     console.error('Lỗi băm mật khẩu nhân sự mới:', error);
     res.status(500).json({ success: false, message: 'Không thể tạo mật khẩu an toàn cho nhân sự.' });
+  });
+  if (!warehouseId) return createStaff();
+  db.query('SELECT id FROM warehouses WHERE id = ? AND is_active = 1 LIMIT 1', [warehouseId], (warehouseErr, warehouses) => {
+    if (warehouseErr) return res.status(500).json({ success: false, message: 'Không thể xác minh kho được phân công: ' + warehouseErr.sqlMessage });
+    if (!warehouses.length) return res.status(400).json({ success: false, message: 'Kho được chọn không tồn tại hoặc đã ngừng hoạt động.' });
+    createStaff();
   });
 });
 
@@ -4644,15 +5171,19 @@ app.put('/api/hr/staff/:id', (req, res) => {
   const normalizedName = String(full_name).trim();
   const normalizedEmail = String(email).trim();
   const normalizedRole = String(role).trim().toLowerCase();
+  const warehouseId = normalizedRole === 'warehouse_manager' ? Number(req.body.warehouse_id) : null;
   const normalizedStatus = status || 'active';
   if (!normalizedName || normalizedName.length > 255
     || normalizedEmail.length > 255 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)
     || !staffRoles.has(normalizedRole) || !staffStatuses.has(normalizedStatus)) {
     return res.status(400).json({ success: false, message: 'Họ tên, email, chức vụ hoặc trạng thái nhân sự không hợp lệ.' });
   }
+  if (normalizedRole === 'warehouse_manager' && (!Number.isInteger(warehouseId) || warehouseId <= 0)) {
+    return res.status(400).json({ success: false, message: 'Vui lòng chọn kho được phân công cho thủ kho.' });
+  }
 
-  const updates = [normalizedName, normalizedEmail, normalizedRole, normalizedStatus];
-  const sql = 'UPDATE users SET full_name = ?, email = ?, role = ?, status = ?';
+  const updates = [normalizedName, normalizedEmail, normalizedRole, normalizedStatus, warehouseId];
+  const sql = 'UPDATE users SET full_name = ?, email = ?, role = ?, status = ?, warehouse_id = ?';
 
   const saveStaff = (passwordHash = null) => {
     if (passwordHash) {
@@ -4678,7 +5209,8 @@ app.put('/api/hr/staff/:id', (req, res) => {
     });
   };
 
-  if (password && String(password).trim()) {
+  const updateStaff = () => {
+    if (password && String(password).trim()) {
     if (typeof password !== 'string' || password.length > 1024) {
       return res.status(400).json({ success: false, message: 'Mật khẩu không hợp lệ.' });
     }
@@ -4686,8 +5218,15 @@ app.put('/api/hr/staff/:id', (req, res) => {
       console.error('Lỗi băm mật khẩu cập nhật:', error);
       res.status(500).json({ success: false, message: 'Không thể cập nhật mật khẩu an toàn.' });
     });
-  }
-  saveStaff();
+    }
+    saveStaff();
+  };
+  if (!warehouseId) return updateStaff();
+  db.query('SELECT id FROM warehouses WHERE id = ? AND is_active = 1 LIMIT 1', [warehouseId], (warehouseErr, warehouses) => {
+    if (warehouseErr) return res.status(500).json({ success: false, message: 'Không thể xác minh kho được phân công: ' + warehouseErr.sqlMessage });
+    if (!warehouses.length) return res.status(400).json({ success: false, message: 'Kho được chọn không tồn tại hoặc đã ngừng hoạt động.' });
+    updateStaff();
+  });
 });
 
 app.delete('/api/hr/staff/:id', (req, res) => {

@@ -59,6 +59,7 @@ export default function DangNhap() {
       driver: '/tai-xe',
       pickup_driver: '/tai-xe',
       delivery_driver: '/tai-xe',
+      linehaul_driver: '/tai-xe',
       warehouse_manager: '/kho',
       fleet_manager: '/dieu-hanh',
       accountant: '/ke-toan',
@@ -98,6 +99,7 @@ export default function DangNhap() {
           shipper: 'driver',
           pickup_driver: 'pickup_driver',
           delivery_driver: 'delivery_driver',
+          linehaul_driver: 'linehaul_driver',
           admin: 'director',
           warehouse: 'warehouse_manager',
           kho: 'warehouse_manager',
@@ -118,12 +120,17 @@ export default function DangNhap() {
         localStorage.setItem('full_name', data.user.full_name);
         localStorage.setItem('role', normalizedRole);
         localStorage.setItem('user_role', normalizedRole);
+        if (data.user.warehouse_id) localStorage.setItem('warehouse_id', data.user.warehouse_id);
+        else localStorage.removeItem('warehouse_id');
+        if (data.user.warehouse_type) localStorage.setItem('warehouse_type', data.user.warehouse_type);
+        else localStorage.removeItem('warehouse_type');
 
         switch (normalizedRole) {
           case 'shop': navigate('/cua-hang'); break;
           case 'driver': navigate('/tai-xe'); break;
           case 'pickup_driver': navigate('/tai-xe'); break;
           case 'delivery_driver': navigate('/tai-xe'); break;
+          case 'linehaul_driver': navigate('/tai-xe'); break;
           case 'warehouse_manager': navigate('/kho'); break;
           case 'fleet_manager': navigate('/dieu-hanh'); break;
           case 'accountant': navigate('/ke-toan'); break;

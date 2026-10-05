@@ -1,4 +1,4 @@
-import { apiFetch as fetch } from '../../utils/apiFetch.js';
+import { apiFetch as fetch, resolveApiAssetUrl } from '../../utils/apiFetch.js';
 import { useEffect, useState } from 'react';
 import { io } from 'socket.io-client';
 import { MapContainer, Marker, Popup, TileLayer, useMap } from 'react-leaflet';
@@ -571,7 +571,7 @@ export default function TraCuuHanhTrinh() {
                   <div className="relative h-64 bg-slate-100 overflow-hidden flex items-center justify-center">
                     <Package size={48} className="text-slate-300" />
                     {tinTheoDanhMuc[0].image_url && (
-                      <img src={tinTheoDanhMuc[0].image_url} alt={tinTheoDanhMuc[0].title} onError={(event) => { event.currentTarget.style.display = 'none'; }} className="absolute inset-0 h-full w-full object-cover group-hover:scale-105 transition-transform duration-500" />
+                      <img src={resolveApiAssetUrl(tinTheoDanhMuc[0].image_url)} alt={tinTheoDanhMuc[0].title} onError={(event) => { event.currentTarget.style.display = 'none'; }} className="absolute inset-0 h-full w-full object-cover group-hover:scale-105 transition-transform duration-500" />
                     )}
                   </div>
                   <div className="p-6">
@@ -586,7 +586,7 @@ export default function TraCuuHanhTrinh() {
                       <div className="relative w-32 h-24 shrink-0 bg-slate-100 rounded-lg overflow-hidden flex items-center justify-center">
                         <Package size={24} className="text-slate-300" />
                         {baiViet.image_url && (
-                          <img src={baiViet.image_url} alt={baiViet.title} onError={(event) => { event.currentTarget.style.display = 'none'; }} className="absolute inset-0 h-full w-full object-cover group-hover:scale-105 transition-transform" />
+                          <img src={resolveApiAssetUrl(baiViet.image_url)} alt={baiViet.title} onError={(event) => { event.currentTarget.style.display = 'none'; }} className="absolute inset-0 h-full w-full object-cover group-hover:scale-105 transition-transform" />
                         )}
                       </div>
                       <div className="min-w-0">

@@ -1,5 +1,5 @@
-import { apiFetch as fetch } from '../../utils/apiFetch.js';
-import { useEffect, useState } from 'react';
+import { apiFetch as fetch, resolveApiAssetUrl } from '../../utils/apiFetch.js';
+import { useEffect, useRef, useState } from 'react';
 import { FileText, ImageIcon, Newspaper, Sparkles, CheckCircle2, LogOut, Briefcase, LayoutGrid, PlusCircle } from 'lucide-react';
 
 const initialForm = {
@@ -19,8 +19,16 @@ export default function QuanLyTinTuc() {
   const [message, setMessage] = useState('');
   const [activeTab, setActiveTab] = useState('bai-viet');
   const [editingId, setEditingId] = useState(null);
+  const [selectedImage, setSelectedImage] = useState(null);
 
-  const contentName = localStorage.getItem('full_name') || 'Phòng Nội Dung';
+  const imageInputRef = useRef(null);
+  const contentName = localStorage.getItem('full_name') || 'Nhân viên nội dung';
+
+  useEffect(() => {
+    return () => {
+      if (selectedImage?.previewUrl) URL.revokeObjectURL(selectedImage.previewUrl);
+    };
+  }, [selectedImage]);
 
   const fetchArticles = async () => {
     try {
@@ -44,6 +52,26 @@ export default function QuanLyTinTuc() {
     setForm({ ...form, [e.target.name]: e.target.value });
   };
 
+  const handleImageChange = (e) => {
+    const image = e.target.files?.[0] || null;
+    if (!image) {
+      setSelectedImage(null);
+      return;
+    }
+    if (!['image/jpeg', 'image/png', 'image/webp'].includes(image.type)) {
+      setMessage('Ảnh chỉ chấp nhận định dạng JPG, PNG hoặc WEBP.');
+      e.target.value = '';
+      return;
+    }
+    if (image.size > 8 * 1024 * 1024) {
+      setMessage('Ảnh không được vượt quá 8 MB.');
+      e.target.value = '';
+      return;
+    }
+    setMessage('');
+    setSelectedImage({ file: image, previewUrl: URL.createObjectURL(image) });
+  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     setLoading(true);
@@ -52,17 +80,21 @@ export default function QuanLyTinTuc() {
     try {
       const endpoint = editingId ? `http://localhost:5000/api/news/${editingId}` : 'http://localhost:5000/api/news';
       const method = editingId ? 'PUT' : 'POST';
+      const payload = new FormData();
+      Object.entries(form).forEach(([key, value]) => payload.append(key, value));
+      if (selectedImage) payload.append('image', selectedImage.file);
 
       const res = await fetch(endpoint, {
         method,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(form),
+        body: payload,
       });
 
       const data = await res.json();
       if (data.success) {
         setMessage(editingId ? 'Đã cập nhật bài tin tức thành công.' : 'Đã lưu bài tin tức thành công.');
         setForm(initialForm);
+        setSelectedImage(null);
+        if (imageInputRef.current) imageInputRef.current.value = '';
         setEditingId(null);
         await fetchArticles();
       } else {
@@ -77,6 +109,7 @@ export default function QuanLyTinTuc() {
 
   const handleEdit = (article) => {
     setEditingId(article.id);
+    setSelectedImage(null);
     setForm({
       title: article.title,
       summary: article.summary,
@@ -98,6 +131,7 @@ export default function QuanLyTinTuc() {
       if (data.success) {
         setMessage('Đã xóa bài tin tức thành công.');
         setForm(initialForm);
+        setSelectedImage(null);
         setEditingId(null);
         await fetchArticles();
       } else {
@@ -129,6 +163,7 @@ export default function QuanLyTinTuc() {
             <div>
               <h2 className="text-xl font-black text-slate-800 tracking-tight">Nội dung</h2>
               <p className="text-xs font-bold text-blue-500 uppercase tracking-wider mt-0.5">Quản trị tin tức</p>
+              <p className="mt-1 max-w-40 truncate text-sm font-bold text-slate-700" title={contentName}>{contentName}</p>
             </div>
           </div>
 
@@ -149,14 +184,6 @@ export default function QuanLyTinTuc() {
         </div>
 
         <div className="p-5 border-t border-blue-50">
-          <div className="flex items-center gap-3 px-5 py-4 mb-2 bg-blue-50/50 rounded-xl border border-blue-100">
-            <div className="w-10 h-10 rounded-full bg-blue-200 flex items-center justify-center font-black text-blue-700">
-              {(contentName || 'N').charAt(0)}
-            </div>
-            <div>
-              <p className="text-sm font-bold text-slate-700 truncate w-36">{contentName}</p>
-            </div>
-          </div>
           <button onClick={dangXuat} className="w-full px-5 py-4 rounded-2xl font-bold text-left text-red-500 hover:bg-red-50 transition-colors flex items-center gap-3">
             <LogOut size={20}/> Đăng Xuất
           </button>
@@ -260,14 +287,18 @@ export default function QuanLyTinTuc() {
               </div>
 
               <div>
-                <label className="mb-2 block text-sm font-bold text-slate-700">URL ảnh</label>
+                <label htmlFor="news-image" className="mb-2 block text-sm font-bold text-slate-700">Chọn ảnh từ máy tính</label>
                 <input
-                  name="image_url"
-                  value={form.image_url}
-                  onChange={handleChange}
-                  placeholder="https://..."
-                  className="w-full rounded-xl border border-slate-200 bg-slate-50 p-3.5 outline-none transition focus:border-blue-400 focus:bg-white focus:ring-4 focus:ring-blue-50"
+                  id="news-image"
+                  ref={imageInputRef}
+                  name="image"
+                  type="file"
+                  accept="image/jpeg,image/png,image/webp"
+                  onChange={handleImageChange}
+                  className="w-full rounded-xl border border-slate-200 bg-slate-50 p-2.5 text-sm outline-none file:mr-3 file:rounded-lg file:border-0 file:bg-blue-100 file:px-3 file:py-2 file:font-bold file:text-blue-700 focus:border-blue-400 focus:bg-white focus:ring-4 focus:ring-blue-50"
                 />
+                <p className="mt-1 text-xs text-slate-500">JPG, PNG hoặc WEBP · tối đa 8 MB</p>
+                {selectedImage && <p className="mt-1 truncate text-xs font-semibold text-blue-700">{selectedImage.file.name}</p>}
               </div>
             </div>
 
@@ -286,6 +317,7 @@ export default function QuanLyTinTuc() {
                   onClick={() => {
                     setEditingId(null);
                     setForm(initialForm);
+                    setSelectedImage(null);
                     setMessage('Đã hủy chỉnh sửa bài viết.');
                   }}
                   className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 font-bold text-slate-600"
@@ -311,7 +343,7 @@ export default function QuanLyTinTuc() {
 
             <div className="mt-5 overflow-hidden rounded-2xl border border-slate-200 bg-slate-50">
               <img
-                src={form.image_url || 'https://images.unsplash.com/photo-1586528116311-ad8ed7c663be?auto=format&fit=crop&w=800&q=80'}
+                src={selectedImage?.previewUrl || resolveApiAssetUrl(form.image_url) || 'https://images.unsplash.com/photo-1586528116311-ad8ed7c663be?auto=format&fit=crop&w=800&q=80'}
                 alt={form.title || 'Preview'}
                 className="h-40 w-full object-cover"
               />
@@ -347,7 +379,7 @@ export default function QuanLyTinTuc() {
               {articles.map((item) => (
                 <div key={item.id} className="flex flex-col gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-4 md:flex-row md:items-center md:justify-between">
                   <div className="flex gap-3">
-                    <img src={item.image_url || 'https://images.unsplash.com/photo-1586528116311-ad8ed7c663be?auto=format&fit=crop&w=800&q=80'} alt={item.title} className="h-16 w-24 rounded-xl object-cover" />
+                    <img src={resolveApiAssetUrl(item.image_url) || 'https://images.unsplash.com/photo-1586528116311-ad8ed7c663be?auto=format&fit=crop&w=800&q=80'} alt={item.title} className="h-16 w-24 rounded-xl object-cover" />
                     <div>
                       <span className="inline-flex rounded-full bg-blue-50 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide text-blue-600">
                         {item.category || 'Tin tức'}

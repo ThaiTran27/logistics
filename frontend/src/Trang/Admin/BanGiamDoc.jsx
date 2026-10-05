@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { Link } from 'react-router-dom';
 import { MapContainer, TileLayer, CircleMarker, Popup } from 'react-leaflet';
 import { apiFetch as fetch } from '../../utils/apiFetch.js';
 import { 
@@ -184,6 +185,7 @@ export default function DashboardGiamDoc() {
             <div>
               <h2 className="text-xl font-black tracking-tight text-white">BOD Portal</h2>
               <p className="text-[10px] font-bold text-amber-400 uppercase tracking-widest mt-1">Ban Giám Đốc</p>
+              <p className="mt-1 max-w-40 truncate text-sm font-bold text-white" title={directorName}>{directorName}</p>
             </div>
           </div>
           
@@ -210,19 +212,13 @@ export default function DashboardGiamDoc() {
             <button onClick={() => setTabHienTai('leaders')} className={`px-5 py-4 rounded-2xl font-bold text-left transition-all flex items-center gap-4 ${tabHienTai === 'leaders' ? 'bg-white/10 text-white border border-white/5 shadow-inner' : 'text-slate-400 hover:bg-white/5 hover:text-white'}`}>
               <Users size={20} /> Quản Lý Trưởng Phòng
             </button>
+            <Link to="/quan-ly-kho" className="px-5 py-4 rounded-2xl font-bold text-left transition-all flex items-center gap-4 text-slate-400 hover:bg-white/5 hover:text-white">
+              <MapPin size={20} /> Quản Lý Kho & Kho Con
+            </Link>
           </div>
         </div>
 
         <div className="p-5 border-t border-slate-800 bg-slate-950/30">
-          <div className="flex items-center gap-3 px-5 py-4 mb-4 bg-slate-800/50 rounded-xl border border-slate-700/50">
-            <div className="w-10 h-10 rounded-full bg-gradient-to-r from-amber-400 to-orange-500 flex items-center justify-center font-black text-white">
-              {(directorName || 'G').charAt(0)}
-            </div>
-            <div>
-              <p className="text-sm font-bold text-white">{directorName}</p>
-              <p className="text-xs text-slate-400 font-bold uppercase tracking-wider">CEO / Director</p>
-            </div>
-          </div>
           <button onClick={dangXuat} className="w-full px-5 py-4 rounded-xl font-bold text-left flex items-center gap-4 text-red-400 hover:bg-red-500/10 transition-colors">
             <LogOut size={20} /> Đăng Xuất
           </button>

@@ -1,5 +1,5 @@
 import { apiFetch as fetch } from '../../utils/apiFetch.js';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { io } from 'socket.io-client';
 import { MapContainer, TileLayer, Marker, Popup, useMap } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
@@ -65,6 +65,19 @@ export default function TrungTamDieuPhoi() {
   const [rmaReviewNotes, setRmaReviewNotes] = useState({});
   const [rmaError, setRmaError] = useState('');
   const [rmaMessage, setRmaMessage] = useState('');
+  const [fleetTrucks, setFleetTrucks] = useState([]);
+  const [fleetWarehouses, setFleetWarehouses] = useState([]);
+  const [linehaulDrivers, setLinehaulDrivers] = useState([]);
+  const [fleetBags, setFleetBags] = useState([]);
+  const [fleetTrips, setFleetTrips] = useState([]);
+  const [linehaulPositions, setLinehaulPositions] = useState([]);
+  const [fleetError, setFleetError] = useState('');
+  const [fleetMessage, setFleetMessage] = useState('');
+  const [fleetBusy, setFleetBusy] = useState(false);
+  const [truckDraft, setTruckDraft] = useState({ id: '', vehicle_plate: '', max_payload_kg: '', status: 'ready' });
+  const [tripDraft, setTripDraft] = useState({ truck_id: '', driver_id: '', source_warehouse_id: '', destination_warehouse_id: '' });
+  const [selectedTripId, setSelectedTripId] = useState('');
+  const [selectedBagIds, setSelectedBagIds] = useState([]);
 
   const [formBaoCao, setFormBaoCao] = useState({ title: '', content: '' });
   const [fileBaoCao, setFileBaoCao] = useState(null);
@@ -72,6 +85,149 @@ export default function TrungTamDieuPhoi() {
 
   const userId = localStorage.getItem('user_id');
   const userName = localStorage.getItem('full_name') || 'Điều Phối Viên';
+  const selectedSourceWarehouse = fleetWarehouses.find((warehouse) => String(warehouse.id) === tripDraft.source_warehouse_id);
+  const routeDestinations = fleetWarehouses.filter((warehouse) => selectedSourceWarehouse
+    && warehouse.warehouse_type !== selectedSourceWarehouse.warehouse_type);
+
+  const taiDuLieuFleet = useCallback(async () => {
+    setFleetError('');
+    try {
+      const endpoints = [
+        '/api/trucks',
+        '/api/warehouses',
+        '/api/shippers?type=linehaul',
+        '/api/warehouse/bags',
+        '/api/linehaul/trips',
+        '/api/linehaul/positions'
+      ];
+      const responses = await Promise.all(endpoints.map((endpoint) => fetch(`${API_URL}${endpoint}`)));
+      const results = await Promise.all(responses.map((response) => response.json()));
+      const failedIndex = responses.findIndex((response, index) => !response.ok || !results[index].success);
+      if (failedIndex >= 0) throw new Error(results[failedIndex].message || 'Không tải được dữ liệu điều phối vận tải.');
+      setFleetTrucks(results[0].data || []);
+      setFleetWarehouses((results[1].data || []).filter((warehouse) => warehouse.is_active));
+      setLinehaulDrivers(results[2].data || []);
+      setFleetBags((results[3].data || []).filter((bag) => bag.status === 'sealed'));
+      setFleetTrips(results[4].data || []);
+      setLinehaulPositions(results[5].data || []);
+    } catch (error) {
+      setFleetError(error.message || 'Không tải được dữ liệu điều phối vận tải.');
+    }
+  }, []);
+
+  const luuXeTai = async (event) => {
+    event.preventDefault();
+    setFleetBusy(true);
+    setFleetError('');
+    setFleetMessage('');
+    try {
+      const editing = Boolean(truckDraft.id);
+      const response = await fetch(`${API_URL}/api/trucks${editing ? `/${truckDraft.id}` : ''}`, {
+        method: editing ? 'PUT' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          vehicle_plate: truckDraft.vehicle_plate,
+          max_payload_kg: Number(truckDraft.max_payload_kg),
+          status: truckDraft.status
+        })
+      });
+      const result = await response.json();
+      if (!response.ok || !result.success) throw new Error(result.message || 'Không lưu được xe tải.');
+      setTruckDraft({ id: '', vehicle_plate: '', max_payload_kg: '', status: 'ready' });
+      setFleetMessage(result.message || 'Đã lưu xe tải.');
+      await taiDuLieuFleet();
+    } catch (error) {
+      setFleetError(error.message || 'Không lưu được xe tải.');
+    } finally {
+      setFleetBusy(false);
+    }
+  };
+
+  const xoaXeTai = async (truckId) => {
+    if (!window.confirm('Xóa xe tải này khỏi đội xe?')) return;
+    setFleetBusy(true);
+    setFleetError('');
+    setFleetMessage('');
+    try {
+      const response = await fetch(`${API_URL}/api/trucks/${truckId}`, { method: 'DELETE' });
+      const result = await response.json();
+      if (!response.ok || !result.success) throw new Error(result.message || 'Không xóa được xe tải.');
+      setFleetMessage(result.message);
+      await taiDuLieuFleet();
+    } catch (error) {
+      setFleetError(error.message || 'Không xóa được xe tải.');
+    } finally {
+      setFleetBusy(false);
+    }
+  };
+
+  const taoChuyenLinehaul = async (event) => {
+    event.preventDefault();
+    setFleetBusy(true);
+    setFleetError('');
+    setFleetMessage('');
+    try {
+      const response = await fetch(`${API_URL}/api/linehaul/trips`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...tripDraft,
+          truck_id: Number(tripDraft.truck_id),
+          driver_id: Number(tripDraft.driver_id),
+          source_warehouse_id: Number(tripDraft.source_warehouse_id),
+          destination_warehouse_id: Number(tripDraft.destination_warehouse_id)
+        })
+      });
+      const result = await response.json();
+      if (!response.ok || !result.success) throw new Error(result.message || 'Không tạo được chuyến xe.');
+      setSelectedTripId(String(result.data.id));
+      setTripDraft({ truck_id: '', driver_id: '', source_warehouse_id: '', destination_warehouse_id: '' });
+      setFleetMessage(`Đã tạo chuyến ${result.data.trip_code}. Chọn các bao niêm phong để gán.`);
+      await taiDuLieuFleet();
+    } catch (error) {
+      setFleetError(error.message || 'Không tạo được chuyến xe.');
+    } finally {
+      setFleetBusy(false);
+    }
+  };
+
+  const ganBaoVaoChuyen = async () => {
+    if (!selectedTripId || !selectedBagIds.length || fleetBusy) return;
+    setFleetBusy(true);
+    setFleetError('');
+    setFleetMessage('');
+    try {
+      for (const bagId of selectedBagIds) {
+        const bag = fleetBags.find((item) => String(item.id) === String(bagId));
+        if (!bag) continue;
+        const response = await fetch(`${API_URL}/api/linehaul/trips/${selectedTripId}/bags`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ bag_code: bag.bag_code })
+        });
+        const result = await response.json();
+        if (!response.ok || !result.success) throw new Error(`${bag.bag_code}: ${result.message || 'Không gán được bao.'}`);
+      }
+      setFleetMessage(`Đã gán ${selectedBagIds.length} bao lên chuyến.`);
+      setSelectedBagIds([]);
+      await taiDuLieuFleet();
+    } catch (error) {
+      setFleetError(error.message || 'Không thể gán bao vào chuyến.');
+      await taiDuLieuFleet();
+    } finally {
+      setFleetBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    if (tabHienTai !== 'fleet') return undefined;
+    const timeoutId = window.setTimeout(taiDuLieuFleet, 0);
+    const intervalId = window.setInterval(taiDuLieuFleet, 30000);
+    return () => {
+      window.clearTimeout(timeoutId);
+      window.clearInterval(intervalId);
+    };
+  }, [tabHienTai, taiDuLieuFleet]);
 
   const taiDuLieu = async () => {
     try {
@@ -316,7 +472,6 @@ export default function TrungTamDieuPhoi() {
 
   const safeDonHang = Array.isArray(donHang) ? donHang : [];
   const safeTaiXeList = Array.isArray(taiXeList) ? taiXeList : [];
-  const safeUserName = userName || 'Điều Phối Viên';
 
   const donChoGom = allOrders.filter((order) => order.status === 'pending' && !order.pickup_shipper_id);
   const donDaLoc = safeDonHang.filter(d => {
@@ -439,11 +594,11 @@ export default function TrungTamDieuPhoi() {
   };
 
   return (
-    <div className="flex min-h-screen bg-[#F8FAFC] font-sans text-slate-700">
+    <div className="flex h-screen overflow-hidden bg-[#F8FAFC] font-sans text-slate-700">
       
       {/* SIDEBAR */}
-      <div className="w-72 bg-white border-r border-slate-200 shadow-sm flex flex-col z-10 justify-between">
-        <div>
+      <div className="sticky top-0 z-10 flex h-screen w-72 shrink-0 flex-col justify-between border-r border-slate-200 bg-white shadow-sm">
+        <div className="min-h-0 flex-1 overflow-y-auto">
           <div className="p-8 border-b border-slate-100 flex items-center gap-3">
             <div className="bg-gradient-to-tr from-emerald-500 to-teal-400 p-2.5 rounded-xl shadow-lg shadow-emerald-200">
               <Navigation className="text-white" size={24} />
@@ -451,29 +606,141 @@ export default function TrungTamDieuPhoi() {
             <div>
               <h2 className="text-xl font-black text-slate-800 tracking-tight">Điều Hành</h2>
               <p className="text-xs font-bold text-emerald-500 uppercase tracking-wider mt-0.5">Trung tâm Điều Phối</p>
+              <p className="mt-1 max-w-40 truncate text-sm font-bold text-slate-700" title={userName}>{userName}</p>
             </div>
           </div>
           
           <div className="p-5 mt-2 space-y-3">
             <button onClick={() => setTabHienTai('dieuphoan')} className={`w-full px-5 py-4 rounded-2xl font-bold flex items-center gap-4 transition-all ${tabHienTai === 'dieuphoan' ? 'bg-emerald-50 text-emerald-600 border border-emerald-100' : 'text-slate-500 hover:bg-slate-50'}`}><MapPin size={20} /> Phân Tuyến Tài Xế</button>
             <button onClick={() => { setTabHienTai('rma'); taiYeuCauRma(); }} className={`w-full px-5 py-4 rounded-2xl font-bold flex items-center gap-4 transition-all ${tabHienTai === 'rma' ? 'bg-orange-50 text-orange-600 border border-orange-100' : 'text-slate-500 hover:bg-slate-50'}`}><RotateCw size={20} /> Yêu Cầu Giao Lại <span className="ml-auto rounded-full bg-orange-100 px-2 py-0.5 text-xs font-black text-orange-700">{rmaRequests.filter((request) => request.status === 'pending').length}</span></button>
+            <button onClick={() => setTabHienTai('fleet')} className={`w-full px-5 py-4 rounded-2xl font-bold flex items-center gap-4 transition-all ${tabHienTai === 'fleet' ? 'bg-blue-50 text-blue-600 border border-blue-100' : 'text-slate-500 hover:bg-slate-50'}`}><Truck size={20} /> Quản Lý Vận Tải</button>
             <button onClick={() => setTabHienTai('bandogiamsat')} className={`w-full px-5 py-4 rounded-2xl font-bold flex items-center gap-4 transition-all ${tabHienTai === 'bandogiamsat' ? 'bg-emerald-50 text-emerald-600 border border-emerald-100' : 'text-slate-500 hover:bg-slate-50'}`}><Map size={20} /> Giám Sát Bản Đồ GPS</button>
             <button onClick={() => setTabHienTai('baocao')} className={`w-full px-5 py-4 rounded-2xl font-bold flex items-center gap-4 transition-all ${tabHienTai === 'baocao' ? 'bg-emerald-50 text-emerald-600 border border-emerald-100' : 'text-slate-500 hover:bg-slate-50'}`}><FileText size={20} /> Báo Cáo Giám Đốc</button>
           </div>
         </div>
 
-        <div className="p-5 border-t border-slate-100">
-          <div className="flex items-center gap-3 px-5 py-4 mb-2 bg-slate-50 rounded-xl border border-slate-100">
-            <div className="w-10 h-10 rounded-full bg-emerald-100 flex items-center justify-center font-black text-emerald-600">{safeUserName.charAt(0)}</div>
-            <div><p className="text-sm font-bold text-slate-700">{safeUserName}</p></div>
-          </div>
+        <div className="shrink-0 border-t border-slate-100 p-5">
           <button onClick={dangXuat} className="w-full px-5 py-4 rounded-2xl font-bold text-left text-red-500 hover:bg-red-50 transition-colors">Đăng Xuất</button>
         </div>
       </div>
 
       {/* MAIN CONTENT */}
-      <div className="flex-1 p-10 overflow-y-auto flex flex-col">
-        
+      <div className="min-w-0 flex-1 overflow-y-auto p-10 flex flex-col">
+
+        {tabHienTai === 'fleet' && (
+          <div className="space-y-6">
+            <header>
+              <p className="text-xs font-black uppercase tracking-[0.22em] text-blue-600">Hub & spoke · Line-haul</p>
+              <h1 className="mt-2 text-3xl font-black text-slate-800">Quản lý vận tải liên kho</h1>
+              <p className="mt-2 text-sm text-slate-500">Quản lý đội xe, tạo chuyến, gán bao đã niêm phong và theo dõi GPS tài xế xe tải.</p>
+            </header>
+            {fleetError && <p role="alert" className="rounded-xl border border-red-200 bg-red-50 p-4 font-bold text-red-700">{fleetError}</p>}
+            {fleetMessage && <p role="status" className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 font-bold text-emerald-800">{fleetMessage}</p>}
+
+            <div className="grid gap-6 xl:grid-cols-2">
+              <section className="space-y-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+                <h2 className="text-lg font-black">Đội xe tải</h2>
+                <form onSubmit={luuXeTai} className="grid gap-3 sm:grid-cols-2">
+                  <label className="text-sm font-bold text-slate-600">Biển số
+                    <input required maxLength={30} value={truckDraft.vehicle_plate} onChange={(event) => setTruckDraft((current) => ({ ...current, vehicle_plate: event.target.value.toUpperCase() }))} className="mt-1 w-full rounded-lg border border-slate-200 p-3 uppercase" placeholder="51C-889.99" />
+                  </label>
+                  <label className="text-sm font-bold text-slate-600">Trọng tải tối đa (kg)
+                    <input required min="1" type="number" step="0.1" value={truckDraft.max_payload_kg} onChange={(event) => setTruckDraft((current) => ({ ...current, max_payload_kg: event.target.value }))} className="mt-1 w-full rounded-lg border border-slate-200 p-3" />
+                  </label>
+                  {truckDraft.id && <label className="text-sm font-bold text-slate-600">Tình trạng
+                    <select value={truckDraft.status} onChange={(event) => setTruckDraft((current) => ({ ...current, status: event.target.value }))} className="mt-1 w-full rounded-lg border border-slate-200 bg-white p-3">
+                      <option value="ready">Sẵn sàng</option><option value="maintenance">Bảo trì</option><option value="in_transit">Đang chạy</option>
+                    </select>
+                  </label>}
+                  <div className="flex items-end gap-2">
+                    <button disabled={fleetBusy} className="rounded-lg bg-blue-600 px-4 py-3 font-bold text-white disabled:opacity-50">{truckDraft.id ? 'Lưu xe' : 'Thêm xe'}</button>
+                    {truckDraft.id && <button type="button" onClick={() => setTruckDraft({ id: '', vehicle_plate: '', max_payload_kg: '', status: 'ready' })} className="rounded-lg bg-slate-100 px-4 py-3 font-bold text-slate-600">Hủy</button>}
+                  </div>
+                </form>
+                <div className="max-h-72 space-y-2 overflow-y-auto">
+                  {fleetTrucks.map((truck) => <article key={truck.id} className="flex items-center justify-between gap-3 rounded-xl border border-slate-100 p-3">
+                    <div><p className="font-black">{truck.vehicle_plate} · {Number(truck.max_payload_kg).toLocaleString()} kg</p><p className="text-xs text-slate-500">{truck.status === 'ready' ? 'Sẵn sàng' : truck.status === 'in_transit' ? 'Đang chạy' : 'Bảo trì'}</p></div>
+                    <div className="flex gap-2"><button type="button" onClick={() => setTruckDraft({ id: truck.id, vehicle_plate: truck.vehicle_plate, max_payload_kg: truck.max_payload_kg, status: truck.status })} className="rounded-lg bg-slate-100 px-3 py-2 text-xs font-bold">Sửa</button><button type="button" disabled={fleetBusy} onClick={() => xoaXeTai(truck.id)} className="rounded-lg bg-red-50 px-3 py-2 text-xs font-bold text-red-700 disabled:opacity-50">Xóa</button></div>
+                  </article>)}
+                  {!fleetTrucks.length && <p className="text-sm text-slate-500">Chưa có xe tải trong đội xe.</p>}
+                </div>
+              </section>
+
+              <section className="space-y-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+                <h2 className="text-lg font-black">Tạo chuyến xe liên kho</h2>
+                <form onSubmit={taoChuyenLinehaul} className="grid gap-3 sm:grid-cols-2">
+                  <label className="text-sm font-bold text-slate-600">Xe tải
+                    <select required value={tripDraft.truck_id} onChange={(event) => setTripDraft((current) => ({ ...current, truck_id: event.target.value }))} className="mt-1 w-full rounded-lg border border-slate-200 bg-white p-3">
+                      <option value="">Chọn xe sẵn sàng</option>{fleetTrucks.filter((truck) => truck.status === 'ready').map((truck) => <option key={truck.id} value={truck.id}>{truck.vehicle_plate} · {truck.max_payload_kg} kg</option>)}
+                    </select>
+                  </label>
+                  <label className="text-sm font-bold text-slate-600">Tài xế xe tải
+                    <select required value={tripDraft.driver_id} onChange={(event) => setTripDraft((current) => ({ ...current, driver_id: event.target.value }))} className="mt-1 w-full rounded-lg border border-slate-200 bg-white p-3">
+                      <option value="">Chọn tài xế</option>{linehaulDrivers.map((driver) => <option key={driver.id} value={driver.id}>{driver.full_name}</option>)}
+                    </select>
+                  </label>
+                  <label className="text-sm font-bold text-slate-600">Kho đi
+                    <select required value={tripDraft.source_warehouse_id} onChange={(event) => setTripDraft((current) => ({ ...current, source_warehouse_id: event.target.value }))} className="mt-1 w-full rounded-lg border border-slate-200 bg-white p-3">
+                      <option value="">Chọn kho đi</option>{fleetWarehouses.map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}
+                    </select>
+                  </label>
+                  <label className="text-sm font-bold text-slate-600">Kho đến
+                    <select required value={tripDraft.destination_warehouse_id} onChange={(event) => setTripDraft((current) => ({ ...current, destination_warehouse_id: event.target.value }))} className="mt-1 w-full rounded-lg border border-slate-200 bg-white p-3">
+                      <option value="">Chọn kho đến</option>{routeDestinations.map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}
+                    </select>
+                  </label>
+                  <button disabled={fleetBusy} className="rounded-lg bg-indigo-600 px-4 py-3 font-bold text-white disabled:opacity-50 sm:col-span-2">Tạo chuyến xe</button>
+                </form>
+              </section>
+            </div>
+
+            <section className="grid gap-6 xl:grid-cols-2">
+              <div className="space-y-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+                <div className="flex flex-wrap items-center justify-between gap-3"><h2 className="font-black">Chuyến xe và gán bao</h2>
+                  <select value={selectedTripId} onChange={(event) => setSelectedTripId(event.target.value)} className="rounded-lg border border-slate-200 bg-white p-2 text-sm">
+                    <option value="">Chọn chuyến đang chờ</option>{fleetTrips.filter((trip) => ['planned', 'loading'].includes(trip.status)).map((trip) => <option key={trip.id} value={trip.id}>{trip.trip_code} · {trip.source_warehouse_name} → {trip.destination_warehouse_name}</option>)}
+                  </select>
+                </div>
+                {selectedTripId && (() => {
+                  const trip = fleetTrips.find((item) => String(item.id) === selectedTripId);
+                  const availableBags = fleetBags.filter((bag) => trip
+                    && Number(bag.source_warehouse_id) === Number(trip.source_warehouse_id)
+                    && Number(bag.destination_warehouse_id) === Number(trip.destination_warehouse_id));
+                  return <div className="space-y-3 rounded-xl bg-slate-50 p-4">
+                    <p className="text-sm font-bold text-slate-700">{trip?.trip_code}: chọn bao niêm phong đúng tuyến</p>
+                    <div className="max-h-44 space-y-2 overflow-y-auto">
+                      {availableBags.map((bag) => <label key={bag.id} className="flex items-center gap-3 rounded-lg bg-white p-3 text-sm">
+                        <input type="checkbox" checked={selectedBagIds.includes(String(bag.id))} onChange={(event) => setSelectedBagIds((current) => event.target.checked ? [...current, String(bag.id)] : current.filter((id) => id !== String(bag.id)))} />
+                        <span><strong className="font-mono">{bag.bag_code}</strong><span className="ml-2 text-slate-500">· {bag.order_count} đơn</span></span>
+                      </label>)}
+                      {!availableBags.length && <p className="text-sm text-slate-500">Không có bao niêm phong chờ xuất trên tuyến này.</p>}
+                    </div>
+                    <button type="button" onClick={ganBaoVaoChuyen} disabled={fleetBusy || !selectedBagIds.length} className="rounded-lg bg-blue-700 px-4 py-3 font-bold text-white disabled:opacity-50">Gán {selectedBagIds.length || ''} bao lên chuyến</button>
+                  </div>;
+                })()}
+                <div className="max-h-72 space-y-2 overflow-y-auto">
+                  {fleetTrips.map((trip) => <article key={trip.id} className="rounded-xl border border-slate-100 p-3">
+                    <div className="flex flex-wrap justify-between gap-2"><strong>{trip.trip_code} · {trip.vehicle_plate}</strong><span className="rounded-full bg-blue-50 px-2 py-1 text-xs font-bold text-blue-700">{trip.status}</span></div>
+                    <p className="mt-1 text-sm text-slate-500">{trip.source_warehouse_name} → {trip.destination_warehouse_name} · {trip.driver_name || 'Chưa gán tài xế'}</p>
+                    <p className="mt-1 text-xs text-slate-500">{trip.scanned_bag_count || 0}/{trip.bag_count || 0} bao đã quét lên xe</p>
+                  </article>)}
+                  {!fleetTrips.length && <p className="text-sm text-slate-500">Chưa có chuyến xe.</p>}
+                </div>
+              </div>
+              <div className="space-y-3 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+                <div className="flex items-center justify-between"><h2 className="font-black">GPS xe tải đang chạy</h2><button type="button" onClick={taiDuLieuFleet} className="rounded-lg bg-slate-100 p-2" aria-label="Làm mới vị trí"><RotateCw size={16} /></button></div>
+                <div className="h-64 overflow-hidden rounded-xl">
+                  <MapContainer center={[10.762622, 106.660172]} zoom={10} style={{ width: '100%', height: '100%' }}>
+                    <UpdateMapSize /><TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" attribution="&copy; OpenStreetMap" />
+                    {linehaulPositions.map((position) => <Marker key={position.trip_id} position={[Number(position.lat), Number(position.lng)]} icon={shipperIcon}><Popup><strong>{position.trip_code} · {position.vehicle_plate}</strong><br />{position.driver_name}<br />{position.source_warehouse_name} → {position.destination_warehouse_name}</Popup></Marker>)}
+                  </MapContainer>
+                </div>
+                {!linehaulPositions.length && <p className="text-sm text-slate-500">Chưa có xe tải đang truyền vị trí GPS.</p>}
+              </div>
+            </section>
+          </div>
+        )}
+
         {tabHienTai === 'dieuphoan' && (
           <div className="animate-in fade-in duration-300 flex-1 flex flex-col">
             <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8 animate-in fade-in slide-in-from-top-4">

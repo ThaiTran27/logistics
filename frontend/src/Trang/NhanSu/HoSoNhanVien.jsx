@@ -32,10 +32,12 @@ const defaultForm = {
   password: '',
   role: 'pickup_driver',
   status: 'active',
+  warehouse_id: '',
 };
 
 export default function HoSoNhanVien() {
   const [nhanVienList, setNhanVienList] = useState([]);
+  const [danhSachKho, setDanhSachKho] = useState([]);
   const [nghiPhepList, setNghiPhepList] = useState([]);
   const [hoSoUngTuyen, setHoSoUngTuyen] = useState([]);
   const [yeuCauTuVan, setYeuCauTuVan] = useState([]);
@@ -54,6 +56,17 @@ export default function HoSoNhanVien() {
   const [anhChamCongDangXem, setAnhChamCongDangXem] = useState(null);
 
   const hrName = localStorage.getItem('full_name') || 'Phòng Nhân Sự';
+
+  const taiDanhSachKho = async () => {
+    try {
+      const response = await fetch(`${API_URL}/api/warehouses`);
+      const data = await response.json();
+      if (!response.ok || !data.success) throw new Error(data.message || 'Không tải được danh sách kho.');
+      setDanhSachKho((data.data || []).filter((warehouse) => warehouse.is_active));
+    } catch (error) {
+      console.error('Lỗi tải danh sách kho:', error);
+    }
+  };
 
   const renderAttendanceEvidence = (photo, lat, lng, label) => {
     const hasCoordinates = lat !== null && lat !== undefined && lng !== null && lng !== undefined
@@ -125,6 +138,7 @@ export default function HoSoNhanVien() {
     taiDuLieuNhanVien();
     taiDuLieuNghiPhep();
     taiYeuCauWebsite();
+    taiDanhSachKho();
   }, []);
 
   useEffect(() => {
@@ -306,6 +320,7 @@ export default function HoSoNhanVien() {
       password: '',
       role: nv.role,
       status: nv.status,
+      warehouse_id: nv.warehouse_id ? String(nv.warehouse_id) : '',
     });
     setTabHienTai('nhan-vien');
   };
@@ -383,6 +398,7 @@ export default function HoSoNhanVien() {
     const roles = {
       shop: 'Cửa Hàng',
       driver: 'Tài Xế',
+      linehaul_driver: 'Tài Xế Xe Tải',
       warehouse_manager: 'Thủ Kho',
       fleet_manager: 'Điều Phối Viên',
       accountant: 'Kế Toán',
@@ -404,9 +420,9 @@ export default function HoSoNhanVien() {
   });
 
   return (
-    <div className="flex min-h-screen bg-[#FFFBFB] font-sans text-slate-700">
-      <div className="w-72 bg-white border-r border-rose-100 shadow-sm flex flex-col z-10 justify-between">
-        <div>
+    <div className="flex h-screen overflow-hidden bg-[#FFFBFB] font-sans text-slate-700">
+      <div className="sticky top-0 z-10 flex h-screen w-72 shrink-0 flex-col justify-between border-r border-rose-100 bg-white shadow-sm">
+        <div className="min-h-0 flex-1 overflow-y-auto">
           <div className="p-8 border-b border-rose-50 flex items-center gap-3">
             <div className="bg-gradient-to-tr from-rose-500 to-pink-400 p-2.5 rounded-xl shadow-lg shadow-rose-200">
               <Briefcase className="text-white" size={24} />
@@ -414,6 +430,7 @@ export default function HoSoNhanVien() {
             <div>
               <h2 className="text-xl font-black text-slate-800 tracking-tight">Hành Chính</h2>
               <p className="text-xs font-bold text-rose-500 uppercase tracking-wider mt-0.5">Quản Trị Nhân Sự</p>
+              <p className="mt-1 max-w-40 truncate text-sm font-bold text-slate-700" title={hrName}>{hrName}</p>
             </div>
           </div>
 
@@ -461,22 +478,14 @@ export default function HoSoNhanVien() {
           </div>
         </div>
 
-        <div className="p-5 border-t border-rose-50">
-          <div className="flex items-center gap-3 px-5 py-4 mb-2 bg-rose-50/50 rounded-xl border border-rose-100">
-            <div className="w-10 h-10 rounded-full bg-rose-200 flex items-center justify-center font-black text-rose-700">
-              {(hrName || 'H').charAt(0)}
-            </div>
-            <div>
-              <p className="text-sm font-bold text-slate-700 truncate w-36">{hrName}</p>
-            </div>
-          </div>
+        <div className="shrink-0 border-t border-rose-50 p-5">
           <button onClick={dangXuat} className="w-full px-5 py-4 rounded-2xl font-bold text-left text-red-500 hover:bg-red-50 transition-colors flex items-center gap-3">
             <LogOut size={20} /> Đăng Xuất
           </button>
         </div>
       </div>
 
-      <div className="flex-1 p-10 overflow-y-auto">
+      <div className="min-w-0 flex-1 overflow-y-auto p-10">
         <div className="mb-8 flex justify-between items-end">
           <div>
             <h1 className="text-3xl font-black text-slate-800 tracking-tight">
@@ -593,6 +602,7 @@ export default function HoSoNhanVien() {
                   >
                     <option value="pickup_driver">Tài xế lấy hàng</option>
                     <option value="delivery_driver">Tài xế giao hàng</option>
+                    <option value="linehaul_driver">Tài xế xe tải (Line-haul)</option>
                     <option value="warehouse_manager">Thủ kho</option>
                     <option value="fleet_manager">Điều phối viên</option>
                     <option value="accountant">Kế toán</option>
@@ -602,6 +612,24 @@ export default function HoSoNhanVien() {
                     <option value="content_manager">Phòng nội dung</option>
                   </select>
                 </label>
+
+                {formNhanVien.role === 'warehouse_manager' && (
+                  <label className="block text-sm font-bold text-slate-700">
+                    Kho được phân công
+                    <select
+                      name="warehouse_id"
+                      value={formNhanVien.warehouse_id}
+                      onChange={handleInputChange}
+                      required
+                      className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-50 p-3 outline-none focus:border-rose-400 focus:bg-white"
+                    >
+                      <option value="">Chọn kho</option>
+                      {danhSachKho.map((warehouse) => (
+                        <option key={warehouse.id} value={warehouse.id}>{warehouse.name} · {warehouse.warehouse_type === 'central' ? 'Kho tổng' : 'Kho con'}</option>
+                      ))}
+                    </select>
+                  </label>
+                )}
 
                 <label className="block text-sm font-bold text-slate-700 md:col-span-2">
                   Trạng thái tài khoản
@@ -663,6 +691,7 @@ export default function HoSoNhanVien() {
                         <td className="p-6">
                           <p className="font-bold text-slate-800 text-base">{nv.full_name}</p>
                           <p className="text-xs text-slate-500 mt-1">{nv.email}</p>
+                          {nv.warehouse_name && <p className="mt-1 text-xs font-semibold text-indigo-600">Kho: {nv.warehouse_name}</p>}
                         </td>
                         <td className="p-6">
                           <span className="bg-slate-100 text-slate-600 px-3 py-1.5 rounded-lg font-bold text-xs">

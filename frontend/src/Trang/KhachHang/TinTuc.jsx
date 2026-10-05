@@ -1,4 +1,4 @@
-import { apiFetch as fetch } from '../../utils/apiFetch.js';
+import { apiFetch as fetch, resolveApiAssetUrl } from '../../utils/apiFetch.js';
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 
@@ -75,7 +75,7 @@ export default function TinTuc() {
         <div className="grid gap-6 md:grid-cols-3">
           {articles.map((article) => (
             <Link key={article.id} to={`/tin-tuc/${article.id}`} className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm transition hover:-translate-y-1 hover:shadow-lg">
-              <img src={article.image_url || 'https://images.unsplash.com/photo-1586528116311-ad8ed7c663be?auto=format&fit=crop&w=800&q=80'} alt={article.title} className="h-48 w-full object-cover" />
+              <img src={resolveApiAssetUrl(article.image_url) || 'https://images.unsplash.com/photo-1586528116311-ad8ed7c663be?auto=format&fit=crop&w=800&q=80'} alt={article.title} className="h-48 w-full object-cover" />
               <div className="p-6">
                 <span className="inline-flex rounded-full bg-blue-50 px-2.5 py-1 text-xs font-bold text-blue-600">
                   {article.category || 'Tin tức'}

@@ -25,6 +25,7 @@ const normalizeRole = (value) => {
     coordinator: 'fleet_manager',
     shipper: 'driver',
     driver: 'driver',
+    linehaul_driver: 'linehaul_driver',
     admin: 'director',
     warehouse: 'warehouse_manager',
     kho: 'warehouse_manager',
@@ -54,6 +55,7 @@ export default function PublicLayout() {
   const roleMap = {
     shop: '/cua-hang',
     driver: '/tai-xe',
+    linehaul_driver: '/tai-xe',
     warehouse_manager: '/kho',
     fleet_manager: '/dieu-hanh',
     accountant: '/ke-toan',

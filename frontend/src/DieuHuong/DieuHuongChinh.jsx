@@ -165,7 +165,13 @@ function TimKiemBuuCuc() {
 export default function DieuHuongChinh() {
   const location = useLocation();
   const userRole = localStorage.getItem('role') || localStorage.getItem('user_role');
-  const showAttendanceShortcut = userRole && userRole !== 'customer' && location.pathname !== '/cham-cong';
+  const isPublicCustomerPage = location.pathname === '/'
+    || ['/dich-vu', '/bang-gia', '/tin-tuc', '/tuyen-dung', '/uoc-tinh-cuoc', '/tim-buu-cuc'].includes(location.pathname)
+    || location.pathname.startsWith('/tin-tuc/');
+  const showAttendanceShortcut = userRole
+    && !['customer', 'shop'].includes(userRole)
+    && !isPublicCustomerPage
+    && location.pathname !== '/cham-cong';
 
   return (
     <>
@@ -191,11 +197,15 @@ export default function DieuHuongChinh() {
       } />
 
       <Route path="/tai-xe" element={
-        <BaoVeTuyenDuong allowedRoles={['driver', 'pickup_driver', 'delivery_driver']}><AppTaiXe /></BaoVeTuyenDuong>
+        <BaoVeTuyenDuong allowedRoles={['driver', 'pickup_driver', 'delivery_driver', 'linehaul_driver']}><AppTaiXe /></BaoVeTuyenDuong>
       } />
 
       <Route path="/kho" element={
         <BaoVeTuyenDuong allowedRoles={['warehouse_manager']}><QuetMaVach /></BaoVeTuyenDuong>
+      } />
+
+      <Route path="/quan-ly-kho" element={
+        <BaoVeTuyenDuong allowedRoles={['director']}><QuetMaVach /></BaoVeTuyenDuong>
       } />
 
       <Route path="/dieu-hanh" element={
@@ -211,7 +221,7 @@ export default function DieuHuongChinh() {
       } />
 
       <Route path="/cham-cong" element={
-        <BaoVeTuyenDuong allowedRoles={['driver', 'pickup_driver', 'delivery_driver', 'shop', 'warehouse_manager', 'fleet_manager', 'accountant', 'hr_manager', 'director', 'content_manager']}><ChamCong /></BaoVeTuyenDuong>
+        <BaoVeTuyenDuong allowedRoles={['driver', 'pickup_driver', 'delivery_driver', 'warehouse_manager', 'fleet_manager', 'accountant', 'hr_manager', 'director', 'content_manager']}><ChamCong /></BaoVeTuyenDuong>
       } />
 
       <Route path="/admin" element={

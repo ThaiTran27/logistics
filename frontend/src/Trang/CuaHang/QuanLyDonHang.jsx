@@ -1048,11 +1048,11 @@ export default function QuanLyDonHang() {
 
   return (
     <>
-      <div className="flex min-h-screen bg-[#F0F7FF] font-sans text-slate-700 print:hidden">
+      <div className="flex h-screen overflow-hidden bg-[#F0F7FF] font-sans text-slate-700 print:hidden">
         
         {/* SIDEBAR */}
-        <div className="w-72 bg-white border-r border-blue-50 shadow-[0_0_20px_rgba(0,0,0,0.02)] flex flex-col z-10 justify-between">
-          <div>
+        <div className="sticky top-0 z-10 flex h-screen w-72 shrink-0 flex-col justify-between border-r border-blue-50 bg-white shadow-[0_0_20px_rgba(0,0,0,0.02)]">
+          <div className="min-h-0 flex-1 overflow-y-auto">
             <div className="p-8 border-b border-blue-50 flex items-center gap-3">
               <div className="bg-gradient-to-tr from-blue-600 to-blue-400 p-2.5 rounded-xl shadow-blue-200 shadow-lg">
                 <Store className="text-white" size={24} />
@@ -1060,6 +1060,7 @@ export default function QuanLyDonHang() {
               <div>
                 <h2 className="text-xl font-black text-slate-800 tracking-tight">Cổng Đối Tác</h2>
                 <p className="text-xs font-bold text-blue-500 uppercase tracking-wider mt-0.5">Quản lý Cửa Hàng</p>
+                <p className="mt-1 max-w-40 truncate text-sm font-bold text-slate-700" title={shopName}>{shopName}</p>
               </div>
             </div>
             
@@ -1116,7 +1117,7 @@ export default function QuanLyDonHang() {
             </div>
           </div>
 
-          <div className="p-5 border-t border-blue-50">
+          <div className="shrink-0 border-t border-blue-50 p-5">
             <button 
               onClick={dangXuat}
               className="w-full px-5 py-4 rounded-2xl font-bold text-left transition-all duration-300 flex items-center gap-4 group bg-transparent text-red-500 hover:bg-red-50 hover:text-red-600"
@@ -1128,7 +1129,7 @@ export default function QuanLyDonHang() {
         </div>
 
         {/* MAIN CONTENT */}
-        <div className="flex-1 p-10 overflow-y-auto">
+        <div className="min-w-0 flex-1 overflow-y-auto p-10">
           <div className="mb-8 flex justify-between items-end">
             <div>
               <h1 className="text-3xl font-black text-slate-800 tracking-tight">

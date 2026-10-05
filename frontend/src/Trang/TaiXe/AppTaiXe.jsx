@@ -66,7 +66,202 @@ const socket = io('http://localhost:5000', {
   auth: { token: localStorage.getItem('access_token') }
 });
 
+function LinehaulDriverApp() {
+  const driverName = localStorage.getItem('full_name') || 'Tài xế xe tải';
+  const [trips, setTrips] = useState([]);
+  const [selectedTripId, setSelectedTripId] = useState('');
+  const [scanning, setScanning] = useState(false);
+  const [notice, setNotice] = useState('');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [currentLocation, setCurrentLocation] = useState(null);
+  const scanBusyRef = useRef(false);
+  const activeTrip = trips.find((trip) => String(trip.id) === selectedTripId) || trips[0] || null;
+  const activeTripId = activeTrip?.id;
+  const activeTripStatus = activeTrip?.status;
+
+  const taiChuyenXe = useCallback(async () => {
+    try {
+      const response = await fetch('http://localhost:5000/api/driver/trips');
+      const data = await response.json();
+      if (!response.ok || !data.success) throw new Error(data.message || 'Không tải được chuyến xe.');
+      setTrips(data.data || []);
+      setSelectedTripId((current) => data.data?.some((trip) => String(trip.id) === current)
+        ? current : String(data.data?.[0]?.id || ''));
+      setError('');
+    } catch (loadError) {
+      setError(loadError.message || 'Không tải được chuyến xe.');
+    }
+  }, []);
+
+  useEffect(() => {
+    const initialLoad = window.setTimeout(taiChuyenXe, 0);
+    const intervalId = window.setInterval(taiChuyenXe, 30000);
+    return () => {
+      window.clearTimeout(initialLoad);
+      window.clearInterval(intervalId);
+    };
+  }, [taiChuyenXe]);
+
+  const xacNhanQuetBao = useCallback(async (bagCode) => {
+    setBusy(true);
+    setError('');
+    try {
+      const response = await fetch('http://localhost:5000/api/driver/trips/scan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ bag_code: bagCode })
+      });
+      const data = await response.json();
+      if (!response.ok || !data.success) throw new Error(data.message || 'Không thể xác nhận bao.');
+      setNotice(data.message);
+      await taiChuyenXe();
+      if (data.trip_ready) setScanning(false);
+    } catch (scanError) {
+      setError(scanError.message || 'Không thể xác nhận bao.');
+    } finally {
+      setBusy(false);
+    }
+  }, [taiChuyenXe]);
+
+  useEffect(() => {
+    if (!scanning) return undefined;
+    let processing = false;
+    const scanner = new Html5QrcodeScanner('linehaul-driver-scanner', {
+      fps: 8,
+      qrbox: { width: 260, height: 160 },
+      formatsToSupport: [
+        Html5QrcodeSupportedFormats.QR_CODE,
+        Html5QrcodeSupportedFormats.CODE_128,
+        Html5QrcodeSupportedFormats.CODE_39
+      ],
+      rememberLastUsedCamera: false
+    }, false);
+    scanner.render(async (decodedText) => {
+      if (processing || scanBusyRef.current) return;
+      processing = true;
+      scanBusyRef.current = true;
+      try {
+        await xacNhanQuetBao(decodedText.trim());
+      } finally {
+        scanBusyRef.current = false;
+      }
+      window.setTimeout(() => { processing = false; }, 1000);
+    }, () => {});
+    return () => scanner.clear().catch((scanError) => console.warn('Không thể dừng camera quét bao:', scanError));
+  }, [scanning, xacNhanQuetBao]);
+
+  const batDauChuyen = async () => {
+    if (!activeTrip || Number(activeTrip.scanned_bag_count) !== Number(activeTrip.bag_count) || !Number(activeTrip.bag_count)) return;
+    setBusy(true);
+    setError('');
+    try {
+      const response = await fetch(`http://localhost:5000/api/driver/trips/${activeTrip.id}/start`, { method: 'POST' });
+      const data = await response.json();
+      if (!response.ok || !data.success) throw new Error(data.message || 'Không thể bắt đầu chuyến xe.');
+      setNotice(data.message);
+      await taiChuyenXe();
+    } catch (startError) {
+      setError(startError.message || 'Không thể bắt đầu chuyến xe.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const baoDaDenKho = async () => {
+    if (!activeTrip) return;
+    setBusy(true);
+    setError('');
+    try {
+      const response = await fetch(`http://localhost:5000/api/driver/trips/${activeTrip.id}/arrive`, { method: 'POST' });
+      const data = await response.json();
+      if (!response.ok || !data.success) throw new Error(data.message || 'Không thể báo đã đến kho.');
+      setNotice(data.message);
+      await taiChuyenXe();
+    } catch (arrivalError) {
+      setError(arrivalError.message || 'Không thể báo đã đến kho.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!activeTripId || activeTripStatus !== 'in_transit' || !navigator.geolocation) return undefined;
+    const watchId = navigator.geolocation.watchPosition(async (position) => {
+      const { latitude: lat, longitude: lng } = position.coords;
+      setCurrentLocation({ lat, lng });
+      try {
+        const response = await fetch(`http://localhost:5000/api/driver/trips/${activeTripId}/location`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ lat, lng })
+        });
+        const data = await response.json();
+        if (!response.ok || !data.success) throw new Error(data.message || 'Không gửi được vị trí GPS.');
+      } catch (gpsError) {
+        setError(gpsError.message || 'Không gửi được vị trí GPS.');
+      }
+    }, (gpsError) => setError(`Không thể lấy GPS: ${gpsError.message}`), { enableHighAccuracy: true, maximumAge: 10000 });
+    return () => navigator.geolocation.clearWatch(watchId);
+  }, [activeTripId, activeTripStatus]);
+
+  const dangXuat = () => {
+    localStorage.clear();
+    window.location.href = '/dang-nhap';
+  };
+
+  return (
+    <main className="min-h-screen bg-slate-100 p-4 text-slate-800 sm:p-8">
+      <div className="mx-auto max-w-3xl">
+        <header className="rounded-3xl bg-gradient-to-r from-slate-800 to-indigo-800 p-6 text-white shadow-lg">
+          <div className="flex items-start justify-between gap-4">
+            <div><p className="text-sm font-bold text-indigo-200">SMART LOGISTICS · LINE-HAUL</p><h1 className="mt-2 text-2xl font-black">Xin chào, {driverName}</h1><p className="mt-1 text-sm text-slate-300">Ứng dụng tài xế trung chuyển liên kho</p></div>
+            <button type="button" onClick={dangXuat} className="rounded-xl bg-white/10 px-4 py-2 text-sm font-bold hover:bg-white/20">Đăng xuất</button>
+          </div>
+        </header>
+        {error && <p role="alert" className="mt-4 rounded-xl border border-red-200 bg-red-50 p-4 font-bold text-red-700">{error}</p>}
+        {notice && <p role="status" className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50 p-4 font-bold text-emerald-800">{notice}</p>}
+        <div className="mt-5 flex items-center justify-between"><h2 className="text-xl font-black">Chuyến được phân công</h2><button type="button" onClick={taiChuyenXe} className="rounded-lg bg-white px-4 py-2 text-sm font-bold shadow-sm">Làm mới</button></div>
+        {!trips.length ? <p className="mt-4 rounded-2xl bg-white p-6 text-slate-500 shadow-sm">Chưa có chuyến xe được phân công.</p> : (
+          <>
+            {trips.length > 1 && <label className="mt-4 block text-sm font-bold">Chọn chuyến
+              <select value={activeTrip?.id || ''} onChange={(event) => setSelectedTripId(event.target.value)} className="mt-2 w-full rounded-xl border border-slate-200 bg-white p-3">
+                {trips.map((trip) => <option key={trip.id} value={trip.id}>{trip.trip_code} · {trip.source_warehouse_name} → {trip.destination_warehouse_name}</option>)}
+              </select>
+            </label>}
+            {activeTrip && <article className="mt-4 space-y-5 rounded-2xl bg-white p-5 shadow-sm sm:p-7">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div><p className="text-xs font-black uppercase text-indigo-600">{activeTrip.trip_code}</p><h3 className="mt-1 text-xl font-black">{activeTrip.source_warehouse_name} → {activeTrip.destination_warehouse_name}</h3><p className="mt-1 text-sm text-slate-500">{activeTrip.vehicle_plate}</p></div>
+                <span className="rounded-full bg-indigo-50 px-3 py-2 text-sm font-black text-indigo-700">{activeTrip.status === 'in_transit' ? 'Đang di chuyển' : activeTrip.status === 'arrived' ? 'Đã đến kho' : 'Chờ bốc hàng'}</span>
+              </div>
+              <div className="rounded-xl bg-slate-50 p-4">
+                <div className="flex items-center justify-between"><strong>Kiểm tra bao lên xe</strong><span className="font-black text-indigo-700">{activeTrip.scanned_bag_count || 0}/{activeTrip.bag_count || 0}</span></div>
+                <div className="mt-3 space-y-2">{(activeTrip.bags || []).map((bag) => <div key={bag.bag_id} className="flex items-center justify-between rounded-lg bg-white p-3 text-sm"><span className="font-mono font-bold">{bag.bag_code}</span><span className={bag.driver_scanned_at ? 'font-bold text-emerald-700' : 'font-bold text-amber-700'}>{bag.driver_scanned_at ? 'Đã quét' : 'Chưa quét'}</span></div>)}</div>
+              </div>
+              {['planned', 'loading'].includes(activeTrip.status) && <>
+                <button type="button" disabled={busy || Number(activeTrip.scanned_bag_count) >= Number(activeTrip.bag_count)} onClick={() => { setNotice(''); setScanning(true); }} className="flex w-full items-center justify-center gap-2 rounded-xl bg-indigo-600 px-4 py-4 font-black text-white disabled:opacity-50"><ScanLine size={18} /> Quét bao lên xe</button>
+                <button type="button" disabled={busy || !Number(activeTrip.bag_count) || Number(activeTrip.scanned_bag_count) !== Number(activeTrip.bag_count)} onClick={batDauChuyen} className="w-full rounded-xl bg-emerald-600 px-4 py-4 font-black text-white disabled:cursor-not-allowed disabled:opacity-40">Bắt đầu khởi hành</button>
+              </>}
+              {activeTrip.status === 'in_transit' && <div className="space-y-3"><p className="rounded-xl bg-blue-50 p-4 text-sm font-bold text-blue-800">GPS {currentLocation ? `đang gửi · ${currentLocation.lat.toFixed(5)}, ${currentLocation.lng.toFixed(5)}` : 'đang chờ quyền truy cập vị trí'}.</p><button type="button" disabled={busy} onClick={baoDaDenKho} className="w-full rounded-xl bg-emerald-700 px-4 py-4 font-black text-white disabled:opacity-50">Đã đến kho đích</button></div>}
+              {activeTrip.status === 'arrived' && <p className="rounded-xl bg-amber-50 p-4 text-sm font-bold text-amber-800">Đã báo đến nơi. Chờ thủ kho quét nhận các bao để hoàn tất chuyến xe.</p>}
+            </article>}
+          </>
+        )}
+        {scanning && <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/90 p-4"><section className="w-full max-w-md rounded-2xl bg-white p-5">
+          <div className="mb-4 flex items-center justify-between"><h3 className="font-black">Quét mã bao đã niêm phong</h3><button type="button" onClick={() => setScanning(false)} className="rounded-lg bg-slate-100 px-3 py-2 font-bold">Đóng</button></div>
+          <div id="linehaul-driver-scanner" />
+        </section></div>}
+      </div>
+    </main>
+  );
+}
+
 export default function AppTaiXe() {
+  const role = localStorage.getItem('role') || localStorage.getItem('user_role');
+  return role === 'linehaul_driver' ? <LinehaulDriverApp /> : <MotorcycleDriverApp />;
+}
+
+function MotorcycleDriverApp() {
   const [donHang, setDonHang] = useState([]);
   const [tabHienTai, setTabHienTai] = useState('dashboard');
   const [viTien, setViTien] = useState(0);

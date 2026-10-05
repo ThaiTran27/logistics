@@ -15,6 +15,13 @@ DROP TABLE IF EXISTS driver_wallet_reservations;
 DROP TABLE IF EXISTS driver_wallets;
 DROP TABLE IF EXISTS driver_cash_remittances;
 DROP TABLE IF EXISTS driver_expense_claims;
+DROP TABLE IF EXISTS driver_incidents;
+DROP TABLE IF EXISTS linehaul_trip_bags;
+DROP TABLE IF EXISTS linehaul_trip_positions;
+DROP TABLE IF EXISTS shipment_bag_orders;
+DROP TABLE IF EXISTS linehaul_trips;
+DROP TABLE IF EXISTS shipment_bags;
+DROP TABLE IF EXISTS trucks;
 DROP TABLE IF EXISTS cod_settlements;
 DROP TABLE IF EXISTS shop_redelivery_requests;
 DROP TABLE IF EXISTS shop_webhook_configs;
@@ -31,6 +38,7 @@ DROP TABLE IF EXISTS service_requests;
 DROP TABLE IF EXISTS job_applications;
 DROP TABLE IF EXISTS attendance_records;
 DROP TABLE IF EXISTS employee_salaries;
+DROP TABLE IF EXISTS employee_payroll_adjustments;
 DROP TABLE IF EXISTS department_leaders;
 DROP TABLE IF EXISTS leave_requests;
 DROP TABLE IF EXISTS department_reports;
@@ -46,6 +54,7 @@ CREATE TABLE users (
   password VARCHAR(255) NOT NULL,
   full_name VARCHAR(255) NOT NULL,
   role VARCHAR(50) NOT NULL DEFAULT 'customer',
+  warehouse_id INT NULL,
   status VARCHAR(20) NOT NULL DEFAULT 'active',
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -191,6 +200,16 @@ CREATE TABLE warehouse_bin_locations (
   KEY idx_warehouse_bin_active (warehouse_id, is_active)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+CREATE TABLE trucks (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  vehicle_plate VARCHAR(30) NOT NULL UNIQUE,
+  max_payload_kg DECIMAL(10,2) NOT NULL DEFAULT 0,
+  status ENUM('ready','in_transit','maintenance') NOT NULL DEFAULT 'ready',
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  KEY idx_trucks_status (status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 CREATE TABLE warehouse_inventory_audits (
   id BIGINT AUTO_INCREMENT PRIMARY KEY,
   warehouse_id INT NOT NULL,
@@ -230,6 +249,10 @@ CREATE TABLE driver_dispatch_profiles (
 
 INSERT INTO warehouses (warehouse_type, ward_name, name, address, lat, lng, is_configured, is_active)
 VALUES ('central', '__CENTRAL__', 'Kho tổng Smart Logistics', '10.762622, 106.660172, TP. Hồ Chí Minh', 10.762622, 106.660172, 1, 1);
+
+INSERT INTO warehouses (warehouse_type, ward_name, name, address, lat, lng, is_configured, is_active) VALUES
+  ('ward', 'Gò Vấp', 'Kho con Gò Vấp', 'Số 2 Nguyễn Văn Bảo, Phường 4, Gò Vấp, TP. Hồ Chí Minh', 10.8231, 106.6881, 1, 1),
+  ('ward', 'Quận 1', 'Kho con Quận 1', 'Số 15 Lê Duẩn, Bến Nghé, Quận 1, TP. Hồ Chí Minh', 10.7798, 106.6990, 1, 1);
 
 CREATE TABLE cod_settlements (
   id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -301,10 +324,11 @@ CREATE TABLE linehaul_trips (
   id BIGINT AUTO_INCREMENT PRIMARY KEY,
   trip_code VARCHAR(40) NOT NULL UNIQUE,
   vehicle_plate VARCHAR(30) NOT NULL,
+  truck_id INT DEFAULT NULL,
   driver_id INT DEFAULT NULL,
   source_warehouse_id INT NOT NULL,
   destination_warehouse_id INT NOT NULL,
-  status ENUM('planned','loading','in_transit','completed','cancelled') NOT NULL DEFAULT 'planned',
+  status ENUM('planned','loading','in_transit','arrived','completed','cancelled') NOT NULL DEFAULT 'planned',
   departed_at DATETIME DEFAULT NULL,
   arrived_at DATETIME DEFAULT NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -318,6 +342,15 @@ CREATE TABLE linehaul_trip_bags (
   driver_scanned_at DATETIME DEFAULT NULL,
   PRIMARY KEY (trip_id, bag_id),
   UNIQUE KEY uq_linehaul_bag_trip (bag_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE linehaul_trip_positions (
+  trip_id BIGINT PRIMARY KEY,
+  driver_id INT NOT NULL,
+  lat DOUBLE NOT NULL,
+  lng DOUBLE NOT NULL,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  KEY idx_linehaul_position_driver (driver_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE driver_cash_remittances (
@@ -518,27 +551,39 @@ CREATE TABLE leave_requests (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 INSERT INTO users (email, password, full_name, role, status) VALUES
-  ('admin@smartlogistics.vn', 'admin123', 'Trần Minh Thảo', 'director', 'active'),
-  ('hr@smartlogistics.vn', 'hr123', 'Trương Phòng Nhân Sự', 'hr_manager', 'active'),
-  ('dieu_hanh@smartlogistics.vn', 'dieu_hanh123', 'Diệu Hành', 'fleet_manager', 'active'),
-  ('ketoan@smartlogistics.vn', 'ketoan123', 'Nguyễn Thị Kế Toán', 'accountant', 'active'),
-  ('kho@smartlogistics.vn', 'kho123', 'Trần Vũ Thủ Kho', 'warehouse_manager', 'active'),
-  ('shop@smartlogistics.vn', 'shop123', 'Cửa Hàng Trần Minh', 'shop', 'active'),
-  ('taixe1@smartlogistics.vn', 'driver123', 'Nguyễn Văn Bửu Tài', 'pickup_driver', 'active'),
-  ('content@smartlogistics.vn', 'content123', 'Phòng ban nội dung', 'content_manager', 'active');
+  ('admin@smartlogistics.vn', '123', 'Trần Minh Thảo', 'director', 'active'),
+  ('hr@smartlogistics.vn', '123', 'Trương Phòng Nhân Sự', 'hr_manager', 'active'),
+  ('dieu_hanh@smartlogistics.vn', '123', 'Diệu Hành', 'fleet_manager', 'active'),
+  ('ketoan@smartlogistics.vn', '123', 'Nguyễn Thị Kế Toán', 'accountant', 'active'),
+  ('kho@smartlogistics.vn', '123', 'Trần Vũ Thủ Kho', 'warehouse_manager', 'active'),
+  ('shop@smartlogistics.vn', '123', 'Cửa Hàng Trần Minh', 'shop', 'active'),
+  ('taixe1@smartlogistics.vn', '123', 'Nguyễn Văn Bửu Tài', 'pickup_driver', 'active'),
+  ('content@smartlogistics.vn', '123', 'Phòng ban nội dung', 'content_manager', 'active');
 
 INSERT INTO users (email, password, full_name, role, status) VALUES
-  ('taixe2@smartlogistics.vn', 'driver123', 'Bùi Quang Huy', 'pickup_driver', 'active'),
-  ('taixe3@smartlogistics.vn', 'driver123', 'Lê Hoàng Nam', 'delivery_driver', 'active'),
-  ('taixe4@smartlogistics.vn', 'driver123', 'Phạm Quốc Đạt', 'delivery_driver', 'active'),
-  ('kho2@smartlogistics.vn', 'staff123', 'Võ Khánh Linh', 'warehouse_manager', 'active'),
-  ('dieu_hanh2@smartlogistics.vn', 'staff123', 'Lê Gia Bảo', 'fleet_manager', 'active'),
-  ('ketoan2@smartlogistics.vn', 'staff123', 'Phạm Hải Yến', 'accountant', 'active'),
-  ('hr2@smartlogistics.vn', 'staff123', 'Nguyễn Ngọc Mai', 'hr_manager', 'active'),
-  ('content2@smartlogistics.vn', 'staff123', 'Đặng Thu Hà', 'content_manager', 'active'),
-  ('shop2@smartlogistics.vn', 'shop123', 'Công ty Minh Long', 'shop', 'active')
+  ('taixe2@smartlogistics.vn', '123', 'Bùi Quang Huy', 'pickup_driver', 'active'),
+  ('taixe3@smartlogistics.vn', '123', 'Lê Hoàng Nam', 'delivery_driver', 'active'),
+  ('taixe4@smartlogistics.vn', '123', 'Phạm Quốc Đạt', 'delivery_driver', 'active'),
+  ('kho2@smartlogistics.vn', '123', 'Võ Khánh Linh', 'warehouse_manager', 'active'),
+  ('dieu_hanh2@smartlogistics.vn', '123', 'Lê Gia Bảo', 'fleet_manager', 'active'),
+  ('ketoan2@smartlogistics.vn', '123', 'Phạm Hải Yến', 'accountant', 'active'),
+  ('hr2@smartlogistics.vn', '123', 'Nguyễn Ngọc Mai', 'hr_manager', 'active'),
+  ('content2@smartlogistics.vn', '123', 'Đặng Thu Hà', 'content_manager', 'active'),
+  ('shop2@smartlogistics.vn', '123', 'Công ty Minh Long', 'shop', 'active')
 ON DUPLICATE KEY UPDATE
-  full_name = VALUES(full_name), role = VALUES(role), status = VALUES(status);
+  password = VALUES(password), full_name = VALUES(full_name), role = VALUES(role), status = VALUES(status);
+
+UPDATE users u
+JOIN warehouses w ON w.warehouse_type = 'central' AND w.ward_name = '__CENTRAL__'
+SET u.warehouse_id = w.id
+WHERE u.email = 'kho@smartlogistics.vn'
+  AND u.role = 'warehouse_manager';
+
+UPDATE users u
+JOIN warehouses w ON w.warehouse_type = 'ward' AND w.ward_name = 'Gò Vấp'
+SET u.warehouse_id = w.id
+WHERE u.email = 'kho2@smartlogistics.vn'
+  AND u.role = 'warehouse_manager';
 
 INSERT INTO orders (
   tracking_code, shop_id, shipper_id, receiver_name, receiver_phone, receiver_address,

@@ -1,4 +1,4 @@
-import { apiFetch as fetch } from '../../utils/apiFetch.js';
+import { apiFetch as fetch, resolveApiAssetUrl } from '../../utils/apiFetch.js';
 import { useEffect, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { ArrowLeft } from 'lucide-react';
@@ -42,7 +42,7 @@ export default function TinTucChiTiet() {
 
       <article className="bg-white rounded-3xl shadow-sm border border-slate-200 overflow-hidden">
         {article.image_url && (
-          <img src={article.image_url} alt={article.title} className="w-full h-80 object-cover" />
+          <img src={resolveApiAssetUrl(article.image_url)} alt={article.title} className="w-full h-80 object-cover" />
         )}
 
         <div className="p-8 md:p-10">

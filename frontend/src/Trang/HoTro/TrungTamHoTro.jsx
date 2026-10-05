@@ -7,6 +7,7 @@ const API_URL = 'http://localhost:5000';
 
 export default function TrungTamHoTro() {
   const token = localStorage.getItem('access_token');
+  const staffName = localStorage.getItem('full_name') || 'Nhân viên hỗ trợ';
   const [sessions, setSessions] = useState([]);
   const [selected, setSelected] = useState(null);
   const [messages, setMessages] = useState([]);
@@ -143,6 +144,7 @@ export default function TrungTamHoTro() {
           <div>
             <h1 className="flex items-center gap-2 text-2xl font-black"><Headphones className="text-blue-700" /> Trung tâm Hỗ trợ</h1>
             <p className="mt-1 text-sm text-slate-500">Hàng chờ khách hàng và hội thoại trực tiếp.</p>
+            <p className="mt-1 text-sm font-bold text-slate-700">{staffName}</p>
           </div>
           <button onClick={loadSessions} className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-bold hover:bg-slate-50">Làm mới hàng chờ</button>
         </header>
