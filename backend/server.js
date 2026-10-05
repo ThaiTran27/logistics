@@ -4061,12 +4061,21 @@ app.get('/api/linehaul/positions', (req, res) => {
 
 app.get('/api/driver/trips', (req, res) => {
   db.query(
-    `SELECT t.*, source.name AS source_warehouse_name, destination.name AS destination_warehouse_name,
+    `SELECT t.*, source.name AS source_warehouse_name, source.address AS source_warehouse_address,
+      destination.name AS destination_warehouse_name, destination.address AS destination_warehouse_address,
+      destination.lat AS destination_lat, destination.lng AS destination_lng,
+      truck.max_payload_kg,
+      (SELECT COALESCE(SUM(o.weight_kg), 0)
+       FROM linehaul_trip_bags weight_tb
+       JOIN shipment_bag_orders weight_bo ON weight_bo.bag_id = weight_tb.bag_id
+       JOIN orders o ON o.id = weight_bo.order_id
+       WHERE weight_tb.trip_id = t.id) AS total_weight_kg,
       COUNT(tb.bag_id) AS bag_count,
       SUM(CASE WHEN tb.driver_scanned_at IS NOT NULL THEN 1 ELSE 0 END) AS scanned_bag_count
      FROM linehaul_trips t
      JOIN warehouses source ON source.id = t.source_warehouse_id
      JOIN warehouses destination ON destination.id = t.destination_warehouse_id
+     JOIN trucks truck ON truck.id = t.truck_id
      LEFT JOIN linehaul_trip_bags tb ON tb.trip_id = t.id
      WHERE t.driver_id = ? AND t.status NOT IN ("completed","cancelled")
      GROUP BY t.id ORDER BY t.created_at DESC`,
@@ -4076,9 +4085,15 @@ app.get('/api/driver/trips', (req, res) => {
       if (!trips.length) return res.json({ success: true, data: [] });
       const tripIds = trips.map((trip) => Number(trip.id));
       db.query(
-        `SELECT tb.trip_id, b.id AS bag_id, b.bag_code, b.status, tb.driver_scanned_at
+        `SELECT tb.trip_id, b.id AS bag_id, b.bag_code, b.status, tb.driver_scanned_at,
+          COUNT(bo.order_id) AS order_count,
+          COALESCE(SUM(o.weight_kg), 0) AS weight_kg
          FROM linehaul_trip_bags tb JOIN shipment_bags b ON b.id = tb.bag_id
-         WHERE tb.trip_id IN (?) ORDER BY b.bag_code`,
+         LEFT JOIN shipment_bag_orders bo ON bo.bag_id = b.id
+         LEFT JOIN orders o ON o.id = bo.order_id
+         WHERE tb.trip_id IN (?)
+         GROUP BY tb.trip_id, b.id
+         ORDER BY b.bag_code`,
         [tripIds],
         (bagsErr, bags) => {
           if (bagsErr) return res.status(500).json({ success: false, message: 'Không tải được bao của chuyến: ' + bagsErr.sqlMessage });

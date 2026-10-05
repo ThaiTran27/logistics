@@ -2,8 +2,8 @@ import { apiFetch as fetch } from '../../utils/apiFetch.js';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Html5QrcodeScanner, Html5QrcodeSupportedFormats } from 'html5-qrcode';
 import { io } from 'socket.io-client';
-import { MapPin, Package, CheckCircle, XCircle, LogOut, Navigation, Wallet, UserCircle, Bike, Map, Send, CalendarOff, Camera, AlertTriangle, X, ShieldCheck, House, PackageCheck, Banknote, Siren, Wifi, WifiOff, ScanLine, Route } from 'lucide-react';
-import { MapContainer, TileLayer, Marker, Popup } from 'react-leaflet';
+import { MapPin, Package, CheckCircle, XCircle, LogOut, Navigation, Wallet, UserCircle, Bike, Map, Send, CalendarOff, Camera, AlertTriangle, X, ShieldCheck, House, PackageCheck, Banknote, Siren, Wifi, WifiOff, ScanLine, Route, Truck } from 'lucide-react';
+import { MapContainer, TileLayer, Marker, Popup, Polyline } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
 
@@ -79,6 +79,14 @@ function LinehaulDriverApp() {
   const activeTrip = trips.find((trip) => String(trip.id) === selectedTripId) || trips[0] || null;
   const activeTripId = activeTrip?.id;
   const activeTripStatus = activeTrip?.status;
+  const destinationCoordinates = activeTrip
+    && Number.isFinite(Number(activeTrip.destination_lat))
+    && Number.isFinite(Number(activeTrip.destination_lng))
+    && activeTrip.destination_lat !== null && activeTrip.destination_lat !== ''
+    && activeTrip.destination_lng !== null && activeTrip.destination_lng !== ''
+    ? [Number(activeTrip.destination_lat), Number(activeTrip.destination_lng)]
+    : null;
+  const currentCoordinates = currentLocation ? [currentLocation.lat, currentLocation.lng] : null;
 
   const taiChuyenXe = useCallback(async () => {
     try {
@@ -211,18 +219,23 @@ function LinehaulDriverApp() {
   };
 
   return (
-    <main className="min-h-screen bg-slate-100 p-4 text-slate-800 sm:p-8">
+    <main className="min-h-screen bg-slate-100 p-4 pb-10 text-slate-800 sm:p-8">
       <div className="mx-auto max-w-3xl">
         <header className="rounded-3xl bg-gradient-to-r from-slate-800 to-indigo-800 p-6 text-white shadow-lg">
           <div className="flex items-start justify-between gap-4">
             <div><p className="text-sm font-bold text-indigo-200">SMART LOGISTICS · LINE-HAUL</p><h1 className="mt-2 text-2xl font-black">Xin chào, {driverName}</h1><p className="mt-1 text-sm text-slate-300">Ứng dụng tài xế trung chuyển liên kho</p></div>
-            <button type="button" onClick={dangXuat} className="rounded-xl bg-white/10 px-4 py-2 text-sm font-bold hover:bg-white/20">Đăng xuất</button>
+            <button type="button" onClick={dangXuat} className="shrink-0 rounded-xl bg-white/10 px-4 py-2 text-sm font-bold hover:bg-white/20">Đăng xuất</button>
+          </div>
+          <div className="mt-5 grid grid-cols-3 gap-2 text-center text-xs sm:text-sm">
+            <div className="rounded-xl bg-white/10 p-3"><strong className="block text-xl">{trips.length}</strong>Chuyến đang giao</div>
+            <div className="rounded-xl bg-white/10 p-3"><strong className="block text-xl">{trips.filter((trip) => trip.status === 'in_transit').length}</strong>Đang di chuyển</div>
+            <div className="rounded-xl bg-white/10 p-3"><strong className="block text-xl">{trips.reduce((sum, trip) => sum + Number(trip.bag_count || 0), 0)}</strong>Bao hàng</div>
           </div>
         </header>
         {error && <p role="alert" className="mt-4 rounded-xl border border-red-200 bg-red-50 p-4 font-bold text-red-700">{error}</p>}
         {notice && <p role="status" className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50 p-4 font-bold text-emerald-800">{notice}</p>}
         <div className="mt-5 flex items-center justify-between"><h2 className="text-xl font-black">Chuyến được phân công</h2><button type="button" onClick={taiChuyenXe} className="rounded-lg bg-white px-4 py-2 text-sm font-bold shadow-sm">Làm mới</button></div>
-        {!trips.length ? <p className="mt-4 rounded-2xl bg-white p-6 text-slate-500 shadow-sm">Chưa có chuyến xe được phân công.</p> : (
+        {!trips.length ? <div className="mt-4 rounded-2xl bg-white p-8 text-center shadow-sm"><Truck size={36} className="mx-auto text-slate-300" /><p className="mt-3 font-bold text-slate-700">Chưa có chuyến xe được phân công</p><p className="mt-1 text-sm text-slate-500">Các chuyến mới sẽ xuất hiện tại đây sau khi điều phối viên phân công.</p></div> : (
           <>
             {trips.length > 1 && <label className="mt-4 block text-sm font-bold">Chọn chuyến
               <select value={activeTrip?.id || ''} onChange={(event) => setSelectedTripId(event.target.value)} className="mt-2 w-full rounded-xl border border-slate-200 bg-white p-3">
@@ -232,11 +245,28 @@ function LinehaulDriverApp() {
             {activeTrip && <article className="mt-4 space-y-5 rounded-2xl bg-white p-5 shadow-sm sm:p-7">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div><p className="text-xs font-black uppercase text-indigo-600">{activeTrip.trip_code}</p><h3 className="mt-1 text-xl font-black">{activeTrip.source_warehouse_name} → {activeTrip.destination_warehouse_name}</h3><p className="mt-1 text-sm text-slate-500">{activeTrip.vehicle_plate}</p></div>
-                <span className="rounded-full bg-indigo-50 px-3 py-2 text-sm font-black text-indigo-700">{activeTrip.status === 'in_transit' ? 'Đang di chuyển' : activeTrip.status === 'arrived' ? 'Đã đến kho' : 'Chờ bốc hàng'}</span>
+                <span className={`rounded-full px-3 py-2 text-sm font-black ${activeTrip.status === 'in_transit' ? 'bg-blue-100 text-blue-800' : activeTrip.status === 'arrived' ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'}`}>{activeTrip.status === 'in_transit' ? 'Đang di chuyển' : activeTrip.status === 'arrived' ? 'Đã đến kho' : 'Chờ bốc hàng'}</span>
               </div>
+              <div className="grid gap-3 sm:grid-cols-3">
+                <div className="rounded-xl border border-slate-100 p-3"><p className="text-xs font-bold uppercase text-slate-500">Tổng số bao</p><p className="mt-1 text-lg font-black">{activeTrip.bag_count || 0} bao</p></div>
+                <div className="rounded-xl border border-slate-100 p-3"><p className="text-xs font-bold uppercase text-slate-500">Tổng tải trọng</p><p className="mt-1 text-lg font-black">{Number(activeTrip.total_weight_kg || 0).toLocaleString('vi-VN')} / {Number(activeTrip.max_payload_kg || 0).toLocaleString('vi-VN')} kg</p></div>
+                <div className="rounded-xl border border-slate-100 p-3"><p className="text-xs font-bold uppercase text-slate-500">Biển số xe</p><p className="mt-1 text-lg font-black">{activeTrip.vehicle_plate}</p></div>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="rounded-xl bg-slate-50 p-4"><p className="text-xs font-black uppercase text-slate-500">Kho xuất phát</p><p className="mt-1 font-bold">{activeTrip.source_warehouse_name}</p><p className="mt-1 text-sm text-slate-500">{activeTrip.source_warehouse_address || 'Chưa có địa chỉ kho'}</p></div>
+                <div className="rounded-xl bg-indigo-50 p-4"><p className="text-xs font-black uppercase text-indigo-600">Kho nhận hàng</p><p className="mt-1 font-bold text-indigo-950">{activeTrip.destination_warehouse_name}</p><p className="mt-1 text-sm text-indigo-800">{activeTrip.destination_warehouse_address || 'Chưa có địa chỉ kho'}</p>{destinationCoordinates && <a href={`https://www.google.com/maps/dir/?api=1&destination=${destinationCoordinates[0]},${destinationCoordinates[1]}`} target="_blank" rel="noreferrer" className="mt-2 inline-flex items-center gap-1 text-sm font-bold text-indigo-700 underline"><Navigation size={14} /> Mở đường đi</a>}</div>
+              </div>
+              {destinationCoordinates && <div className="overflow-hidden rounded-xl border border-slate-200">
+                <MapContainer key={activeTrip.id} center={currentCoordinates || destinationCoordinates} zoom={currentCoordinates ? 11 : 13} scrollWheelZoom={false} className="h-64 w-full">
+                  <TileLayer attribution='&copy; OpenStreetMap contributors' url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
+                  <Marker position={destinationCoordinates} icon={truckIcon}><Popup>{activeTrip.destination_warehouse_name}</Popup></Marker>
+                  {currentCoordinates && <><Marker position={currentCoordinates} icon={truckIcon}><Popup>Vị trí xe hiện tại</Popup></Marker><Polyline positions={[currentCoordinates, destinationCoordinates]} pathOptions={{ color: '#4f46e5', weight: 4, dashArray: '8 8' }} /></>}
+                </MapContainer>
+                <p className="bg-white px-3 py-2 text-xs text-slate-500">{currentCoordinates ? 'Đường thẳng tham khảo giữa vị trí xe và kho đích; mở bản đồ để xem tuyến đường.' : 'Vị trí kho đích; cần bật GPS để xem vị trí xe trên bản đồ.'}</p>
+              </div>}
               <div className="rounded-xl bg-slate-50 p-4">
                 <div className="flex items-center justify-between"><strong>Kiểm tra bao lên xe</strong><span className="font-black text-indigo-700">{activeTrip.scanned_bag_count || 0}/{activeTrip.bag_count || 0}</span></div>
-                <div className="mt-3 space-y-2">{(activeTrip.bags || []).map((bag) => <div key={bag.bag_id} className="flex items-center justify-between rounded-lg bg-white p-3 text-sm"><span className="font-mono font-bold">{bag.bag_code}</span><span className={bag.driver_scanned_at ? 'font-bold text-emerald-700' : 'font-bold text-amber-700'}>{bag.driver_scanned_at ? 'Đã quét' : 'Chưa quét'}</span></div>)}</div>
+                <div className="mt-3 space-y-2">{(activeTrip.bags || []).map((bag) => <div key={bag.bag_id} className="flex items-center justify-between gap-3 rounded-lg bg-white p-3 text-sm"><span><span className="font-mono font-bold">{bag.bag_code}</span><small className="mt-1 block text-slate-500">{bag.order_count} đơn · {Number(bag.weight_kg || 0).toLocaleString('vi-VN')} kg</small></span><span className={bag.driver_scanned_at ? 'shrink-0 font-bold text-emerald-700' : 'shrink-0 font-bold text-amber-700'}>{bag.driver_scanned_at ? 'Đã quét' : 'Chưa quét'}</span></div>)}</div>
               </div>
               {['planned', 'loading'].includes(activeTrip.status) && <>
                 <button type="button" disabled={busy || Number(activeTrip.scanned_bag_count) >= Number(activeTrip.bag_count)} onClick={() => { setNotice(''); setScanning(true); }} className="flex w-full items-center justify-center gap-2 rounded-xl bg-indigo-600 px-4 py-4 font-black text-white disabled:opacity-50"><ScanLine size={18} /> Quét bao lên xe</button>
