@@ -332,7 +332,6 @@ function MotorcycleDriverApp() {
   const [loiQuetMa, setLoiQuetMa] = useState('');
   const [maVanDonNhapTay, setMaVanDonNhapTay] = useState('');
   const [dangXacNhanMaQuet, setDangXacNhanMaQuet] = useState(false);
-  const [maOtpGiaoHang, setMaOtpGiaoHang] = useState('');
   const pickupScanBusyRef = useRef(false);
 
   const driverId = localStorage.getItem('user_id');
@@ -766,11 +765,11 @@ function MotorcycleDriverApp() {
 
     // Validate bắt buộc đối với Giao thành công
     if (loai === 'completed') {
-      if (!xacNhanTien) return alert('Vui lòng xác nhận đã thu đủ COD và phí vận chuyển.');
-      if (tinhTongTienCanThu(don) > 0 && !['cash', 'bank_transfer'].includes(phuongThucCOD)) {
+      const amountToCollect = tinhTongTienCanThu(don);
+      if (amountToCollect > 0 && !xacNhanTien) return alert('Vui lòng xác nhận đã thu đủ COD và phí vận chuyển.');
+      if (amountToCollect > 0 && !['cash', 'bank_transfer'].includes(phuongThucCOD)) {
         return alert('Vui lòng chọn tiền mặt hoặc chuyển khoản.');
       }
-      if (!/^\d{4,6}$/.test(maOtpGiaoHang)) return alert('Vui lòng nhập mã OTP giao hàng gồm 4-6 chữ số.');
       if (!anhMinhChung) return alert("BẮT BUỘC: Vui lòng chụp ảnh minh chứng đã giao hàng!");
       if (!signatureDrawn) return alert('Vui lòng lấy chữ ký xác nhận của người nhận.');
     }
@@ -797,7 +796,6 @@ function MotorcycleDriverApp() {
           return alert('Không thể tạo ảnh chữ ký. Vui lòng ký lại.');
         }
         formData.append('signature_image', signatureBlob, `signature-${don.id}.png`);
-        formData.append('delivery_otp', maOtpGiaoHang);
         formData.append('cod_collected', String(xacNhanTien));
         if (tinhTongTienCanThu(don) > 0) formData.append('cod_payment_method', phuongThucCOD);
       }
@@ -836,7 +834,6 @@ function MotorcycleDriverApp() {
     setLyDoHuy('');
     setXacNhanTien(false);
     setPhuongThucCOD('');
-    setMaOtpGiaoHang('');
   };
 
   const guiDonNghiPhep = async (e) => {
@@ -1334,38 +1331,26 @@ function MotorcycleDriverApp() {
                 {/* 2. MỤC DÀNH CHO THÀNH CÔNG: XÁC NHẬN VÀ CHỌN HÌNH THỨC COD */}
                 {modalXuLy.loai === 'completed' && (
                   <div className="bg-emerald-50 border border-emerald-100 p-4 rounded-xl">
-                    <label className="mb-3 block text-xs font-black uppercase text-emerald-800" htmlFor="delivery-otp">Mã OTP khách hàng cung cấp (*)</label>
-                    <input
-                      id="delivery-otp"
-                      inputMode="numeric"
-                      autoComplete="one-time-code"
-                      maxLength={6}
-                      pattern="[0-9]{4,6}"
-                      required
-                      value={maOtpGiaoHang}
-                      onChange={(event) => setMaOtpGiaoHang(event.target.value.replace(/\D/g, '').slice(0, 6))}
-                      className="mb-4 w-full rounded-xl border border-emerald-200 bg-white p-3 text-center text-2xl font-black tracking-[0.5em]"
-                      placeholder="••••"
-                    />
-                    <div className="flex items-start gap-3">
-                      <input
-                        type="checkbox"
-                        id="checkTien"
-                        className="w-6 h-6 mt-0.5 accent-emerald-500 rounded"
-                        checked={xacNhanTien}
-                        onChange={(e) => setXacNhanTien(e.target.checked)}
-                      />
-                      <label htmlFor="checkTien" className="text-sm">
-                        <p className="font-bold text-emerald-800">Xác nhận đã thu đủ số tiền cần thu</p>
-                        <p className="font-black text-red-600 text-lg">{tinhTongTienCanThu(modalXuLy.don).toLocaleString()} VNĐ</p>
-                      </label>
-                    </div>
-                    <div className="ml-9 mt-2 space-y-1 text-xs text-emerald-800">
-                      <div className="flex justify-between"><span>COD hàng</span><span>{Number(modalXuLy.don?.cod_amount || 0).toLocaleString()} VNĐ</span></div>
-                      <div className="flex justify-between"><span>Phí vận chuyển ({modalXuLy.don?.fee_payer === 'receiver' ? 'người nhận trả' : 'người gửi trả'})</span><span>{modalXuLy.don?.fee_payer === 'receiver' ? Number(modalXuLy.don?.shipping_fee || 0).toLocaleString() : '0'} VNĐ</span></div>
-                      <div className="flex justify-between border-t border-emerald-200 pt-1 font-black"><span>Tổng cần thu</span><span>{tinhTongTienCanThu(modalXuLy.don).toLocaleString()} VNĐ</span></div>
-                    </div>
-                    {tinhTongTienCanThu(modalXuLy.don) > 0 && (
+                    {tinhTongTienCanThu(modalXuLy.don) > 0 ? (
+                      <>
+                        <div className="flex items-start gap-3">
+                          <input
+                            type="checkbox"
+                            id="checkTien"
+                            className="w-6 h-6 mt-0.5 accent-emerald-500 rounded"
+                            checked={xacNhanTien}
+                            onChange={(e) => setXacNhanTien(e.target.checked)}
+                          />
+                          <label htmlFor="checkTien" className="text-sm">
+                            <p className="font-bold text-emerald-800">Xác nhận đã thu đủ số tiền cần thu</p>
+                            <p className="font-black text-red-600 text-lg">{tinhTongTienCanThu(modalXuLy.don).toLocaleString()} VNĐ</p>
+                          </label>
+                        </div>
+                        <div className="ml-9 mt-2 space-y-1 text-xs text-emerald-800">
+                          <div className="flex justify-between"><span>COD hàng</span><span>{Number(modalXuLy.don?.cod_amount || 0).toLocaleString()} VNĐ</span></div>
+                          <div className="flex justify-between"><span>Phí vận chuyển ({modalXuLy.don?.fee_payer === 'receiver' ? 'người nhận trả' : 'người gửi trả'})</span><span>{modalXuLy.don?.fee_payer === 'receiver' ? Number(modalXuLy.don?.shipping_fee || 0).toLocaleString() : '0'} VNĐ</span></div>
+                          <div className="flex justify-between border-t border-emerald-200 pt-1 font-black"><span>Tổng cần thu</span><span>{tinhTongTienCanThu(modalXuLy.don).toLocaleString()} VNĐ</span></div>
+                        </div>
                       <fieldset className="mt-4 border-t border-emerald-200 pt-3">
                         <legend className="mb-2 text-xs font-black uppercase text-emerald-800">Hình thức thanh toán</legend>
                         <div className="grid grid-cols-2 gap-2">
@@ -1387,6 +1372,9 @@ function MotorcycleDriverApp() {
                           ))}
                         </div>
                       </fieldset>
+                      </>
+                    ) : (
+                      <p className="text-sm font-bold text-emerald-800">Đơn này không cần thu COD hoặc cước từ người nhận.</p>
                     )}
                     <div className="mt-4 border-t border-emerald-200 pt-3">
                       <div className="mb-2 flex items-center justify-between">

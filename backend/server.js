@@ -163,7 +163,7 @@ const apiRolesForRequest = (req) => {
     return new Set(['shop', 'warehouse_manager', 'fleet_manager', 'accountant', 'director']);
   }
   if (route === '/api/orders' && method === 'POST') return new Set(['shop']);
-  if (/^\/api\/orders\/\d+\/assign$/.test(route)) return new Set(['fleet_manager', 'director']);
+  if (/^\/api\/orders\/\d+\/assign$/.test(route)) return new Set(['fleet_manager', 'director', 'warehouse_manager']);
   if (/^\/api\/orders\/shipper\/\d+$/.test(route)) return driverRoles;
   if (/^\/api\/orders\/\d+\/status$/.test(route)) return driverRoles;
   if (/^\/api\/orders\/\d+\/route$/.test(route)) {
@@ -782,6 +782,16 @@ db.connect((err) => {
       console.error('Lỗi bổ sung kho được phân công cho tài khoản:', alterErr);
     }
   });
+  db.query("SHOW COLUMNS FROM orders LIKE 'delivery_otp'", (columnErr, columns) => {
+    if (columnErr) {
+      if (columnErr.code !== 'ER_NO_SUCH_TABLE') console.error('Lỗi kiểm tra cột OTP giao hàng cũ:', columnErr);
+      return;
+    }
+    if (!columns.length) return;
+    db.query('ALTER TABLE orders DROP COLUMN delivery_otp', (dropErr) => {
+      if (dropErr) console.error('Lỗi gỡ cột OTP giao hàng cũ:', dropErr);
+    });
+  });
   [
     ['phone', 'VARCHAR(50) DEFAULT NULL'],
     ['shop_address', 'TEXT DEFAULT NULL'],
@@ -1396,7 +1406,6 @@ db.connect((err) => {
 
   [
     ['fee_payer', "ENUM('sender','receiver') NOT NULL DEFAULT 'sender'"],
-    ['delivery_otp', 'CHAR(6) DEFAULT NULL'],
     ['signature_image', 'VARCHAR(255) DEFAULT NULL']
   ].forEach(([column, definition]) => {
     db.query(`ALTER TABLE orders ADD COLUMN ${column} ${definition}`, (alterErr) => {
@@ -1733,7 +1742,7 @@ function getLocalChatReply(message) {
     return { reply: 'Để gửi hàng, bạn tạo đơn trên cổng Shop, nhập thông tin người nhận và kiện hàng, chọn bên trả cước rồi đóng gói chắc chắn. Điều phối sẽ phân công tài xế đến lấy; bạn có thể theo dõi bằng mã vận đơn.' };
   }
   if (/\b(cod|thu ho|tien thu ho|doi soat)\b/.test(normalized)) {
-    return { reply: 'COD là khoản tài xế thu từ người nhận theo thông tin đơn. Shop có thể theo dõi đối soát trên hệ thống; nếu bạn cần tra một đơn cụ thể, hãy gửi mã vận đơn (không gửi mật khẩu hoặc mã OTP).' };
+    return { reply: 'COD là khoản tài xế thu từ người nhận theo thông tin đơn. Shop có thể theo dõi đối soát trên hệ thống; nếu bạn cần tra một đơn cụ thể, hãy gửi mã vận đơn (không gửi mật khẩu hoặc thông tin đăng nhập).' };
   }
   if (/\b(hoan hang|giao that bai|khong nhan|tu choi nhan)\b/.test(normalized)) {
     return { reply: 'Khi giao thất bại, hệ thống ghi nhận lý do và bằng chứng giao hàng, sau đó đơn được chuyển sang quy trình hoàn. Shop có thể kiểm tra chi tiết trong danh sách đơn và liên hệ CSKH nếu muốn yêu cầu giao lại.' };
@@ -1775,7 +1784,7 @@ async function getConfiguredChatAiReply(message, history) {
       messages: [
         {
           role: 'system',
-          content: 'Bạn là trợ lý CSKH Smart Logistics, trả lời bằng tiếng Việt rõ ràng, ngắn gọn và lịch sự. Chỉ hướng dẫn các nghiệp vụ giao nhận, tạo đơn, cước phí, trạng thái vận đơn, COD và hàng hoàn. Không yêu cầu hoặc tiết lộ mật khẩu, mã OTP, dữ liệu thanh toán hay thông tin cá nhân nhạy cảm. Không tự khẳng định thông tin vận đơn nếu chưa được tra cứu bằng công cụ.'
+          content: 'Bạn là trợ lý CSKH Smart Logistics, trả lời bằng tiếng Việt rõ ràng, ngắn gọn và lịch sự. Chỉ hướng dẫn các nghiệp vụ giao nhận, tạo đơn, cước phí, trạng thái vận đơn, COD và hàng hoàn. Không yêu cầu hoặc tiết lộ mật khẩu, thông tin đăng nhập, dữ liệu thanh toán hay thông tin cá nhân nhạy cảm. Không tự khẳng định thông tin vận đơn nếu chưa được tra cứu bằng công cụ.'
         },
         ...history.map((item) => ({
           role: item.sender_type === 'bot' ? 'assistant' : 'user',
@@ -3130,7 +3139,7 @@ app.put('/api/dispatcher/driver-profiles/:driverId', (req, res) => {
 
 app.get('/api/shippers', (req, res) => {
   const taskType = req.query.type;
-  if (!['pickup', 'central_transfer', 'destination_transfer', 'delivery', 'linehaul'].includes(taskType)) {
+  if (!['pickup', 'delivery', 'linehaul'].includes(taskType)) {
     return res.status(400).json({ success: false, message: 'Loại nhiệm vụ điều phối không hợp lệ.' });
   }
   const role = taskType === 'linehaul' ? 'linehaul_driver' : taskType === 'delivery' ? 'delivery_driver' : 'pickup_driver';
@@ -3266,8 +3275,6 @@ app.put('/api/orders/:id/assign', (req, res) => {
   const shipperId = Number(shipper_id);
   const tasks = {
     pickup: { role: 'pickup_driver', expected: 'pending', next: 'picking', column: 'pickup_shipper_id', label: 'lấy hàng tại Shop' },
-    central_transfer: { role: 'pickup_driver', expected: 'at_origin_warehouse', next: 'transferring_to_central', column: 'central_transfer_shipper_id', label: 'điều chuyển về kho tổng' },
-    destination_transfer: { role: 'pickup_driver', expected: 'at_central_warehouse', next: 'transferring_to_destination', column: 'destination_transfer_shipper_id', label: 'điều chuyển về kho con đích' },
     delivery: { role: 'delivery_driver', expected: 'at_destination_warehouse', next: 'at_destination_warehouse', column: 'delivery_shipper_id', label: 'giao hàng đến người nhận' }
   };
   const task = tasks[task_type];
@@ -3283,22 +3290,24 @@ app.put('/api/orders/:id/assign', (req, res) => {
     if (order.status !== task.expected) {
       return res.status(409).json({ success: false, message: `Nhiệm vụ này cần trạng thái "${task.expected}", đơn hiện ở "${order.status}".` });
     }
+    if (req.authRole === 'warehouse_manager'
+      && (task_type !== 'delivery'
+        || Number(order.current_warehouse_id) !== Number(req.warehouseScopeId)
+        || Number(order.destination_warehouse_id) !== Number(req.warehouseScopeId))) {
+      return res.status(403).json({ success: false, message: 'Kho chỉ được phân tài xế giao cho đơn đang ở kho đích được giao.' });
+    }
 
     db.query('SELECT id FROM users WHERE id = ? AND role = ? AND status = "active"', [shipperId, task.role], (driverErr, drivers) => {
       if (driverErr) return res.status(500).json({ success: false, message: 'Lỗi kiểm tra tài xế: ' + driverErr.sqlMessage });
       if (!drivers.length) return res.status(400).json({ success: false, message: 'Tài xế không thuộc đúng nhóm nhiệm vụ.' });
 
-      const continueAssignment = (warehouseId = null) => {
+      const continueAssignment = (warehouseId = null, destinationWarehouseId = null) => {
         const updateAssignedOrder = () => {
-            let sql = `UPDATE orders SET ${task.column} = ?, status = ?, storage_bin_id = NULL, cross_docked = 0`;
+        let sql = `UPDATE orders SET ${task.column} = ?, status = ?, storage_bin_id = NULL, cross_docked = 0`;
         const params = [shipperId, task.next];
         if (task_type === 'pickup') {
-          sql += ', origin_warehouse_id = ?, current_warehouse_id = NULL';
-          params.push(warehouseId);
-        }
-        if (task_type === 'destination_transfer') {
-          sql += ', destination_warehouse_id = ?';
-          params.push(warehouseId);
+          sql += ', origin_warehouse_id = ?, destination_warehouse_id = ?, current_warehouse_id = NULL';
+          params.push(warehouseId, destinationWarehouseId);
         }
         sql += ' WHERE id = ? AND status = ?';
         if (task_type === 'delivery') sql += ' AND delivery_shipper_id IS NULL';
@@ -3337,7 +3346,7 @@ app.put('/api/orders/:id/assign', (req, res) => {
           res.json({ success: true, message: `Đã phân công tài xế ${task.label}.` });
         });
         };
-        if (task_type !== 'delivery') return updateAssignedOrder();
+        if (task_type === 'pickup') return updateAssignedOrder();
         const reserveAmount = Number(order.cod_amount || 0)
           + (order.fee_payer === 'receiver' ? Number(order.shipping_fee || 0) : 0);
         if (reserveAmount <= 0) return updateAssignedOrder();
@@ -3354,17 +3363,14 @@ app.put('/api/orders/:id/assign', (req, res) => {
         return findNearestWardWarehouse(Number(order.shop_lat), Number(order.shop_lng), (warehouseErr, warehouse) => {
           if (warehouseErr) return res.status(500).json({ success: false, message: warehouseErr.sqlMessage });
           if (!warehouse) return res.status(409).json({ success: false, message: 'Chưa có kho con nào được cấu hình và kích hoạt.' });
-          continueAssignment(warehouse.id);
-        });
-      }
-      if (task_type === 'destination_transfer') {
-        if (order.receiver_lat === null || order.receiver_lng === null) {
-          return res.status(409).json({ success: false, message: 'Đơn cần có tọa độ điểm nhận để xác định kho con đích.' });
-        }
-        return findNearestWardWarehouse(Number(order.receiver_lat), Number(order.receiver_lng), (warehouseErr, warehouse) => {
-          if (warehouseErr) return res.status(500).json({ success: false, message: warehouseErr.sqlMessage });
-          if (!warehouse) return res.status(409).json({ success: false, message: 'Chưa có kho con đích nào được cấu hình và kích hoạt.' });
-          continueAssignment(warehouse.id);
+          if (order.receiver_lat === null || order.receiver_lng === null) {
+            return res.status(409).json({ success: false, message: 'Đơn cần có tọa độ điểm nhận để xác định kho đích.' });
+          }
+          findNearestWardWarehouse(Number(order.receiver_lat), Number(order.receiver_lng), (destinationErr, destinationWarehouse) => {
+            if (destinationErr) return res.status(500).json({ success: false, message: destinationErr.sqlMessage });
+            if (!destinationWarehouse) return res.status(409).json({ success: false, message: 'Chưa có kho con đích nào được cấu hình và kích hoạt.' });
+            continueAssignment(warehouse.id, destinationWarehouse.id);
+          });
         });
       }
       continueAssignment();
@@ -3486,7 +3492,7 @@ app.put('/api/orders/:id/status', podUpload.fields([
   { name: 'signature_image', maxCount: 1 }
 ]), (req, res) => {
   const { id } = req.params;
-  const { status, fail_reason, cod_collected, cod_payment_method, delivery_otp, user_id } = req.body;
+  const { status, fail_reason, cod_collected, cod_payment_method, user_id } = req.body;
   const orderId = Number(id);
   const driverId = Number(user_id);
   const allowedTransitions = new Set(['picked_up', 'delivering', 'completed', 'returning']);
@@ -3502,7 +3508,7 @@ app.put('/api/orders/:id/status', podUpload.fields([
 
   db.query(
     `SELECT o.status, o.cod_amount, o.shipping_fee, o.fee_payer, o.shop_id, o.customer_email,
-      o.tracking_code, o.delivery_otp, o.pickup_shipper_id, o.delivery_shipper_id,
+      o.tracking_code, o.pickup_shipper_id, o.delivery_shipper_id,
       o.destination_transfer_shipper_id, u.role AS driver_role
      FROM orders o
      LEFT JOIN users u ON u.id = ? AND u.status = 'active'
@@ -3528,9 +3534,6 @@ app.put('/api/orders/:id/status', podUpload.fields([
     if (!validTransition) {
       return res.status(409).json({ success: false, message: `Không thể chuyển đơn từ "${order.status}" sang "${status}".` });
     }
-    if (status === 'delivering' && !order.customer_email) {
-      return res.status(400).json({ success: false, message: 'Đơn hàng cần có email khách nhận để gửi mã OTP giao hàng.' });
-    }
     if (['completed', 'returning'].includes(status) && !imageUrl) {
       return res.status(400).json({ success: false, message: 'Cần ảnh minh chứng trước khi kết thúc lượt giao.' });
     }
@@ -3549,9 +3552,6 @@ app.put('/api/orders/:id/status', podUpload.fields([
     if (status === 'returning' && !failureReasons.has(String(fail_reason || '').trim())) {
       return res.status(400).json({ success: false, message: 'Vui lòng chọn một lý do giao thất bại hợp lệ.' });
     }
-    if (status === 'completed' && (!/^\d{4,6}$/.test(String(delivery_otp || '')) || String(delivery_otp) !== String(order.delivery_otp || ''))) {
-      return res.status(400).json({ success: false, message: 'Mã OTP giao hàng không đúng hoặc đã hết hiệu lực.' });
-    }
     if (status === 'completed' && amountToCollect > 0 && cod_collected !== 'true') {
       return res.status(400).json({ success: false, message: 'Cần xác nhận đã thu COD và phí vận chuyển trước khi hoàn tất đơn.' });
     }
@@ -3561,11 +3561,6 @@ app.put('/api/orders/:id/status', podUpload.fields([
 
     let sql = 'UPDATE orders SET status = ?';
     const params = [status];
-    const deliveryOtp = status === 'delivering' ? String(crypto.randomInt(1000, 10000)) : null;
-    if (deliveryOtp) {
-      sql += ', delivery_otp = ?';
-      params.push(deliveryOtp);
-    }
     if (imageUrl) {
       sql += ', proof_image = ?';
       params.push(imageUrl);
@@ -3579,7 +3574,6 @@ app.put('/api/orders/:id/status', podUpload.fields([
       params.push(String(fail_reason).trim());
     }
     if (status === 'completed') {
-      sql += ', delivery_otp = NULL';
       sql += ', cod_collected = ?';
       params.push(amountToCollect > 0 ? 1 : 0);
       sql += ', cod_collected_amount = ?';
@@ -3628,52 +3622,17 @@ app.put('/api/orders/:id/status', podUpload.fields([
         res.json({ success: true, message: 'Cập nhật trạng thái thành công!' });
         io.emit('order_status_changed', { order_id: orderId, status });
       }, signatureUrl);
-      if (!deliveryOtp) {
-        const shouldReleaseReservation = status === 'returning'
-          || status === 'completed' && cod_payment_method === 'bank_transfer';
-        if (!shouldReleaseReservation) return completeStatusUpdate();
-        return releaseDriverWalletReservation(
-          orderId,
-          status === 'returning' ? 'Đơn giao thất bại, giải phóng ký quỹ' : 'COD chuyển khoản, giải phóng ký quỹ',
-          (releaseErr) => {
-            if (releaseErr) console.error(`Không thể giải phóng ký quỹ đơn ${orderId}:`, releaseErr);
-            completeStatusUpdate();
-          }
-        );
-      }
-
-      transporter.sendMail({
-        from: mailFrom,
-        to: order.customer_email,
-        subject: `[Mã OTP nhận hàng] ${order.tracking_code}`,
-        text: `Mã OTP nhận hàng cho đơn ${order.tracking_code} của bạn là ${deliveryOtp}. Chỉ cung cấp mã này khi tài xế giao hàng trực tiếp.`,
-        html: `
-          <div style="font-family: sans-serif; max-width: 600px; margin: auto; padding: 24px; border: 1px solid #e5e7eb; border-radius: 12px;">
-            <h2 style="color: #059669; text-align: center;">MÃ XÁC NHẬN NHẬN HÀNG</h2>
-            <p>Mã vận đơn: <b>${order.tracking_code}</b></p>
-            <p>Mã OTP của bạn:</p>
-            <p style="font-size: 32px; font-weight: bold; letter-spacing: 8px; text-align: center;">${deliveryOtp}</p>
-            <p>Chỉ cung cấp mã này cho tài xế khi đã nhận được hàng.</p>
-          </div>
-        `
-      }, (mailErr) => {
-        if (!mailErr) return completeStatusUpdate();
-        console.error('Lỗi gửi OTP giao hàng:', mailErr);
-        db.query(
-          'UPDATE orders SET status = ?, delivery_otp = NULL WHERE id = ? AND status = ? AND delivery_otp = ?',
-          [order.status, orderId, 'delivering', deliveryOtp],
-          (rollbackErr, rollbackResult) => {
-            if (rollbackErr) console.error('Lỗi hoàn tác trạng thái sau khi gửi OTP thất bại:', rollbackErr);
-            const rollbackSucceeded = !rollbackErr && rollbackResult.affectedRows > 0;
-            return res.status(502).json({
-              success: false,
-              message: !rollbackSucceeded
-                ? 'Không gửi được OTP và không thể hoàn tác trạng thái đơn. Cần kiểm tra đơn hàng.'
-                : 'Không gửi được email OTP; trạng thái đơn đã được hoàn tác.'
-            });
-          }
-        );
-      });
+      const shouldReleaseReservation = status === 'returning'
+        || status === 'completed' && cod_payment_method === 'bank_transfer';
+      if (!shouldReleaseReservation) return completeStatusUpdate();
+      return releaseDriverWalletReservation(
+        orderId,
+        status === 'returning' ? 'Đơn giao thất bại, giải phóng ký quỹ' : 'COD chuyển khoản, giải phóng ký quỹ',
+        (releaseErr) => {
+          if (releaseErr) console.error(`Không thể giải phóng ký quỹ đơn ${orderId}:`, releaseErr);
+          completeStatusUpdate();
+        }
+      );
     });
   });
 });
@@ -4014,6 +3973,9 @@ app.post('/api/warehouse/bags', (req, res) => {
     if (rows.length !== 2) return res.status(400).json({ success: false, message: 'Hai kho phải đang hoạt động.' });
     const sourceWarehouse = rows.find((warehouse) => Number(warehouse.id) === sourceId);
     const destinationWarehouse = rows.find((warehouse) => Number(warehouse.id) === destinationId);
+    if (req.authRole === 'warehouse_manager' && sourceId !== Number(req.warehouseScopeId)) {
+      return res.status(403).json({ success: false, message: 'Chỉ được đóng bao từ kho đang được phân công.' });
+    }
     if (!sourceWarehouse || !destinationWarehouse
       || !((sourceWarehouse.warehouse_type === 'ward' && destinationWarehouse.warehouse_type === 'central')
         || (sourceWarehouse.warehouse_type === 'central' && destinationWarehouse.warehouse_type === 'ward'))) {
@@ -4374,8 +4336,8 @@ app.post('/api/linehaul/trips', (req, res) => {
   const driverId = req.body.driver_id ? Number(req.body.driver_id) : null;
   if (!Number.isInteger(truckId) || truckId <= 0 || !Number.isInteger(sourceId) || !Number.isInteger(destinationId)
     || sourceId <= 0 || destinationId <= 0 || sourceId === destinationId
-    || (driverId !== null && (!Number.isInteger(driverId) || driverId <= 0))) {
-    return res.status(400).json({ success: false, message: 'Thông tin chuyến xe không hợp lệ.' });
+    || !Number.isInteger(driverId) || driverId <= 0) {
+    return res.status(400).json({ success: false, message: 'Chuyến xe cần xe tải và tài xế thuộc đội trung chuyển liên kho.' });
   }
   const tripCode = `TRIP-${Date.now().toString(36).toUpperCase()}-${crypto.randomBytes(2).toString('hex').toUpperCase()}`;
   const insertTrip = (truck) => db.query(
@@ -4413,7 +4375,6 @@ app.post('/api/linehaul/trips', (req, res) => {
       (truckErr, trucks) => {
       if (truckErr) return res.status(500).json({ success: false, message: truckErr.sqlMessage });
       if (!trucks.length) return res.status(409).json({ success: false, message: 'Xe tải không tồn tại hoặc hiện không sẵn sàng.' });
-      if (!driverId) return insertTrip(trucks[0]);
       db.query(
         `SELECT driver.id FROM users driver
          WHERE driver.id = ? AND driver.status = "active" AND driver.role = "linehaul_driver"
@@ -4651,14 +4612,33 @@ app.post('/api/warehouse/linehaul/scan', (req, res) => {
             db.query('SELECT COUNT(*) AS pending FROM linehaul_trip_bags tb JOIN shipment_bags b ON b.id = tb.bag_id WHERE tb.trip_id = ? AND b.status != "received"', [bag.trip_id], (countErr, pendingRows) => {
               if (countErr) return res.status(500).json({ success: false, message: countErr.sqlMessage });
               const finishTrip = Number(pendingRows[0].pending) === 0;
-              if (!finishTrip) return res.json({ success: true, order_count: orderResult.affectedRows, message: `Đã nhập ${orderResult.affectedRows} đơn trong bao ${bagCode}.` });
-              db.query('UPDATE linehaul_trips SET status = "completed", arrived_at = CURRENT_TIMESTAMP WHERE id = ?', [bag.trip_id], (tripErr) => {
-                if (tripErr) return res.status(500).json({ success: false, message: tripErr.sqlMessage });
-                db.query('UPDATE trucks SET status = "ready" WHERE id = (SELECT truck_id FROM linehaul_trips WHERE id = ?)', [bag.trip_id], (truckErr) => {
-                  if (truckErr) return res.status(500).json({ success: false, message: truckErr.sqlMessage });
-                  res.json({ success: true, order_count: orderResult.affectedRows, message: `Đã nhập kho ${orderResult.affectedRows} đơn trong bao ${bagCode}; chuyến xe hoàn tất.` });
-                });
-              });
+              db.query(
+                `SELECT o.id, o.tracking_code, o.status, o.delivery_shipper_id
+                 FROM shipment_bag_orders bo
+                 JOIN orders o ON o.id = bo.order_id
+                 WHERE bo.bag_id = ?
+                 ORDER BY o.tracking_code`,
+                [bag.id],
+                (contentsErr, orders) => {
+                  if (contentsErr) return res.status(500).json({ success: false, message: 'Đã nhập bao nhưng không thể tải danh sách đơn: ' + contentsErr.sqlMessage });
+                  const respond = () => res.json({
+                    success: true,
+                    order_count: orderResult.affectedRows,
+                    data: { bag_code: bagCode, orders },
+                    message: finishTrip
+                      ? `Đã nhập kho ${orderResult.affectedRows} đơn trong bao ${bagCode}; chuyến xe hoàn tất.`
+                      : `Đã nhập ${orderResult.affectedRows} đơn trong bao ${bagCode}.`
+                  });
+                  if (!finishTrip) return respond();
+                  db.query('UPDATE linehaul_trips SET status = "completed", arrived_at = CURRENT_TIMESTAMP WHERE id = ?', [bag.trip_id], (tripErr) => {
+                    if (tripErr) return res.status(500).json({ success: false, message: tripErr.sqlMessage });
+                    db.query('UPDATE trucks SET status = "ready" WHERE id = (SELECT truck_id FROM linehaul_trips WHERE id = ?)', [bag.trip_id], (truckErr) => {
+                      if (truckErr) return res.status(500).json({ success: false, message: truckErr.sqlMessage });
+                      respond();
+                    });
+                  });
+                }
+              );
             });
           });
         }

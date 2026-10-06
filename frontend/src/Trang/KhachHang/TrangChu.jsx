@@ -29,6 +29,16 @@ export default function TraCuuHanhTrinh() {
   const [loi, setLoi] = useState('');
   const [dangTim, setDangTim] = useState(false);
   const [tabTraCuu, setTabTraCuu] = useState('van-don'); 
+  const [duLieuTinhCuoc, setDuLieuTinhCuoc] = useState({
+    weight: '2.5',
+    length: '10',
+    width: '10',
+    height: '10',
+    distance: '35',
+    serviceType: 'standard',
+    remoteArea: false,
+    fragile: false
+  });
   const [tinTuc, setTinTuc] = useState([]);
   const [dangTaiTin, setDangTaiTin] = useState(true);
   const [loiTinTuc, setLoiTinTuc] = useState(false);
@@ -151,6 +161,24 @@ export default function TraCuuHanhTrinh() {
     if (danhMucTin === 'guide') return danhMuc.includes('hướng dẫn');
     return true;
   }).slice(0, 4);
+  const weight = Number(duLieuTinhCuoc.weight) || 0;
+  const length = Number(duLieuTinhCuoc.length) || 0;
+  const width = Number(duLieuTinhCuoc.width) || 0;
+  const height = Number(duLieuTinhCuoc.height) || 0;
+  const distance = Math.max(1, Number(duLieuTinhCuoc.distance) || 1);
+  const volumetricWeight = (length * width * height) / 5000;
+  const chargeableWeight = Math.max(weight, volumetricWeight);
+  const baseFee = { economy: 18000, standard: 28000, express: 45000 }[duLieuTinhCuoc.serviceType] || 28000;
+  const serviceFactor = { economy: 0.88, standard: 1, express: 1.5 }[duLieuTinhCuoc.serviceType] || 1;
+  const distanceFee = Math.max(0, distance - 5) * 1700;
+  const weightFee = chargeableWeight > 2 ? Math.ceil((chargeableWeight - 2) / 0.5) * 4500 : 0;
+  const estimatedFee = Math.round((
+    baseFee
+    + distanceFee
+    + weightFee
+    + (duLieuTinhCuoc.remoteArea ? 22000 : 0)
+    + (duLieuTinhCuoc.fragile ? 12000 : 0)
+  ) * serviceFactor / 1000) * 1000;
 
   return (
     <div className="bg-[#F2F4F7] font-sans text-slate-800">
@@ -223,8 +251,8 @@ export default function TraCuuHanhTrinh() {
               <MapPin size={16} /> Tra cứu đa hành trình
             </button>
             <button
-              onClick={() => navigate('/bang-gia')}
-              className="min-w-max px-6 py-4 font-bold text-sm text-slate-500 hover:text-blue-600 flex items-center gap-2"
+              onClick={() => setTabTraCuu('uoc-tinh')}
+              className={`min-w-max px-6 py-4 font-bold text-sm flex items-center gap-2 transition-all ${tabTraCuu === 'uoc-tinh' ? 'bg-white text-blue-600 border-t-2 border-t-blue-600 shadow-[0_-2px_0_0_#2563EB]' : 'text-slate-500 hover:text-blue-600'}`}
             >
               <Calculator size={16} /> Ước tính cước phí
             </button>
@@ -294,6 +322,67 @@ export default function TraCuuHanhTrinh() {
                     <MapPin size={32} className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 opacity-20" />
                     <p className="font-bold text-blue-400 z-10 bg-white/80 px-3 py-1 rounded-full text-xs border border-blue-100 backdrop-blur-sm">Giao Hàng Siêu Tốc</p>
                   </div>
+                </div>
+              </div>
+            )}
+            {tabTraCuu === 'uoc-tinh' && (
+              <div className="grid gap-6 lg:grid-cols-[1.2fr_0.8fr]">
+                <div>
+                  <h4 className="text-lg font-black text-slate-800">Nhập thông tin kiện hàng</h4>
+                  <p className="mt-1 text-sm text-slate-500">Cước sẽ cập nhật ngay khi bạn thay đổi thông tin.</p>
+                  <div className="mt-5 grid gap-4 sm:grid-cols-2">
+                    {[
+                      ['weight', 'Trọng lượng (kg)', '0.1'],
+                      ['distance', 'Khoảng cách dự kiến (km)', '1'],
+                      ['length', 'Dài (cm)', '0'],
+                      ['width', 'Rộng (cm)', '0'],
+                      ['height', 'Cao (cm)', '0']
+                    ].map(([field, label, min]) => (
+                      <label key={field} className="text-sm font-bold text-slate-700">
+                        {label}
+                        <input
+                          type="number"
+                          min={min}
+                          step="0.1"
+                          value={duLieuTinhCuoc[field]}
+                          onChange={(event) => setDuLieuTinhCuoc((current) => ({ ...current, [field]: event.target.value }))}
+                          className="mt-2 w-full rounded-lg border border-slate-200 bg-slate-50 p-3 outline-none focus:border-blue-400 focus:bg-white"
+                        />
+                      </label>
+                    ))}
+                    <label className="text-sm font-bold text-slate-700">
+                      Loại dịch vụ
+                      <select
+                        value={duLieuTinhCuoc.serviceType}
+                        onChange={(event) => setDuLieuTinhCuoc((current) => ({ ...current, serviceType: event.target.value }))}
+                        className="mt-2 w-full rounded-lg border border-slate-200 bg-slate-50 p-3 outline-none focus:border-blue-400 focus:bg-white"
+                      >
+                        <option value="economy">Tiết kiệm</option>
+                        <option value="standard">Tiêu chuẩn</option>
+                        <option value="express">Nhanh</option>
+                      </select>
+                    </label>
+                  </div>
+                  <div className="mt-4 flex flex-wrap gap-4">
+                    <label className="flex items-center gap-2 text-sm font-medium text-slate-700">
+                      <input type="checkbox" checked={duLieuTinhCuoc.fragile} onChange={(event) => setDuLieuTinhCuoc((current) => ({ ...current, fragile: event.target.checked }))} className="accent-blue-600" />
+                      Hàng dễ vỡ
+                    </label>
+                    <label className="flex items-center gap-2 text-sm font-medium text-slate-700">
+                      <input type="checkbox" checked={duLieuTinhCuoc.remoteArea} onChange={(event) => setDuLieuTinhCuoc((current) => ({ ...current, remoteArea: event.target.checked }))} className="accent-blue-600" />
+                      Khu vực xa
+                    </label>
+                  </div>
+                </div>
+                <div className="rounded-2xl bg-gradient-to-br from-blue-600 to-indigo-700 p-6 text-white">
+                  <p className="text-xs font-black uppercase tracking-[0.2em] text-blue-100">Cước phí dự kiến</p>
+                  <p className="mt-3 text-4xl font-black">{estimatedFee.toLocaleString('vi-VN')} đ</p>
+                  <div className="mt-5 space-y-2 rounded-xl bg-white/10 p-4 text-sm">
+                    <p className="flex justify-between gap-3"><span>Khối lượng tính cước</span><strong>{chargeableWeight.toLocaleString('vi-VN')} kg</strong></p>
+                    <p className="flex justify-between gap-3"><span>Khoảng cách</span><strong>{distance.toLocaleString('vi-VN')} km</strong></p>
+                    <p className="flex justify-between gap-3"><span>Dịch vụ</span><strong>{duLieuTinhCuoc.serviceType === 'express' ? 'Nhanh' : duLieuTinhCuoc.serviceType === 'economy' ? 'Tiết kiệm' : 'Tiêu chuẩn'}</strong></p>
+                  </div>
+                  <p className="mt-4 text-xs leading-5 text-blue-100">Đây là mức tham khảo, cước chính thức có thể thay đổi theo địa chỉ lấy/giao và thông tin đơn hàng.</p>
                 </div>
               </div>
             )}

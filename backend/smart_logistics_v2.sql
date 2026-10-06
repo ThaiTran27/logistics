@@ -91,7 +91,6 @@ CREATE TABLE orders (
   cod_amount DECIMAL(12,2) DEFAULT 0,
   shipping_fee DECIMAL(12,2) DEFAULT 0,
   fee_payer ENUM('sender','receiver') NOT NULL DEFAULT 'sender',
-  delivery_otp CHAR(6) DEFAULT NULL,
   weight_kg DECIMAL(8,2) DEFAULT 1,
   length DECIMAL(8,2) DEFAULT 0,
   width DECIMAL(8,2) DEFAULT 0,
@@ -569,6 +568,8 @@ INSERT INTO users (email, password, full_name, role, status) VALUES
   ('taixe2@smartlogistics.vn', '123', 'Bùi Quang Huy', 'pickup_driver', 'active'),
   ('taixe3@smartlogistics.vn', '123', 'Lê Hoàng Nam', 'delivery_driver', 'active'),
   ('taixe4@smartlogistics.vn', '123', 'Phạm Quốc Đạt', 'delivery_driver', 'active'),
+  ('taixe_tai1@smartlogistics.vn', '123', 'Nguyễn Văn Tải', 'linehaul_driver', 'active'),
+  ('kho3@smartlogistics.vn', '123', 'Trần Thị Thu Thủ Kho', 'warehouse_manager', 'active'),
   ('kho2@smartlogistics.vn', '123', 'Võ Khánh Linh', 'warehouse_manager', 'active'),
   ('dieu_hanh2@smartlogistics.vn', '123', 'Lê Gia Bảo', 'fleet_manager', 'active'),
   ('ketoan2@smartlogistics.vn', '123', 'Phạm Hải Yến', 'accountant', 'active'),
@@ -588,6 +589,12 @@ UPDATE users u
 JOIN warehouses w ON w.warehouse_type = 'ward' AND w.ward_name = 'Gò Vấp'
 SET u.warehouse_id = w.id
 WHERE u.email = 'kho2@smartlogistics.vn'
+  AND u.role = 'warehouse_manager';
+
+UPDATE users u
+JOIN warehouses w ON w.warehouse_type = 'ward' AND w.ward_name = 'Quận 1'
+SET u.warehouse_id = w.id
+WHERE u.email = 'kho3@smartlogistics.vn'
   AND u.role = 'warehouse_manager';
 
 INSERT INTO orders (

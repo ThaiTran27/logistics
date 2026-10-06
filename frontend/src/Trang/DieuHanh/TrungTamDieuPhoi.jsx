@@ -237,8 +237,6 @@ export default function TrungTamDieuPhoi() {
         setAllOrders(data.data);
         const donCanDieuPhoi = data.data.filter(d =>
           (d?.status === 'pending' && !d?.pickup_shipper_id) ||
-          (d?.status === 'at_origin_warehouse' && !d?.central_transfer_shipper_id) ||
-          (d?.status === 'at_central_warehouse' && !d?.destination_transfer_shipper_id) ||
           (d?.status === 'at_destination_warehouse' && !d?.delivery_shipper_id)
         );
         setDonHang(donCanDieuPhoi);
@@ -388,16 +386,15 @@ export default function TrungTamDieuPhoi() {
   const moModalPhanCong = async (don) => {
     const taskTypeByStatus = {
       pending: 'pickup',
-      at_origin_warehouse: 'central_transfer',
-      at_central_warehouse: 'destination_transfer',
       at_destination_warehouse: 'delivery'
     };
     const taskType = taskTypeByStatus[don?.status];
+    if (!taskType) return;
     const driverGroup = taskType === 'delivery' ? 'delivery' : 'pickup';
     const taiXeTheoNhiemVu = await taiDanhSachTaiXe(driverGroup);
     setDonDangChon(don);
     setLoaiNhiemVu(taskType);
-    setDriverTaskTab(taskType === 'delivery' ? 'delivery' : taskType === 'pickup' ? 'pickup' : 'transfer');
+    setDriverTaskTab(taskType);
     setTaiXeDuocChon(taiXeTheoNhiemVu.length > 0 ? String(taiXeTheoNhiemVu[0].id) : '');
     setModalMo(true);
   };
@@ -426,7 +423,7 @@ export default function TrungTamDieuPhoi() {
       } else {
         alert("Thao tác thất bại: " + (data.message || "Lỗi không xác định từ Server"));
       }
-    } catch (error) {
+    } catch {
       alert("Lỗi kết nối đến máy chủ! Vui lòng kiểm tra lại mạng.");
     }
   };
@@ -456,7 +453,7 @@ export default function TrungTamDieuPhoi() {
         setFileBaoCao(null);
         form.reset();
       } else alert("Lỗi: " + data.message);
-    } catch (error) {
+    } catch {
       alert("Lỗi kết nối!");
     } finally {
       setDangGuiBaoCao(false);
@@ -481,8 +478,6 @@ export default function TrungTamDieuPhoi() {
   });
   const soDonTaiXeDangGiu = (driverId) => allOrders.filter((order) => (
     String(order.pickup_shipper_id) === String(driverId) && ['picking', 'picked_up'].includes(order.status)
-    || String(order.central_transfer_shipper_id) === String(driverId) && order.status === 'transferring_to_central'
-    || String(order.destination_transfer_shipper_id) === String(driverId) && order.status === 'transferring_to_destination'
     || String(order.delivery_shipper_id) === String(driverId) && ['at_destination_warehouse', 'delivering'].includes(order.status)
   )).length;
   const tinhKhoangCachKm = (lat1, lng1, lat2, lng2) => {
@@ -508,10 +503,6 @@ export default function TrungTamDieuPhoi() {
   const taoKeHoachTuDong = () => {
     const candidates = allOrders.filter((order) => (
       driverTaskTab === 'pickup' && order.status === 'pending' && !order.pickup_shipper_id
-      || driverTaskTab === 'transfer' && (
-        order.status === 'at_origin_warehouse' && !order.central_transfer_shipper_id
-        || order.status === 'at_central_warehouse' && !order.destination_transfer_shipper_id
-      )
       || driverTaskTab === 'delivery' && order.status === 'at_destination_warehouse' && !order.delivery_shipper_id
     )).sort((first, second) => Number(second.weight_kg || 0) - Number(first.weight_kg || 0));
     const driverRole = driverTaskTab === 'delivery' ? 'delivery_driver' : 'pickup_driver';
@@ -521,8 +512,7 @@ export default function TrungTamDieuPhoi() {
     }]));
     const plan = candidates.map((order) => {
       const taskType = order.status === 'pending' ? 'pickup'
-        : order.status === 'at_origin_warehouse' ? 'central_transfer'
-          : order.status === 'at_central_warehouse' ? 'destination_transfer' : 'delivery';
+        : 'delivery';
       const isPickupTask = taskType === 'pickup';
       const areaText = normalizeAreaText(isPickupTask
         ? `${order.shop_address || ''} ${order.shop_province || ''}`
@@ -788,9 +778,9 @@ export default function TrungTamDieuPhoi() {
               <div className="mb-4 flex flex-wrap gap-2">
                 {[
                   { id: 'pickup', label: 'Xe máy lấy hàng' },
-                  { id: 'transfer', label: 'Xe tải trung chuyển' },
+                  { id: 'linehaul', label: 'Xe tải trung chuyển liên kho' },
                   { id: 'delivery', label: 'Xe máy giao hàng' }
-                ].map((task) => <button key={task.id} onClick={async () => { setDriverTaskTab(task.id); await taiDanhSachTaiXe(task.id === 'delivery' ? 'delivery' : task.id === 'transfer' ? 'central_transfer' : 'pickup'); }} className={`rounded-lg px-4 py-2 text-sm font-bold ${driverTaskTab === task.id ? 'bg-emerald-600 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>{task.label}</button>)}
+                ].map((task) => <button key={task.id} onClick={async () => { setDriverTaskTab(task.id); await taiDanhSachTaiXe(task.id); }} className={`rounded-lg px-4 py-2 text-sm font-bold ${driverTaskTab === task.id ? 'bg-emerald-600 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>{task.label}</button>)}
               </div>
               <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
                 {safeTaiXeList.map((driver) => {
@@ -800,10 +790,13 @@ export default function TrungTamDieuPhoi() {
                     const distance = tinhKhoangCachKm(position.lat, position.lng, order.shop_lat, order.shop_lng);
                     return !best || distance < best.distance ? { order, distance } : best;
                   }, null);
-                  return <article key={driver.id} className="rounded-xl border border-slate-100 bg-slate-50 p-4"><p className="font-black text-slate-800">{driver.full_name}</p><p className="mt-1 text-xs text-slate-500">Đang giữ {soDonTaiXeDangGiu(driver.id)} đơn</p>{closestDistance && <p className="mt-2 text-xs font-bold text-emerald-700">Phù hợp nhất: {closestDistance.order.tracking_code} · {closestDistance.distance.toFixed(1)} km đến Shop</p>}</article>;
+                  return <article key={driver.id} className="rounded-xl border border-slate-100 bg-slate-50 p-4"><p className="font-black text-slate-800">{driver.full_name}</p>{driverTaskTab === 'linehaul'
+                    ? <p className="mt-1 text-xs text-indigo-700">Đội xe tải riêng · chỉ nhận chuyến liên kho</p>
+                    : <p className="mt-1 text-xs text-slate-500">Đang giữ {soDonTaiXeDangGiu(driver.id)} đơn</p>}{closestDistance && driverTaskTab === 'pickup' && <p className="mt-2 text-xs font-bold text-emerald-700">Phù hợp nhất: {closestDistance.order.tracking_code} · {closestDistance.distance.toFixed(1)} km đến Shop</p>}</article>;
                 })}
                 {!safeTaiXeList.length && <p className="text-sm text-slate-500">Không có tài xế đang hoạt động trong nhóm này.</p>}
               </div>
+              {driverTaskTab === 'linehaul' && <p className="mt-4 rounded-xl border border-indigo-100 bg-indigo-50 p-3 text-sm text-indigo-900">Tài xế này không được phân đơn lấy hàng Shop hoặc đơn lẻ. Vào <strong>Quản lý xe & chuyến</strong>, tạo chuyến, chọn tài xế xe tải rồi gán các bao hàng.</p>}
               <div className="mt-5 border-t border-slate-100 pt-5">
                 <h3 className="mb-3 font-black text-slate-800">Sức chứa và khu vực phục vụ</h3>
                 <div className="grid gap-3 lg:grid-cols-2">
@@ -811,7 +804,7 @@ export default function TrungTamDieuPhoi() {
                     const draft = profileDrafts[profile.id] || profile;
                     return (
                       <form key={profile.id} onSubmit={(event) => { event.preventDefault(); luuHoSoTaiXe(profile.id); }} className="rounded-xl border border-slate-200 bg-white p-4">
-                        <div className="mb-3 flex justify-between gap-2"><strong>{profile.full_name}</strong><span className="text-xs text-slate-500">{profile.role === 'delivery_driver' ? 'Giao hàng' : 'Nhận / trung chuyển'}</span></div>
+                        <div className="mb-3 flex justify-between gap-2"><strong>{profile.full_name}</strong><span className="text-xs text-slate-500">{profile.role === 'delivery_driver' ? 'Giao hàng' : profile.role === 'linehaul_driver' ? 'Trung chuyển liên kho' : 'Lấy hàng Shop'}</span></div>
                         <p className="mb-3 text-xs text-slate-500">Đang giữ {profile.active_count} đơn · {Number(profile.active_weight_kg || 0).toLocaleString()} kg</p>
                         <div className="grid grid-cols-2 gap-2">
                           <label className="text-xs font-bold text-slate-600">Số đơn tối đa<input type="number" min="1" max="100" required value={draft.max_active_orders} onChange={(event) => setProfileDrafts((current) => ({ ...current, [profile.id]: { ...draft, max_active_orders: event.target.value } }))} className="mt-1 w-full rounded-lg border border-slate-200 p-2 text-sm" /></label>
@@ -877,8 +870,8 @@ export default function TrungTamDieuPhoi() {
                         don.status === 'pending' ? 'bg-amber-100 text-amber-700' : 'bg-purple-100 text-purple-700'
                       }`}>
                         {don.status === 'pending' ? <><Clock size={14}/> Shop → Kho con</> :
-                          don.status === 'at_origin_warehouse' ? <><PackageSearch size={14}/> Kho con → Kho tổng</> :
-                          don.status === 'at_central_warehouse' ? <><PackageSearch size={14}/> Kho tổng → Kho con đích</> :
+                          don.status === 'at_origin_warehouse' ? <><PackageSearch size={14}/> Chờ đóng bao Kho con → Kho tổng</> :
+                          don.status === 'at_central_warehouse' ? <><PackageSearch size={14}/> Chờ đóng bao Kho tổng → Kho con đích</> :
                           <><PackageSearch size={14}/> Kho con → Người nhận</>}
                       </span>
                     </div>
@@ -1062,19 +1055,19 @@ export default function TrungTamDieuPhoi() {
               <ShieldCheck size={16} className="fill-white"/> PHÂN CÔNG THEO NHÓM TÀI XẾ
             </div>
 
-            <h3 className="text-2xl font-black text-slate-800 mb-2 mt-4 text-center">{{ pickup: 'Shop → Kho con', central_transfer: 'Kho con → Kho tổng', destination_transfer: 'Kho tổng → Kho con đích', delivery: 'Kho con → Người nhận' }[loaiNhiemVu]}</h3>
+            <h3 className="text-2xl font-black text-slate-800 mb-2 mt-4 text-center">{{ pickup: 'Shop → Kho con', delivery: 'Kho con → Người nhận' }[loaiNhiemVu]}</h3>
             <p className="text-slate-500 text-sm mb-4 text-center">Đơn hàng: <span className="font-bold text-slate-700">{donDangChon?.tracking_code}</span></p>
 
             <p className="mb-5 rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">Danh sách chỉ gồm tài xế thuộc nhóm phù hợp. Đơn phù hợp nhất được xếp đầu theo khoảng cách GPS tới Shop.</p>
 
             <form onSubmit={phanCongTaiXe} className="space-y-4">
-              <label className="block text-sm font-bold text-slate-700 mb-1">{loaiNhiemVu === 'delivery' ? 'Nhóm tài xế giao hàng' : 'Nhóm tài xế lấy hàng / trung chuyển'}:</label>
+              <label className="block text-sm font-bold text-slate-700 mb-1">{loaiNhiemVu === 'delivery' ? 'Nhóm tài xế giao hàng' : 'Nhóm tài xế lấy hàng tại Shop'}:</label>
               
               <div className="space-y-3 max-h-56 overflow-y-auto pr-2 custom-scrollbar">
                 {danhSachTaiXeHienThi.length === 0 ? (
                   <div className="text-center p-6 bg-red-50 rounded-xl border border-red-100">
                     <p className="text-red-500 text-sm font-bold">Không có tài xế nào thuộc khu vực này!</p>
-                    <p className="text-xs text-red-400 mt-1">Vui lòng tắt "Khóa tuyến" ở trên để huy động tài xế tuyến khác.</p>
+                    <p className="text-xs text-red-400 mt-1">Kiểm tra nhóm tài xế và bộ lọc khu vực đang chọn.</p>
                   </div>
                 ) : (
                   danhSachTaiXeHienThi.map((tx) => (
@@ -1094,7 +1087,7 @@ export default function TrungTamDieuPhoi() {
                       </div>
                       <div className="flex-1">
                         <p className="font-bold text-slate-800">{tx?.full_name}</p>
-                        <p className="text-xs text-slate-500 mt-0.5">{tx.role === 'delivery_driver' ? 'Tài xế giao hàng' : 'Tài xế lấy hàng / trung chuyển'} · đang giữ {soDonTaiXeDangGiu(tx.id)} đơn</p>
+                        <p className="text-xs text-slate-500 mt-0.5">{tx.role === 'delivery_driver' ? 'Tài xế giao hàng' : 'Tài xế lấy hàng tại Shop'} · đang giữ {soDonTaiXeDangGiu(tx.id)} đơn</p>
                         {tx.id === driverNearest?.id && <p className="mt-1 text-xs font-black text-emerald-700">✓ Phù hợp nhất · {driverDistance(tx).toFixed(1)} km tới Shop</p>}
                       </div>
                       {String(taiXeDuocChon) === String(tx.id) && <CheckCircle className="ml-auto text-emerald-500" size={20} />}

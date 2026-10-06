@@ -51,7 +51,7 @@ CHAT_AI_MODEL=gpt-4o-mini
 WEBHOOK_ENCRYPTION_KEY=
 JWT_SECRET=
 
-# SMTP chỉ cần khi cần gửi email thật (OTP giao hàng, hóa đơn, ...)
+# SMTP chỉ cần khi cần gửi email thông báo/hóa đơn thật
 SMTP_HOST=
 SMTP_PORT=587
 SMTP_SECURE=false
@@ -112,30 +112,59 @@ Các tài khoản bên dưới được tạo trong SQL seed. Mật khẩu seed 
 | Nhân sự | `hr@smartlogistics.vn`, `hr2@smartlogistics.vn` |
 | Điều hành | `dieu_hanh@smartlogistics.vn`, `dieu_hanh2@smartlogistics.vn` |
 | Kế toán | `ketoan@smartlogistics.vn`, `ketoan2@smartlogistics.vn` |
-| Kho | `kho@smartlogistics.vn`, `kho2@smartlogistics.vn` |
+| Kho | `kho@smartlogistics.vn` (Kho Tổng), `kho2@smartlogistics.vn` (Gò Vấp), `kho3@smartlogistics.vn` (Quận 1) |
 | Cửa hàng/Shop | `shop@smartlogistics.vn`, `shop2@smartlogistics.vn` |
 | Tài xế lấy hàng | `taixe1@smartlogistics.vn`, `taixe2@smartlogistics.vn` |
 | Tài xế giao hàng | `taixe3@smartlogistics.vn`, `taixe4@smartlogistics.vn` |
+| Tài xế xe tải trung chuyển liên kho | `taixe_tai1@smartlogistics.vn` |
 | Nội dung | `content@smartlogistics.vn`, `content2@smartlogistics.vn` |
 
-Tài khoản `kho@smartlogistics.vn` được gán kho tổng; `kho2@smartlogistics.vn` được gán kho Gò Vấp. SQL seed hiện không tạo sẵn tài khoản `customer_service` hoặc `linehaul_driver`; cần tạo tài khoản có đúng role nếu muốn kiểm tra các luồng đó. Tài khoản chỉ được mở phân hệ đúng với quyền được cấp.
+Tài khoản `kho@smartlogistics.vn` được gán Kho Tổng; `kho2@smartlogistics.vn` được gán Gò Vấp; `kho3@smartlogistics.vn` được gán Quận 1. Tài khoản `taixe_tai1@smartlogistics.vn` thuộc riêng đội xe tải liên kho: tài khoản này chỉ nhận chuyến xe/bao, không nhận nhiệm vụ lấy hàng tại Shop hoặc giao hàng. SQL seed chưa tạo sẵn tài khoản `customer_service`; cần tạo tài khoản có đúng role nếu muốn kiểm tra luồng đó. Tài khoản chỉ được mở phân hệ đúng với quyền được cấp.
+
+Nếu database đã được tạo từ trước, không chạy lại toàn bộ SQL seed chỉ để thêm tài khoản test (script sẽ xóa và tạo lại dữ liệu). Tạo nhân viên mới tại `/nhan-su` với role **Tài xế xe tải (Line-haul)**; đồng thời cần có tài khoản quản lý kho được gán đúng kho Quận 1 để test khâu nhận cuối. Nếu cần dữ liệu test sạch, chỉ import seed vào database test mới.
 
 ## 7. Checklist kiểm tra luồng giao nhận chính
 
-Nên chạy theo đúng thứ tự dưới đây để kiểm tra trạng thái chuyển qua từng chặng. Đăng xuất và đăng nhập tài khoản tương ứng khi đổi vai trò.
+Phần này kiểm tra **một đơn mới từ Shop đến người nhận**. Làm lần lượt từ A đến J; không chuyển bước nếu trạng thái chưa đúng. Khi đổi vai trò, bấm **Đăng xuất** trước rồi đăng nhập tài khoản kế tiếp trong cùng trình duyệt. Giữ lại mã vận đơn tạo ở bước A để tìm đúng một đơn xuyên suốt bài test.
+
+### Trước khi bắt đầu
+
+1. Khởi động MySQL và kiểm tra service đang chạy.
+2. Mở terminal thứ nhất, chạy backend bằng `cd backend`, `npm start`; để cửa sổ này tiếp tục chạy. Terminal cần báo database đã kết nối và server nghe cổng `5000`.
+3. Mở terminal thứ hai, chạy frontend bằng `cd frontend`, `npm run dev`; mở địa chỉ Vite hiện ra, thường là `http://localhost:5173`.
+4. Dùng dữ liệu test, không dùng đơn thật. Đăng nhập bằng email tài khoản và mật khẩu `123`.
+5. Ở bài test này, email người nhận có thể để trống. OTP đã được bỏ; lúc giao thành công chỉ chụp ảnh và lấy chữ ký.
+
+### Trạng thái cần thấy theo thứ tự
+
+| Sau thao tác | Trạng thái dự kiến |
+|---|---|
+| Shop gửi đơn | `pending` |
+| Điều hành gán tài xế lấy hàng | `picking` |
+| Tài xế xác nhận đã lấy | `picked_up` |
+| Kho Gò Vấp nhận đơn | `at_origin_warehouse` |
+| Xe tải rời kho nguồn | `transferring_to_central` |
+| Kho tổng nhận đơn | `at_central_warehouse` |
+| Xe tải rời kho tổng | `transferring_to_destination` |
+| Kho đích nhận đơn | `at_destination_warehouse` |
+| Tài xế giao bắt đầu giao | `delivering` |
+| Tài xế xác nhận giao thành công | `completed` |
+
+Tên trạng thái có thể hiển thị bằng tiếng Việt trên màn hình. Nếu trạng thái chưa đổi, tải lại danh sách một lần và kiểm tra đúng mã vận đơn; không tạo đơn trùng ngay lập tức.
 
 ### A. Tạo đơn — Shop
 
-1. Đăng nhập `shop2@smartlogistics.vn` với mật khẩu `123`.
-2. Vào `/cua-hang` → **Thông Tin Shop**. Lần đầu, nhập tên và số điện thoại Shop; tìm `Số 2 Nguyễn Văn Bảo, Phường 4, Gò Vấp, TP. Hồ Chí Minh`, chọn kết quả trên bản đồ rồi bấm **Lưu thông tin Shop**. Đây là vị trí lấy hàng mặc định được lưu cho các đơn sau.
-3. Mở **Tạo Đơn Giao Hàng**. Xác nhận địa chỉ lấy hàng đã tự điền từ hồ sơ Shop và vị trí đã được xác nhận; không cần chọn lại cho từng đơn. Nếu đổi địa chỉ Shop, cập nhật tại tab **Thông Tin Shop**.
-4. Điền bộ dữ liệu test cơ bản sau (số điện thoại là dữ liệu giả; email hãy thay bằng hộp thư bạn có thể mở):
+1. Mở trang ứng dụng, đăng nhập `shop2@smartlogistics.vn`, mật khẩu `123`.
+2. Mở `/cua-hang`. Ở menu bên trái bấm **Thông Tin Shop**.
+3. Nếu chưa cài hồ sơ: điền tên Shop và số điện thoại. Ở ô tìm địa chỉ nhập `Số 2 Nguyễn Văn Bảo, Phường 4, Gò Vấp, TP. Hồ Chí Minh`, bấm **Tìm**, chọn một kết quả hiện ra, rồi bấm **Lưu thông tin Shop**. Nếu đã có hồ sơ thì kiểm tra tên và địa chỉ, không cần nhập lại.
+4. Bấm menu **Tạo Đơn Giao Hàng**. Phần trên form phải hiện địa chỉ lấy hàng đã lưu. Đây là điểm lấy mặc định; không cần chọn lại cho mỗi đơn.
+5. Nhập dữ liệu test dưới đây (số điện thoại là dữ liệu giả; email người nhận tùy chọn, chỉ nhận email thông báo trạng thái, không còn OTP):
 
    | Trường | Giá trị để nhập |
    |---|---|
    | Tên người nhận | `Nguyễn Thị Mai Test` |
    | Số điện thoại | `0901000010` |
-   | Email người nhận | Email của bạn để nhận OTP giao hàng |
+   | Email người nhận | Để trống hoặc nhập email bạn có thể mở để nhận thông báo trạng thái |
    | Địa chỉ Shop/điểm lấy | Tự điền từ hồ sơ Shop đã lưu |
    | Địa chỉ giao | Tìm kiếm địa chỉ hoặc chọn trên bản đồ; có thể chọn bất kỳ khu vực nào trong TP. Hồ Chí Minh |
    | Cân nặng | `1` kg |
@@ -146,10 +175,9 @@ Nên chạy theo đúng thứ tự dưới đây để kiểm tra trạng thái 
    | Dịch vụ | Tiêu chuẩn |
    | Hàng dễ vỡ / vùng xa | Không |
 
-5. Ở ô **Địa chỉ giao hàng chi tiết**, nhập `Số 15 Lê Duẩn, Bến Nghé, Quận 1, TP. Hồ Chí Minh`, bấm **Tìm địa chỉ** rồi chọn một kết quả. Nếu không dùng tìm kiếm, bấm **Chọn trên bản đồ** rồi bấm đúng vị trí giao. Có thể chọn địa chỉ bất kỳ trong TP. Hồ Chí Minh.
-6. Kiểm tra dòng trạng thái có tọa độ điểm giao đã chọn, sau đó gửi đơn. Nếu bản đồ nền/tìm kiếm không dùng được, vẫn có thể chọn điểm trên bản đồ đang hiển thị; tọa độ được tự động điền, không cần nhập vĩ độ/kinh độ bằng tay.
-7. Gửi đơn, ghi lại mã vận đơn hiển thị. Không dùng mã ví dụ `SLTEST...` cho lượt tạo đơn mới.
-8. Tạo thêm một đơn khác: địa chỉ lấy hàng phải tiếp tục tự điền như hồ sơ đã lưu; chọn một địa chỉ giao khác trong TP. Hồ Chí Minh để xác nhận không bị giới hạn vào một quận/huyện cụ thể.
+6. Trong trường **Địa chỉ giao hàng chi tiết**, nhập `Số 15 Lê Duẩn, Bến Nghé, Quận 1, TP. Hồ Chí Minh`, bấm **Tìm địa chỉ**, đợi kết quả rồi bấm chọn địa chỉ phù hợp. Nếu không tìm được, bấm **Chọn trên bản đồ**, chờ bản đồ tải và bấm một điểm trong TP.HCM. Dòng trạng thái bên cạnh phải hiện **Đã chọn điểm giao** cùng tọa độ. Không cần nhập tọa độ bằng tay.
+7. Kiểm tra các trường bắt buộc và bấm nút gửi/tạo đơn ở cuối form. Khi hộp thoại báo tạo thành công, **chép mã vận đơn** ra chỗ tạm; mã này dùng ở các bước B–J. Đơn mới phải hiện trong **Quản Lý Vận Đơn**.
+8. (Tùy chọn) Tạo thêm đơn thử để kiểm tra địa chỉ lấy hàng vẫn tự điền sau khi gửi đơn trước. Không dùng mã ví dụ `SLTEST...` thay cho mã đơn vừa tạo.
 
 **Kỳ vọng:** đơn tạo thành công với trạng thái `pending`. Tọa độ Shop được lấy từ hồ sơ và thuộc TP. Hồ Chí Minh; tọa độ giao được phép ở bất kỳ địa chỉ nào trong TP. Hồ Chí Minh. Sau khi tạo đơn, địa chỉ lấy hàng vẫn được giữ cho đơn tiếp theo. Với vị trí Shop gần `10.8231, 106.6881`, kho nguồn gần nhất cần là kho con Gò Vấp.
 
@@ -157,19 +185,19 @@ Nên chạy theo đúng thứ tự dưới đây để kiểm tra trạng thái 
 
 ### B. Phân tài xế lấy hàng — Điều hành
 
-1. Đăng nhập `dieu_hanh@smartlogistics.vn`.
-2. Vào `/dieu-hanh` → **Phân Tuyến Tài Xế**.
-3. Tìm đúng mã vận đơn vừa ghi lại; xác nhận người nhận là `Nguyễn Thị Mai Test` để tránh chọn nhầm đơn seed.
-4. Chọn nhiệm vụ lấy hàng tại Shop (`pickup`) và tài xế lấy hàng đang hoạt động, ví dụ `taixe2@smartlogistics.vn`.
-5. Xác nhận phân công. Hệ thống tự chọn kho con gần tọa độ Shop nhất.
+1. Đăng xuất Shop; đăng nhập `dieu_hanh@smartlogistics.vn`, mật khẩu `123`.
+2. Mở `/dieu-hanh`, vào màn **Phân Tuyến Tài Xế**.
+3. Tìm/nhấn đơn theo mã vận đơn đã chép ở bước A. Trước khi thao tác, đối chiếu tên người nhận `Nguyễn Thị Mai Test`.
+4. Chọn chặng **Lấy hàng tại Shop** (`pickup`), chọn tài xế lấy hàng `taixe2@smartlogistics.vn`, rồi bấm nút xác nhận/lưu phân công.
+5. Tải lại danh sách hoặc mở lại chi tiết đơn để xem trạng thái và kho nguồn hệ thống chọn. Vị trí Shop gần Gò Vấp thì kho nguồn dự kiến là **Kho Gò Vấp**.
 
 **Kỳ vọng:** đơn sang `picking`; đơn xuất hiện trong danh sách nhiệm vụ của `taixe2`. Với tọa độ Shop gần `10.8231, 106.6881`, kho nguồn cần là kho con Gò Vấp.
 
 ### C. Lấy hàng tại Shop — Tài xế lấy hàng
 
-1. Đăng xuất khỏi Điều hành; đăng nhập `taixe2@smartlogistics.vn` với mật khẩu `123`.
-2. Mở `/tai-xe` → **Đơn cần lấy** → đúng đơn `Nguyễn Thị Mai Test` → **Mở camera quét mã nhận hàng**.
-3. Cho phép trình duyệt dùng camera. Đưa nhãn mã vạch của đúng đơn vào khung, giữ máy ổn định và đủ sáng.
+1. Đăng xuất Điều hành; đăng nhập `taixe2@smartlogistics.vn`, mật khẩu `123`.
+2. Mở `/tai-xe`, tìm đơn `Nguyễn Thị Mai Test` có đúng mã vận đơn.
+3. Bấm **Mở camera quét mã nhận hàng** và cho phép trình duyệt dùng camera. Đưa mã vạch của đúng đơn vào khung quét.
 4. Nếu camera không hoạt động/không đọc được, nhập **mã vận đơn thật vừa tạo ở bước A** vào ô dự phòng rồi nhấn **Xác nhận**. Không nhập mã ở ví dụ trong README. Có thể dùng máy quét USB/Bluetooth: đặt con trỏ vào ô dự phòng và quét nhãn.
 5. Nếu hiện “Mã quét không khớp”, đối chiếu mã đang hiện trong hộp quét với nhãn; nếu hiện lỗi kết nối, kiểm tra backend đang chạy ở cổng `5000`.
 
@@ -177,8 +205,8 @@ Nên chạy theo đúng thứ tự dưới đây để kiểm tra trạng thái 
 
 ### D. Nhập kho nguồn — Kho
 
-1. Đăng xuất khỏi tài xế; đăng nhập `kho2@smartlogistics.vn` với mật khẩu `123`.
-2. Vào `/kho` → **Máy Quét Mã Vạch**; xác nhận kho đang thao tác là **Kho con Gò Vấp**.
+1. Đăng xuất tài xế; đăng nhập `kho2@smartlogistics.vn`, mật khẩu `123`.
+2. Mở `/kho` → **Máy Quét Mã Vạch**. Trước khi quét, kiểm tra tên kho đang chọn là **Kho con Gò Vấp**.
 3. Tại phần **Tạo nhãn vị trí kệ mới**, nhập mã `TEST-A1-03` và tên `Kệ test Gò Vấp`, sau đó nhấn **Tạo mã và nhãn mã vạch**. Nếu mã này đã tồn tại từ lần test trước, đổi mã thành `TEST-A1-04`. Khi tạo thành công, giao diện tự chọn vị trí vừa tạo.
 4. Nhập/quét đúng mã vận đơn đã ghi ở bước A. Nếu không có máy quét, nhập mã vào ô lớn bên dưới rồi nhấn Enter.
 5. Xác nhận kết quả nhập kho; mở danh sách tồn kho để kiểm tra đơn và vị trí kệ `TEST-A1-03` (hoặc mã mới bạn vừa tạo).
@@ -187,46 +215,54 @@ Nên chạy theo đúng thứ tự dưới đây để kiểm tra trạng thái 
 
 Kho nguồn được hệ thống xác định khi Điều hành phân công tài xế lấy hàng: hệ thống chọn kho con đang hoạt động gần tọa độ Shop nhất. Ví dụ, tọa độ Shop mặc định `10.762622, 106.660172` gần kho Quận 1 hơn kho Gò Vấp. Vì tài khoản `kho2` chỉ thao tác tại kho Gò Vấp, đơn được tạo ở vị trí mặc định có thể không quét nhận được tại tài khoản này. Nếu quét sai kho, backend trả tên kho được phân tuyến và tên kho đang chọn; với bộ dữ liệu mẫu ở bước A, kho nguồn dự kiến là Gò Vấp.
 
-### E. Trung chuyển kho nguồn → kho tổng
+### E. Gửi bao từ kho nguồn → kho tổng — đội xe tải riêng
 
-1. Đăng nhập Điều hành; chọn đơn đang ở `at_origin_warehouse`.
-2. Phân nhiệm vụ trung chuyển về kho tổng (`central_transfer`) cho tài xế lấy hàng.
-3. Tài xế thực hiện nhiệm vụ trung chuyển.
-4. Đăng nhập tài khoản kho tổng `kho@smartlogistics.vn`, mở `/kho` và quét nhận tại đúng kho tổng.
+1. Đăng xuất tài xế lấy hàng; đăng nhập `kho2@smartlogistics.vn`. Mở `/kho` → **Nhập / Xuất Bao Liên Kho**.
+2. Tạo bao với kho đi **Gò Vấp** và kho đến **Kho Tổng**. Chọn bao vừa tạo.
+3. Quét/nhập mã vận đơn đã ghi ở bước A vào bao. Có thể nhập nhiều mã liên tiếp; danh sách và số đơn trong bao sẽ cập nhật.
+4. Bấm **Niêm phong bao đã quét đủ**. Không chuyển đơn lẻ cho tài xế lấy hàng.
+5. Đăng nhập Điều hành `dieu_hanh@smartlogistics.vn`, mở **Quản lý xe & chuyến**. Tạo chuyến Gò Vấp → Kho Tổng; bắt buộc chọn xe tải và tài xế riêng `taixe_tai1@smartlogistics.vn`. Gán bao đã niêm phong đúng tuyến vào chuyến.
+6. Đăng xuất Điều hành; đăng nhập `taixe_tai1@smartlogistics.vn`, mở `/tai-xe`. Tài xế xe tải quét mã từng bao được giao, sau đó bấm bắt đầu chuyến. Khi tới nơi, xác nhận đã đến kho.
+7. Đăng nhập tài khoản kho con đích, ví dụ `kho3@smartlogistics.vn` cho Quận 1, mở **Nhập / Xuất Bao Liên Kho** và nhập mã bao.
 
-**Kỳ vọng:** trạng thái lần lượt qua `transferring_to_central` rồi `at_central_warehouse`.
+**Kỳ vọng:** đơn đi qua `transferring_to_central` khi xe rời kho nguồn, sau đó sang `at_central_warehouse` khi Kho Tổng quét nhận. Màn hình sau quét hiển thị toàn bộ mã vận đơn trong bao. Tài xế lấy hàng Shop không xuất hiện trong danh sách tài xế xe tải và không thể được gán cho chuyến.
 
-### F. Trung chuyển kho tổng → kho đích
+### F. Gửi bao từ Kho Tổng → kho đích và phân tài xế giao
 
-1. Tại `/kho`, kiểm tra/tạo bao hàng và niêm phong bao theo quy trình màn hình.
-2. Điều hành hoặc Kho tổng tạo chuyến giữa kho tổng và kho con đích; chọn xe sẵn sàng và tài xế line-haul nếu đã tạo tài khoản.
-3. Gán bao đúng tuyến vào chuyến, rồi thực hiện quét bao/khởi hành/đến kho theo màn hình.
-4. Điều hành phân nhiệm vụ `destination_transfer` cho đơn nếu luồng đang yêu cầu phân tài xế theo đơn.
-5. Kho con đích quét nhận đơn tại đúng kho đích.
+1. Ở Kho Tổng, vào **Nhập / Xuất Bao Liên Kho**, tạo bao đi từ **Kho Tổng** đến kho đích theo địa chỉ người nhận.
+2. Quét các mã đơn đang nằm trong tồn Kho Tổng vào bao; kiểm tra đủ mã cần gửi rồi bấm niêm phong.
+3. Trong **Quản lý xe & chuyến**, tạo chuyến Kho Tổng → kho đích; chọn xe tải và tài xế `linehaul_driver`, rồi gán bao đúng tuyến.
+4. Tài xế xe tải riêng đăng nhập `/tai-xe`, quét bao, khởi hành và báo đã đến.
+5. Tại kho đích, đăng nhập tài khoản kho tương ứng, mở **Nhập / Xuất Bao Liên Kho** và nhập mã bao.
+6. Đối chiếu danh sách mã đơn được hiển thị ngay sau khi quét. Nếu kho hiện tại là kho đích, chọn tài xế giao hàng rồi bấm **Phân các đơn chờ giao** để phân các đơn trong bao cùng lúc. Đơn có khoản phải thu vẫn cần tài xế đủ ký quỹ; các đơn không phân được sẽ hiện trong thông báo để kiểm tra/phân lại.
 
-**Kỳ vọng:** chuyến/bao được ghi nhận đúng tuyến; đơn đến kho con đích với trạng thái `at_destination_warehouse`. Kho tổng chỉ được lập chuyến xuất từ kho được gán.
+**Kỳ vọng:** các đơn sang `transferring_to_destination` lúc xe rời Kho Tổng và `at_destination_warehouse` sau khi kho đích nhận bao. Đơn trong bao hiện thành danh sách; chỉ tài xế role `delivery_driver` mới nhận các đơn giao hàng. Kho nguồn → Kho Tổng và Kho Tổng → kho đích đều dùng chuyến xe/bao, không dùng nhóm tài xế lấy hàng.
 
 ### G. Phân tài xế giao hàng
 
-1. Đăng nhập Điều hành, chọn đơn tại `at_destination_warehouse`.
-2. Phân nhiệm vụ `delivery` cho tài xế giao hàng, ví dụ `taixe3@smartlogistics.vn`.
+1. Có thể phân tài xế ngay sau khi quét bao đến kho đích ở bước F; hoặc đăng nhập Điều hành, chọn đơn tại `at_destination_warehouse` để phân riêng.
+2. Chọn tài xế giao hàng, ví dụ `taixe3@smartlogistics.vn` (role `delivery_driver`).
 3. Nếu đơn có COD hoặc cước người nhận phải trả, đảm bảo tài xế có đủ ký quỹ khả dụng trước khi phân công.
 
 **Kỳ vọng:** tài xế giao nhìn thấy đơn. Khi khoản phải thu lớn hơn 0, backend giữ ký quỹ; nếu không đủ số dư khả dụng thì phân công bị từ chối.
 
 ### H. Giao hàng thành công hoặc thất bại — Tài xế giao hàng
 
-1. Đăng nhập tài xế giao được phân công, vào `/tai-xe`.
-2. Bắt đầu giao; trạng thái chuyển sang `delivering`.
-3. Với thành công, nhập OTP khách nhận được qua email, xác nhận thu COD/cước nếu có, chụp ảnh minh chứng và lấy chữ ký điện tử người nhận.
-4. Với thất bại, chọn lý do hợp lệ và gửi ảnh minh chứng.
+1. Đăng xuất Điều hành; đăng nhập tài xế giao được phân công, ví dụ `taixe3@smartlogistics.vn`, mật khẩu `123`; mở `/tai-xe`.
+2. Tìm đúng đơn theo mã đã ghi ở bước A. Mở chi tiết đơn và bấm **Bắt đầu giao** (hoặc nút tương đương). Tải lại danh sách; trạng thái cần thành `delivering`.
+3. Khi giao thành công, mở thao tác **Giao thành công**:
+   - Chụp/chọn một ảnh minh chứng giao hàng.
+   - Người nhận ký bằng ngón tay/chuột trong ô **Chữ ký người nhận**.
+   - Nếu tổng tiền phải thu lớn hơn `0`, tích **Xác nhận đã thu đủ** rồi chọn **Tiền mặt** hoặc **Chuyển khoản**.
+   - Nếu tổng tiền phải thu bằng `0` (như đơn test ở bước A), không cần xác nhận tiền hay chọn phương thức.
+   - Bấm nút xác nhận hoàn tất. Không cần email người nhận, không có mã OTP và không hỏi khách đọc mã.
+4. Để thử giao thất bại thay vì thành công, mở thao tác thất bại, chọn một lý do trong danh sách, chụp ảnh minh chứng rồi gửi. Không dùng cùng đơn cho cả hai nhánh: giao thất bại chuyển đơn sang luồng hoàn hàng.
 
 **Kỳ vọng:**
 
-- Giao thành công: đơn thành `completed`, lưu OTP đã xác minh, ảnh, chữ ký và thông tin thu COD.
+- Giao thành công: đơn thành `completed`, lưu ảnh, chữ ký và thông tin thu COD.
 - Giao thất bại: đơn thành `returning`; khi hàng hoàn về kho hiện giữ đơn và được quét nhận, đơn kết thúc thành `cancelled`.
-
-Nếu chưa cấu hình SMTP, có thể dùng database **test** để kiểm tra OTP được ghi ở đơn hàng; không dùng cách này trên dữ liệu thật.
+- Mở lại chi tiết đơn ở Shop: ảnh minh chứng/chữ ký được hiển thị trong lịch sử; không có trường OTP nào cần nhập.
 
 ### I. Đối soát tiền
 
@@ -299,9 +335,8 @@ Các đơn này được seed ở nhiều trạng thái khác nhau để kiểm 
 | Chấm công/GPS không chạy | Cấp quyền camera và vị trí trong trình duyệt; kiểm tra thiết bị có GPS/vị trí khả dụng. |
 | Nhập kho báo sai vị trí/kho | Đơn phải đang ở đúng chặng; chọn đúng kho được phân tuyến (kho gần vị trí Shop nhất ở chặng lấy hàng) và mã kệ đã khai báo tại kho đó. |
 | Không phân công được tài xế giao | Kiểm tra role tài xế, trạng thái đơn, tài xế đang có nhiệm vụ khác và số dư ký quỹ khả dụng khi đơn có khoản phải thu. |
-| Không hoàn tất giao hàng | Cần OTP đúng; ảnh minh chứng; chữ ký nếu thành công; xác nhận thu tiền và phương thức COD khi có khoản phải thu. |
-| Không nhận được email OTP | Kiểm tra cấu hình SMTP và địa chỉ email người nhận. Có thể kiểm tra OTP trong database test. |
-| Chat nhân viên/line-haul không có tài khoản phù hợp | Seed chưa tạo role `customer_service` và `linehaul_driver`; tạo người dùng có đúng role để kiểm tra. |
+| Không hoàn tất giao hàng | Giao thành công cần ảnh minh chứng và chữ ký; xác nhận đã thu tiền và chọn phương thức nếu đơn có khoản phải thu. Giao thất bại cần chọn lý do và ảnh minh chứng. |
+| Chat nhân viên không có tài khoản phù hợp | Seed chưa tạo role `customer_service`; tạo người dùng có đúng role nếu cần kiểm tra chat hỗ trợ. |
 
 ## 12. Trạng thái xác minh hiện tại
 
