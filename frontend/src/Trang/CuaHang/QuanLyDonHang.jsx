@@ -16,13 +16,6 @@ const HCMC_BOUNDARY = JSON.parse(hcmcLegacyBoundaryRaw).features[0].geometry;
 const HCMC_MAP_BOUNDS = L.geoJSON(HCMC_BOUNDARY).getBounds();
 const HCMC_NOMINATIM_VIEWBOX = `${HCMC_MAP_BOUNDS.getWest()},${HCMC_MAP_BOUNDS.getNorth()},${HCMC_MAP_BOUNDS.getEast()},${HCMC_MAP_BOUNDS.getSouth()}`;
 const HCMC_BOUNDARY_STYLE = { color: '#2563eb', weight: 2, fillOpacity: 0.03 };
-const HCMC_DISTRICTS = [
-  'Quận 1', 'Quận 3', 'Quận 4', 'Quận 5', 'Quận 6', 'Quận 7',
-  'Quận 8', 'Quận 10', 'Quận 11', 'Quận 12', 'Quận Bình Tân',
-  'Quận Bình Thạnh', 'Quận Gò Vấp', 'Quận Phú Nhuận', 'Quận Tân Bình',
-  'Quận Tân Phú', 'Thành phố Thủ Đức', 'Huyện Bình Chánh', 'Huyện Cần Giờ',
-  'Huyện Củ Chi', 'Huyện Hóc Môn', 'Huyện Nhà Bè', 'Quận 2', 'Quận 9'
-];
 const BULK_ORDER_LIMIT = 500;
 const API_URL = (import.meta.env.VITE_API_URL || 'http://localhost:5000').replace(/\/+$/, '');
 const BULK_ORDER_HEADERS = [
@@ -211,7 +204,7 @@ export default function QuanLyDonHang() {
     receiver_lat: null,
     receiver_lng: null,
     receiver_location_verified: false,
-    destination_province: 'Quận 1',
+    destination_province: 'TP. Hồ Chí Minh',
     cod_amount: '',
     weight_kg: '1',
     length: '10',
@@ -235,6 +228,7 @@ export default function QuanLyDonHang() {
   const [receiverSuggestions, setReceiverSuggestions] = useState([]);
   const shopReverseGeocodeRequest = useRef(0);
   const receiverReverseGeocodeRequest = useRef(0);
+  const profileReverseGeocodeRequest = useRef(0);
   
   const [shippingFee, setShippingFee] = useState(0);
   const [chargeableWeight, setChargeableWeight] = useState(0); // Trọng lượng tính cước cuối cùng
@@ -244,6 +238,22 @@ export default function QuanLyDonHang() {
   const [bulkBusy, setBulkBusy] = useState(false);
   const [bulkError, setBulkError] = useState('');
   const [shopApiKeys, setShopApiKeys] = useState([]);
+  const [shopProfile, setShopProfile] = useState({
+    full_name: localStorage.getItem('full_name') || '',
+    email: localStorage.getItem('email') || '',
+    phone: '',
+    shop_address: '',
+    shop_province: 'TP. Hồ Chí Minh',
+    shop_lat: null,
+    shop_lng: null
+  });
+  const [shopProfileLoading, setShopProfileLoading] = useState(true);
+  const [shopProfileSaving, setShopProfileSaving] = useState(false);
+  const [shopProfileError, setShopProfileError] = useState('');
+  const [shopProfileMessage, setShopProfileMessage] = useState('');
+  const [showProfileMap, setShowProfileMap] = useState(false);
+  const [profileMapSearch, setProfileMapSearch] = useState('');
+  const [profileSuggestions, setProfileSuggestions] = useState([]);
   const [shopWebhook, setShopWebhook] = useState({ target_url: '', enabled: false, secret_configured: false });
   const [apiKeyName, setApiKeyName] = useState('');
   const [revealedCredential, setRevealedCredential] = useState(null);
@@ -269,7 +279,40 @@ export default function QuanLyDonHang() {
     || (Number(form.length) * Number(form.width) * Number(form.height)) > 1000000;
   
   const shopId = localStorage.getItem('user_id');
-  const shopName = localStorage.getItem('full_name') || 'Cửa Hàng Đối Tác';
+  const shopName = shopProfile.full_name || localStorage.getItem('full_name') || 'Cửa Hàng Đối Tác';
+
+  const taiHoSoShop = useCallback(async () => {
+    setShopProfileLoading(true);
+    setShopProfileError('');
+    try {
+      const response = await fetch(`${API_URL}/api/shop/profile`);
+      const result = await response.json();
+      if (!response.ok || !result.success) throw new Error(result.message || 'Không tải được thông tin Shop.');
+      const profile = result.data;
+      setShopProfile(profile);
+      setProfileMapSearch(profile.shop_address || '');
+      if (profile.shop_address && profile.shop_lat !== null && profile.shop_lat !== ''
+        && profile.shop_lng !== null && profile.shop_lng !== ''
+        && Number.isFinite(Number(profile.shop_lat)) && Number.isFinite(Number(profile.shop_lng))) {
+        setForm((current) => ({
+          ...current,
+          shop_address: profile.shop_address,
+          shop_province: profile.shop_province || 'TP. Hồ Chí Minh',
+          shop_lat: Number(profile.shop_lat),
+          shop_lng: Number(profile.shop_lng),
+          shop_location_verified: true
+        }));
+      }
+    } catch (error) {
+      setShopProfileError(error.message || 'Không tải được thông tin Shop.');
+    } finally {
+      setShopProfileLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    taiHoSoShop();
+  }, [taiHoSoShop]);
 
   const taiCauHinhTichHop = useCallback(async () => {
     setIntegrationBusy(true);
@@ -440,8 +483,17 @@ export default function QuanLyDonHang() {
   const validateBulkOrder = (source, rowNumber) => {
     const order = Object.fromEntries(BULK_ORDER_HEADERS.map((header) => [header, source[header] ?? '']));
     const errors = [];
+    const hasPickupData = ['shop_address', 'shop_lat', 'shop_lng']
+      .some((field) => String(order[field] ?? '').trim() !== '');
+    if (!hasPickupData && shopProfile.shop_address
+      && isWithinHcmcBoundary(shopProfile.shop_lat, shopProfile.shop_lng)) {
+      order.shop_address = shopProfile.shop_address;
+      order.shop_province = shopProfile.shop_province || 'TP. Hồ Chí Minh';
+      order.shop_lat = Number(shopProfile.shop_lat);
+      order.shop_lng = Number(shopProfile.shop_lng);
+    }
     const requiredText = [
-      ['shop_address', 'Thiếu địa chỉ Shop'],
+      ['shop_address', 'Thiếu địa chỉ Shop (hoặc chưa lưu hồ sơ Shop)'],
       ['receiver_name', 'Thiếu tên người nhận'],
       ['receiver_phone', 'Thiếu số điện thoại'],
       ['receiver_address', 'Thiếu địa chỉ người nhận']
@@ -506,8 +558,8 @@ export default function QuanLyDonHang() {
       && (weight > 100 || length * width * height > 1000000)) {
       order.vehicle_type = 'truck';
     }
-    order.shop_province = String(order.shop_province || 'Thành phố Hồ Chí Minh').trim();
-    order.destination_province = String(order.destination_province || 'Quận 1').trim();
+    order.shop_province = String(order.shop_province || shopProfile.shop_province || 'TP. Hồ Chí Minh').trim();
+    order.destination_province = String(order.destination_province || 'TP. Hồ Chí Minh').trim();
     order.service_type = String(order.service_type || 'standard').trim().toLowerCase();
     order.fee_payer = String(order.fee_payer || 'sender').trim().toLowerCase();
     if (!['economy', 'standard', 'express'].includes(order.service_type)) errors.push('Loại dịch vụ phải là economy, standard hoặc express');
@@ -811,6 +863,115 @@ export default function QuanLyDonHang() {
     return 15000;
   };
 
+  const searchProfileLocation = async (query) => {
+    const cleanQuery = query.trim();
+    setProfileMapSearch(query);
+    setShopProfileError('');
+    if (cleanQuery.length < 2) {
+      setProfileSuggestions([]);
+      return;
+    }
+    try {
+      const response = await fetch(`https://nominatim.openstreetmap.org/search?format=jsonv2&limit=5&countrycodes=vn&viewbox=${HCMC_NOMINATIM_VIEWBOX}&bounded=1&q=${encodeURIComponent(`${cleanQuery}, TP. Hồ Chí Minh, Việt Nam`)}`, {
+        headers: { 'Accept-Language': 'vi' }
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const places = await response.json();
+      setProfileSuggestions(Array.isArray(places)
+        ? places.filter((place) => isWithinHcmcBoundary(place.lat, place.lon))
+        : []);
+    } catch (error) {
+      console.error('Lỗi tìm địa chỉ Shop:', error);
+      setProfileSuggestions([]);
+      setShopProfileError('Không tìm được địa chỉ. Bạn vẫn có thể chọn vị trí trực tiếp trên bản đồ.');
+    }
+  };
+
+  const chooseProfileLocation = (place) => {
+    profileReverseGeocodeRequest.current += 1;
+    const lat = Number(place.lat);
+    const lng = Number(place.lon);
+    if (!isWithinHcmcBoundary(lat, lng)) {
+      setProfileSuggestions([]);
+      return alert('Chỉ được chọn vị trí trong phạm vi TP. Hồ Chí Minh.');
+    }
+    setShopProfile((current) => ({
+      ...current,
+      shop_address: place.display_name || 'Địa điểm Shop đã chọn',
+      shop_province: 'TP. Hồ Chí Minh',
+      shop_lat: lat,
+      shop_lng: lng
+    }));
+    setProfileMapSearch(place.display_name || '');
+    setProfileSuggestions([]);
+    setShopProfileError('');
+  };
+
+  const updateProfileLocationFromMap = async (lat, lng) => {
+    const requestId = ++profileReverseGeocodeRequest.current;
+    const fallbackAddress = `Vị trí trên bản đồ (${lat.toFixed(5)}, ${lng.toFixed(5)})`;
+    setShopProfile((current) => ({
+      ...current,
+      shop_address: fallbackAddress,
+      shop_province: 'TP. Hồ Chí Minh',
+      shop_lat: lat,
+      shop_lng: lng
+    }));
+    setProfileMapSearch(fallbackAddress);
+    try {
+      const response = await fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}&zoom=18&addressdetails=1`, {
+        headers: { 'Accept-Language': 'vi' }
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const result = await response.json();
+      if (requestId !== profileReverseGeocodeRequest.current) return;
+      const address = result?.display_name || fallbackAddress;
+      setShopProfile((current) => ({ ...current, shop_address: address, shop_lat: lat, shop_lng: lng }));
+      setProfileMapSearch(address);
+    } catch (error) {
+      if (requestId === profileReverseGeocodeRequest.current) {
+        console.warn('Không lấy được địa chỉ Shop từ bản đồ; vẫn giữ tọa độ đã chọn:', error);
+      }
+    }
+  };
+
+  const luuHoSoShop = async (event) => {
+    event.preventDefault();
+    setShopProfileError('');
+    setShopProfileMessage('');
+    if (!shopProfile.full_name?.trim() || !shopProfile.shop_address?.trim()
+      || !isWithinHcmcBoundary(shopProfile.shop_lat, shopProfile.shop_lng)) {
+      setShopProfileError('Vui lòng nhập tên Shop và chọn địa chỉ lấy hàng trong TP. Hồ Chí Minh trên bản đồ.');
+      return;
+    }
+    setShopProfileSaving(true);
+    try {
+      const response = await fetch(`${API_URL}/api/shop/profile`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(shopProfile)
+      });
+      const result = await response.json();
+      if (!response.ok || !result.success) throw new Error(result.message || 'Không thể lưu thông tin Shop.');
+      setShopProfile(result.data);
+      setProfileMapSearch(result.data.shop_address);
+      localStorage.setItem('full_name', result.data.full_name);
+      setForm((current) => ({
+        ...current,
+        shop_address: result.data.shop_address,
+        shop_province: result.data.shop_province,
+        shop_lat: Number(result.data.shop_lat),
+        shop_lng: Number(result.data.shop_lng),
+        shop_location_verified: true
+      }));
+      setShopProfileMessage(result.message || 'Đã cập nhật thông tin Shop.');
+    } catch (error) {
+      setShopProfileError(error.message || 'Không thể lưu thông tin Shop.');
+    } finally {
+      setShopProfileSaving(false);
+    }
+  };
+
   const updateShopLocationFromMap = async (lat, lng) => {
     const requestId = ++shopReverseGeocodeRequest.current;
     const fallbackAddress = `Vị trí trên bản đồ (${lat.toFixed(5)}, ${lng.toFixed(5)})`;
@@ -916,7 +1077,7 @@ export default function QuanLyDonHang() {
     }
 
     try {
-      const res = await fetch(`https://nominatim.openstreetmap.org/search?format=jsonv2&limit=5&countrycodes=vn&viewbox=${HCMC_NOMINATIM_VIEWBOX}&bounded=1&q=${encodeURIComponent(`${cleanQuery}, ${form.destination_province}, TP. Hồ Chí Minh, Việt Nam`)}`, {
+      const res = await fetch(`https://nominatim.openstreetmap.org/search?format=jsonv2&limit=5&countrycodes=vn&viewbox=${HCMC_NOMINATIM_VIEWBOX}&bounded=1&q=${encodeURIComponent(`${cleanQuery}, TP. Hồ Chí Minh, Việt Nam`)}`, {
         headers: { 'Accept-Language': 'vi' }
       });
       if (!res.ok) {
@@ -947,8 +1108,15 @@ export default function QuanLyDonHang() {
 
   const taoDonMoi = async (e) => {
     e.preventDefault();
+    if (shopProfileLoading) {
+      return alert('Đang tải hồ sơ Shop, vui lòng thử lại sau.');
+    }
+    if (!shopProfile.shop_address || !isWithinHcmcBoundary(shopProfile.shop_lat, shopProfile.shop_lng)) {
+      setTabHienTai('profile');
+      return alert('Vui lòng lưu thông tin và vị trí lấy hàng mặc định trong mục Thông tin Shop trước khi tạo đơn.');
+    }
     if (!form.shop_location_verified || !form.receiver_location_verified) {
-      return alert('Vui lòng chọn đúng vị trí Shop và điểm giao trên bản đồ để hệ thống định tuyến qua kho con.');
+      return alert('Vui lòng giữ vị trí lấy hàng đã lưu và chọn điểm giao trên bản đồ trong TP. Hồ Chí Minh.');
     }
     try {
       const res = await fetch(`${API_URL}/api/orders`, {
@@ -997,7 +1165,7 @@ export default function QuanLyDonHang() {
         setShippingFee(confirmedFee);
         alert(`Tạo đơn thành công! Mã vận đơn: ${trackingCode} | Cước phí: ${confirmedFee.toLocaleString()} đ`);
         setForm({ 
-          shop_address: '', shop_province: 'Thành phố Hồ Chí Minh', shop_lat: 10.762622, shop_lng: 106.660172, shop_location_verified: false, receiver_name: '', receiver_phone: '', receiver_address: '', receiver_lat: null, receiver_lng: null, receiver_location_verified: false, destination_province: 'Quận 1', cod_amount: '',
+          shop_address: shopProfile.shop_address, shop_province: shopProfile.shop_province || 'TP. Hồ Chí Minh', shop_lat: Number(shopProfile.shop_lat), shop_lng: Number(shopProfile.shop_lng), shop_location_verified: true, receiver_name: '', receiver_phone: '', receiver_address: '', receiver_lat: null, receiver_lng: null, receiver_location_verified: false, destination_province: 'TP. Hồ Chí Minh', cod_amount: '',
           customer_email: '',
           weight_kg: '1', length: '10', width: '10', height: '10', item_value: '0', service_fee: '0',
           distance_km: '5', is_remote_area: false, service_type: 'standard', vehicle_type: 'motorbike', fee_payer: 'sender', is_fragile: false
@@ -1132,6 +1300,14 @@ export default function QuanLyDonHang() {
               </button>
 
               <button
+                onClick={() => setTabHienTai('profile')}
+                className={`px-5 py-4 rounded-2xl font-bold text-left transition-all duration-300 flex items-center gap-4 group ${tabHienTai === 'profile' ? 'bg-gradient-to-r from-blue-600 to-blue-500 text-white shadow-lg shadow-blue-200' : 'bg-transparent text-slate-500 hover:bg-blue-50 hover:text-blue-600'}`}
+              >
+                <User size={20} className={tabHienTai === 'profile' ? 'text-white' : 'text-slate-400 group-hover:text-blue-500'} />
+                Thông Tin Shop
+              </button>
+
+              <button
                 onClick={() => setTabHienTai('import')}
                 className={`px-5 py-4 rounded-2xl font-bold text-left transition-all duration-300 flex items-center gap-4 group ${tabHienTai === 'import' ? 'bg-gradient-to-r from-blue-600 to-blue-500 text-white shadow-lg shadow-blue-200' : 'bg-transparent text-slate-500 hover:bg-blue-50 hover:text-blue-600'}`}
               >
@@ -1183,13 +1359,94 @@ export default function QuanLyDonHang() {
           <div className="mb-8 flex justify-between items-end">
             <div>
               <h1 className="text-3xl font-black text-slate-800 tracking-tight">
-                {tabHienTai === 'taodon' ? 'Khởi Tạo Vận Đơn Mới' : tabHienTai === 'thongbao' ? 'Thông Báo Vận Đơn' : tabHienTai === 'import' ? 'Import Đơn Hàng Hàng Loạt' : tabHienTai === 'integrations' ? 'API & Webhook' : tabHienTai === 'rma' ? 'Quản Lý Hàng Hoàn · RMA' : 'Danh Sách Vận Đơn'}
+                {tabHienTai === 'taodon' ? 'Khởi Tạo Vận Đơn Mới' : tabHienTai === 'thongbao' ? 'Thông Báo Vận Đơn' : tabHienTai === 'import' ? 'Import Đơn Hàng Hàng Loạt' : tabHienTai === 'integrations' ? 'API & Webhook' : tabHienTai === 'profile' ? 'Thông Tin Shop' : tabHienTai === 'rma' ? 'Quản Lý Hàng Hoàn · RMA' : 'Danh Sách Vận Đơn'}
               </h1>
               <p className="text-slate-500 mt-2">
-                {tabHienTai === 'taodon' ? 'Lựa chọn gói dịch vụ và nhập thông tin để tính cước tự động.' : tabHienTai === 'thongbao' ? 'Cập nhật mới nhất về các vận đơn của cửa hàng.' : tabHienTai === 'import' ? 'Tải Excel/CSV, xem trước lỗi từng dòng và chỉ gửi đơn hợp lệ.' : tabHienTai === 'integrations' ? 'Quản lý khóa tích hợp riêng của Shop và webhook cập nhật đơn.' : tabHienTai === 'rma' ? 'Theo dõi lý do giao thất bại, bằng chứng tài xế và gửi yêu cầu giao lại.' : 'Theo dõi tiến độ giao hàng và in mã vạch vận chuyển.'}
+                {tabHienTai === 'taodon' ? 'Lựa chọn gói dịch vụ và nhập thông tin để tính cước tự động.' : tabHienTai === 'thongbao' ? 'Cập nhật mới nhất về các vận đơn của cửa hàng.' : tabHienTai === 'import' ? 'Tải Excel/CSV, xem trước lỗi từng dòng và chỉ gửi đơn hợp lệ.' : tabHienTai === 'integrations' ? 'Quản lý khóa tích hợp riêng của Shop và webhook cập nhật đơn.' : tabHienTai === 'profile' ? 'Cập nhật thông tin Shop và lưu vị trí lấy hàng mặc định cho các đơn tiếp theo.' : tabHienTai === 'rma' ? 'Theo dõi lý do giao thất bại, bằng chứng tài xế và gửi yêu cầu giao lại.' : 'Theo dõi tiến độ giao hàng và in mã vạch vận chuyển.'}
               </p>
             </div>
           </div>
+
+          {tabHienTai === 'profile' && (
+            <section className="max-w-4xl rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+              <div className="mb-5">
+                <h2 className="text-xl font-black text-slate-800">Hồ sơ cửa hàng</h2>
+                <p className="mt-1 text-sm text-slate-500">Địa chỉ và tọa độ lấy hàng được dùng mặc định cho đơn mới. Phạm vi phục vụ hiện tại là TP. Hồ Chí Minh.</p>
+              </div>
+              {(shopProfileError || shopProfileMessage) && (
+                <p role={shopProfileError ? 'alert' : 'status'} className={`mb-4 rounded-lg p-3 text-sm font-semibold ${shopProfileError ? 'bg-rose-50 text-rose-700' : 'bg-emerald-50 text-emerald-700'}`}>
+                  {shopProfileError || shopProfileMessage}
+                </p>
+              )}
+              {shopProfileLoading ? (
+                <p role="status" className="py-8 text-center font-semibold text-slate-500">Đang tải hồ sơ Shop...</p>
+              ) : (
+                <form onSubmit={luuHoSoShop} className="space-y-5">
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <label className="block text-sm font-bold text-slate-700">Tên Shop
+                      <input required maxLength={255} value={shopProfile.full_name || ''} onChange={(event) => setShopProfile((current) => ({ ...current, full_name: event.target.value }))} className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2.5 font-normal" />
+                    </label>
+                    <label className="block text-sm font-bold text-slate-700">Số điện thoại Shop
+                      <input type="tel" maxLength={50} value={shopProfile.phone || ''} onChange={(event) => setShopProfile((current) => ({ ...current, phone: event.target.value }))} placeholder="0901234567" className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2.5 font-normal" />
+                    </label>
+                    <label className="block text-sm font-bold text-slate-700 md:col-span-2">Email đăng nhập
+                      <input type="email" readOnly value={shopProfile.email || ''} className="mt-1 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 font-normal text-slate-500" />
+                      <span className="mt-1 block text-xs font-normal text-slate-500">Email được giữ cố định để bảo vệ tài khoản đăng nhập.</span>
+                    </label>
+                  </div>
+
+                  <div className="rounded-xl border border-blue-100 bg-blue-50/50 p-4">
+                    <label className="block text-sm font-bold text-slate-700">Tìm địa chỉ lấy hàng tại TP. Hồ Chí Minh
+                      <div className="mt-1 flex gap-2">
+                        <input type="search" value={profileMapSearch} onChange={(event) => searchProfileLocation(event.target.value)} placeholder="Nhập số nhà, tên đường, phường hoặc địa điểm..." className="min-w-0 flex-1 rounded-lg border border-slate-300 bg-white px-3 py-2.5 font-normal" />
+                        <button type="button" onClick={() => searchProfileLocation(profileMapSearch)} className="rounded-lg bg-slate-700 px-4 py-2.5 font-bold text-white hover:bg-slate-800">Tìm</button>
+                      </div>
+                    </label>
+                    {profileSuggestions.length > 0 && (
+                      <div className="mt-2 space-y-1 rounded-lg border border-slate-200 bg-white p-2">
+                        {profileSuggestions.map((place) => (
+                          <button key={`${place.place_id}-${place.display_name}`} type="button" onClick={() => chooseProfileLocation(place)} className="block w-full rounded-md px-3 py-2 text-left text-sm text-slate-700 hover:bg-blue-50">
+                            {place.display_name}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    <p className="mt-3 text-sm text-slate-600"><strong>Địa chỉ đã chọn:</strong> {shopProfile.shop_address || 'Chưa chọn địa chỉ.'}</p>
+                    <button type="button" onClick={() => setShowProfileMap((visible) => !visible)} className="mt-3 text-sm font-bold text-blue-700 hover:underline">
+                      {showProfileMap ? 'Ẩn bản đồ' : 'Chọn vị trí trực tiếp trên bản đồ'}
+                    </button>
+                    {showProfileMap && (
+                      <div className="mt-3 overflow-hidden rounded-xl">
+                        <MapContainer
+                          center={[
+                            Number.isFinite(Number(shopProfile.shop_lat)) ? Number(shopProfile.shop_lat) : 10.762622,
+                            Number.isFinite(Number(shopProfile.shop_lng)) ? Number(shopProfile.shop_lng) : 106.660172
+                          ]}
+                          zoom={13}
+                          maxBounds={HCMC_MAP_BOUNDS}
+                          maxBoundsViscosity={1}
+                          scrollWheelZoom
+                          className="h-64 w-full rounded-xl border border-slate-200"
+                        >
+                          <LocationMapTiles />
+                          <HcmcBoundaryOverlay />
+                          <MapClickHandler onSelect={updateProfileLocationFromMap} onOutside={() => window.alert('Vui lòng chọn vị trí trong phạm vi phục vụ TP. Hồ Chí Minh.')} />
+                          {isWithinHcmcBoundary(shopProfile.shop_lat, shopProfile.shop_lng) && <Marker position={[Number(shopProfile.shop_lat), Number(shopProfile.shop_lng)]} icon={shopMarkerIcon} />}
+                        </MapContainer>
+                      </div>
+                    )}
+                    {isWithinHcmcBoundary(shopProfile.shop_lat, shopProfile.shop_lng) && (
+                      <p className="mt-2 text-xs text-emerald-700">Tọa độ đã chọn: {Number(shopProfile.shop_lat).toFixed(5)}, {Number(shopProfile.shop_lng).toFixed(5)}</p>
+                    )}
+                  </div>
+
+                  <button type="submit" disabled={shopProfileSaving} className="rounded-xl bg-blue-700 px-5 py-3 font-black text-white hover:bg-blue-800 disabled:cursor-not-allowed disabled:opacity-50">
+                    {shopProfileSaving ? 'Đang lưu...' : 'Lưu thông tin Shop'}
+                  </button>
+                </form>
+              )}
+            </section>
+          )}
 
           {tabHienTai === 'integrations' && (
             <section className="max-w-6xl space-y-5">
@@ -1417,6 +1674,7 @@ export default function QuanLyDonHang() {
                       Hỗ trợ Excel/CSV, tối đa {BULK_ORDER_LIMIT} đơn và 10 MB mỗi file. Mỗi dòng được kiểm tra số điện thoại,
                       địa chỉ, tọa độ trong TP.HCM, khối lượng, kích thước và thông tin cước trước khi tạo.
                     </p>
+                    <p className="mt-2 text-xs font-semibold text-blue-700">Có thể để trống cả ba cột điểm lấy hàng (`shop_address`, `shop_lat`, `shop_lng`) để dùng hồ sơ Shop đã lưu; nếu nhập điểm lấy riêng, hãy điền đủ địa chỉ và tọa độ.</p>
                   </div>
                   <button type="button" onClick={downloadBulkTemplate} className="inline-flex items-center gap-2 rounded-xl border border-blue-200 px-4 py-2.5 text-sm font-black text-blue-700 hover:bg-blue-50">
                     <Download size={17} /> Tải file mẫu
@@ -1585,6 +1843,19 @@ export default function QuanLyDonHang() {
 
                 {/* BLOCK 2: FORM THÔNG TIN */}
                 <form id="form-tao-don" onSubmit={taoDonMoi} className="bg-white p-8 rounded-[24px] shadow-[0_8px_30px_rgb(0,0,0,0.04)] border border-blue-50 space-y-6">
+                  {shopProfileLoading ? (
+                    <p role="status" className="rounded-xl bg-slate-50 p-4 text-sm font-semibold text-slate-600">Đang tải thông tin và vị trí lấy hàng mặc định...</p>
+                  ) : shopProfile.shop_address ? (
+                    <p className="rounded-xl border border-emerald-100 bg-emerald-50 p-4 text-sm font-semibold text-emerald-800">
+                      Điểm lấy hàng mặc định: {shopProfile.shop_address}
+                      <button type="button" onClick={() => setTabHienTai('profile')} className="ml-2 font-black underline">Cập nhật hồ sơ</button>
+                    </p>
+                  ) : (
+                    <p className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm font-semibold text-amber-900">
+                      Cần lưu tên Shop và vị trí lấy hàng một lần trong hồ sơ trước khi tạo đơn.
+                      <button type="button" onClick={() => setTabHienTai('profile')} className="ml-2 font-black underline">Mở Thông Tin Shop</button>
+                    </p>
+                  )}
                   <div className="flex items-center gap-3 mb-6">
                     <div className="bg-blue-50 p-3 rounded-xl text-blue-500"><PackagePlus size={24} /></div>
                     <h3 className="text-xl font-bold text-slate-800">Thông Tin Khách Nhận</h3>
@@ -1759,18 +2030,9 @@ export default function QuanLyDonHang() {
                     )}
                   </div>
 
-                  <div>
-                    <label className="block text-sm font-bold text-slate-600 mb-2">Quận / huyện TP. Hồ Chí Minh</label>
-                    <select
-                      value={form.destination_province}
-                      onChange={(e) => setForm({ ...form, destination_province: e.target.value, receiver_location_verified: false })}
-                      className="w-full px-4 py-3.5 bg-slate-50 border-2 border-transparent rounded-xl outline-none focus:bg-white focus:border-blue-400 transition-all font-medium"
-                    >
-                      {HCMC_DISTRICTS.map((district) => (
-                        <option key={district} value={district}>{district}</option>
-                      ))}
-                    </select>
-                  </div>
+                  <p className="rounded-xl border border-blue-100 bg-blue-50 p-4 text-sm text-blue-800">
+                    Địa chỉ giao hàng có thể ở bất kỳ khu vực nào thuộc TP. Hồ Chí Minh. Hãy tìm địa chỉ hoặc chọn trực tiếp trên bản đồ; hệ thống dùng tọa độ để định tuyến và tính cước.
+                  </p>
 
                   <hr className="border-slate-100 my-2" />
                   

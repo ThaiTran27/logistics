@@ -123,6 +123,7 @@ const publicApiRequest = (req) => {
 const apiRolesForRequest = (req) => {
   const method = req.method.toUpperCase();
   const route = req.path;
+  if (route === '/api/shop/profile' && ['GET', 'PUT'].includes(method)) return new Set(['shop']);
   if (route.startsWith('/api/shop/integrations') || route.startsWith('/api/shop/rma')) return new Set(['shop']);
   if (route === '/api/dispatcher/rma' || /^\/api\/dispatcher\/rma\/\d+$/.test(route)) {
     return new Set(['fleet_manager', 'director']);
@@ -780,6 +781,19 @@ db.connect((err) => {
     if (alterErr && alterErr.code !== 'ER_DUP_FIELDNAME') {
       console.error('Lỗi bổ sung kho được phân công cho tài khoản:', alterErr);
     }
+  });
+  [
+    ['phone', 'VARCHAR(50) DEFAULT NULL'],
+    ['shop_address', 'TEXT DEFAULT NULL'],
+    ['shop_province', 'VARCHAR(255) DEFAULT "TP. Hồ Chí Minh"'],
+    ['shop_lat', 'DOUBLE DEFAULT NULL'],
+    ['shop_lng', 'DOUBLE DEFAULT NULL']
+  ].forEach(([column, definition]) => {
+    db.query(`ALTER TABLE users ADD COLUMN ${column} ${definition}`, (alterErr) => {
+      if (alterErr && alterErr.code !== 'ER_DUP_FIELDNAME') {
+        console.error(`Lỗi bổ sung thông tin hồ sơ Shop (${column}):`, alterErr);
+      }
+    });
   });
   db.query('ALTER TABLE linehaul_trips ADD COLUMN truck_id INT NULL', (alterErr) => {
     if (alterErr && alterErr.code !== 'ER_DUP_FIELDNAME' && alterErr.code !== 'ER_NO_SUCH_TABLE') {
@@ -2036,6 +2050,65 @@ const createOrder = (req, res) => {
     });
   });
 };
+
+app.get('/api/shop/profile', (req, res) => {
+  db.query(
+    'SELECT id, email, full_name, phone, shop_address, shop_province, shop_lat, shop_lng FROM users WHERE id = ? AND role = "shop" LIMIT 1',
+    [req.authUser.id],
+    (err, rows) => {
+      if (err) {
+        console.error('Không thể tải hồ sơ Shop:', err);
+        return res.status(500).json({ success: false, message: 'Không thể tải thông tin Shop.' });
+      }
+      if (!rows.length) return res.status(404).json({ success: false, message: 'Không tìm thấy hồ sơ Shop.' });
+      res.json({ success: true, data: rows[0] });
+    }
+  );
+});
+
+app.put('/api/shop/profile', (req, res) => {
+  const fullName = String(req.body.full_name || '').trim();
+  const phone = String(req.body.phone || '').trim().replace(/[\s().-]/g, '');
+  const address = String(req.body.shop_address || '').trim();
+  const lat = Number(req.body.shop_lat);
+  const lng = Number(req.body.shop_lng);
+  if (!fullName || fullName.length > 255 || !address || address.length > 1000) {
+    return res.status(400).json({ success: false, message: 'Vui lòng nhập tên Shop và địa chỉ lấy hàng (tối đa 1.000 ký tự).' });
+  }
+  if (phone && !/^0\d{9,10}$/.test(phone)) {
+    return res.status(400).json({ success: false, message: 'Số điện thoại Shop phải có 10-11 chữ số và bắt đầu bằng 0.' });
+  }
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)
+    || lat < -90 || lat > 90 || lng < -180 || lng > 180
+    || !isWithinHcmcBoundary(lat, lng)) {
+    return res.status(400).json({ success: false, message: 'Vui lòng chọn vị trí Shop hợp lệ trong phạm vi phục vụ TP. Hồ Chí Minh.' });
+  }
+  db.query(
+    'UPDATE users SET full_name = ?, phone = ?, shop_address = ?, shop_province = ?, shop_lat = ?, shop_lng = ? WHERE id = ? AND role = "shop"',
+    [fullName, phone || null, address, 'TP. Hồ Chí Minh', lat, lng, req.authUser.id],
+    (err, result) => {
+      if (err) {
+        console.error('Không thể cập nhật hồ sơ Shop:', err);
+        return res.status(500).json({ success: false, message: 'Không thể lưu thông tin Shop.' });
+      }
+      if (!result.affectedRows) return res.status(404).json({ success: false, message: 'Không tìm thấy hồ sơ Shop.' });
+      res.json({
+        success: true,
+        message: 'Đã cập nhật thông tin Shop.',
+        data: {
+          id: req.authUser.id,
+          email: req.authUser.email,
+          full_name: fullName,
+          phone: phone || null,
+          shop_address: address,
+          shop_province: 'TP. Hồ Chí Minh',
+          shop_lat: lat,
+          shop_lng: lng
+        }
+      });
+    }
+  );
+});
 
 app.get('/api/shop/integrations', (req, res) => {
   const shopId = Number(req.authUser.id);

@@ -127,16 +127,17 @@ Nên chạy theo đúng thứ tự dưới đây để kiểm tra trạng thái 
 ### A. Tạo đơn — Shop
 
 1. Đăng nhập `shop2@smartlogistics.vn` với mật khẩu `123`.
-2. Vào `/cua-hang` → **Tạo Đơn Giao Hàng**.
-3. Điền bộ dữ liệu test cơ bản sau (số điện thoại là dữ liệu giả; email hãy thay bằng hộp thư bạn có thể mở):
+2. Vào `/cua-hang` → **Thông Tin Shop**. Lần đầu, nhập tên và số điện thoại Shop; tìm `Số 2 Nguyễn Văn Bảo, Phường 4, Gò Vấp, TP. Hồ Chí Minh`, chọn kết quả trên bản đồ rồi bấm **Lưu thông tin Shop**. Đây là vị trí lấy hàng mặc định được lưu cho các đơn sau.
+3. Mở **Tạo Đơn Giao Hàng**. Xác nhận địa chỉ lấy hàng đã tự điền từ hồ sơ Shop và vị trí đã được xác nhận; không cần chọn lại cho từng đơn. Nếu đổi địa chỉ Shop, cập nhật tại tab **Thông Tin Shop**.
+4. Điền bộ dữ liệu test cơ bản sau (số điện thoại là dữ liệu giả; email hãy thay bằng hộp thư bạn có thể mở):
 
    | Trường | Giá trị để nhập |
    |---|---|
    | Tên người nhận | `Nguyễn Thị Mai Test` |
    | Số điện thoại | `0901000010` |
    | Email người nhận | Email của bạn để nhận OTP giao hàng |
-   | Địa chỉ Shop/điểm lấy | Chọn bằng ô tìm bản đồ, không chỉ gõ vào ô địa chỉ |
-   | Địa chỉ giao | Chọn bằng ô tìm bản đồ, không chỉ gõ vào ô địa chỉ |
+   | Địa chỉ Shop/điểm lấy | Tự điền từ hồ sơ Shop đã lưu |
+   | Địa chỉ giao | Tìm kiếm địa chỉ hoặc chọn trên bản đồ; có thể chọn bất kỳ khu vực nào trong TP. Hồ Chí Minh |
    | Cân nặng | `1` kg |
    | Dài × rộng × cao | `10` × `10` × `10` cm |
    | Giá trị hàng | `0` |
@@ -145,12 +146,14 @@ Nên chạy theo đúng thứ tự dưới đây để kiểm tra trạng thái 
    | Dịch vụ | Tiêu chuẩn |
    | Hàng dễ vỡ / vùng xa | Không |
 
-4. Để đơn đi vào đúng kho Gò Vấp cho tài khoản `kho2`, tại ô tìm vị trí Shop nhập `Số 2 Nguyễn Văn Bảo, Phường 4, Gò Vấp, TP. Hồ Chí Minh`, bấm **Tìm** rồi chọn kết quả gợi ý. Kiểm tra trạng thái vị trí Shop báo **Đã xác nhận** và tọa độ gần `10.8231, 106.6881`.
-5. Tại ô tìm vị trí giao, nhập `Số 15 Lê Duẩn, Bến Nghé, Quận 1, TP. Hồ Chí Minh`, bấm **Tìm** rồi chọn kết quả gợi ý. Kiểm tra trạng thái điểm giao báo **Đã xác nhận** và tọa độ nằm gần `10.7798, 106.6990`.
+5. Tại ô tìm vị trí giao, nhập `Số 15 Lê Duẩn, Bến Nghé, Quận 1, TP. Hồ Chí Minh`, bấm **Tìm** rồi chọn kết quả gợi ý. Kiểm tra trạng thái điểm giao báo **Đã xác nhận** và tọa độ nằm gần `10.7798, 106.6990`. Không phải chọn Quận/Huyện; có thể thử một địa chỉ ở khu vực khác trong TP. Hồ Chí Minh.
 6. Nếu chọn gợi ý không được, hãy kiểm tra kết nối Internet tới dịch vụ tìm địa chỉ OpenStreetMap. Có thể bấm trực tiếp lên bản đồ trong vùng TP. Hồ Chí Minh; nếu nền bản đồ xám, ưu tiên ô tìm địa chỉ để có thể xác định chính xác điểm gần kho nào. Sau khi chọn điểm, không sửa tay nội dung địa chỉ vì thao tác sửa sẽ bỏ trạng thái xác nhận vị trí.
 7. Gửi đơn, ghi lại mã vận đơn hiển thị. Không dùng mã ví dụ `SLTEST...` cho lượt tạo đơn mới.
+8. Tạo thêm một đơn khác: địa chỉ lấy hàng phải tiếp tục tự điền như hồ sơ đã lưu; chọn một địa chỉ giao khác trong TP. Hồ Chí Minh để xác nhận không bị giới hạn vào một quận/huyện cụ thể.
 
-**Kỳ vọng:** đơn tạo thành công với trạng thái `pending`. Tọa độ Shop phải thuộc TP. Hồ Chí Minh và gần kho Gò Vấp; tọa độ giao phải thuộc TP. Hồ Chí Minh. Nếu điểm Shop để mặc định, hệ thống có thể chọn kho Quận 1 thay vì Gò Vấp.
+**Kỳ vọng:** đơn tạo thành công với trạng thái `pending`. Tọa độ Shop được lấy từ hồ sơ và thuộc TP. Hồ Chí Minh; tọa độ giao được phép ở bất kỳ địa chỉ nào trong TP. Hồ Chí Minh. Sau khi tạo đơn, địa chỉ lấy hàng vẫn được giữ cho đơn tiếp theo. Với vị trí Shop gần `10.8231, 106.6881`, kho nguồn gần nhất cần là kho con Gò Vấp.
+
+**Kiểm tra cập nhật hồ sơ:** vào **Thông Tin Shop**, đổi số điện thoại hoặc địa chỉ/vị trí, lưu rồi tải lại trang. Tên và địa chỉ mới phải còn nguyên; đơn tiếp theo phải tự dùng vị trí Shop mới. Email đăng nhập chỉ đọc và không đổi được từ màn hình này.
 
 ### B. Phân tài xế lấy hàng — Điều hành
 
@@ -247,7 +250,7 @@ Nếu chưa cấu hình SMTP, có thể dùng database **test** để kiểm tra
 | Phân hệ | Đường dẫn | Các thao tác nên thử |
 |---|---|---|
 | Khách hàng | `/`, `/dich-vu`, `/bang-gia`, `/tin-tuc`, `/tuyen-dung`, `/uoc-tinh-cuoc`, `/tim-buu-cuc` | Mở trang; thử tính cước, lọc bưu cục, đọc tin; gửi yêu cầu dịch vụ hoặc ứng tuyển. |
-| Shop | `/cua-hang` | Tạo đơn, xem danh sách/chi tiết/lịch sử, in nhãn mã vạch, nhập/xuất danh sách, theo dõi đơn, quản lý API key/webhook và yêu cầu giao lại nếu cần. |
+| Shop | `/cua-hang` | Cập nhật hồ sơ/tọa độ Shop mặc định; tạo nhiều đơn để kiểm tra vị trí lấy hàng tự điền và địa chỉ giao ở nhiều khu vực TP. Hồ Chí Minh; xem danh sách/chi tiết/lịch sử, in nhãn mã vạch, nhập/xuất danh sách, theo dõi đơn, quản lý API key/webhook và yêu cầu giao lại nếu cần. |
 | Tài xế | `/tai-xe` | Nhận nhiệm vụ, quét mã, cập nhật trạng thái/vị trí, hoàn tất giao, báo sự cố, xem ví COD, nộp tiền và gửi phụ phí có ảnh biên lai. |
 | Kho | `/kho` | Xem tồn; khai báo kho/vị trí kệ; quét nhận đơn; tạo/niêm phong bao; lập chuyến, gán bao; kiểm kê. |
 | Điều hành | `/dieu-hanh` | Phân tuyến tài xế theo từng chặng; quản lý xe/chuyến; theo dõi GPS; duyệt yêu cầu giao lại; gửi báo cáo. |
