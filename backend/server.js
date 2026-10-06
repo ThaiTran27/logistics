@@ -785,7 +785,7 @@ db.connect((err) => {
   [
     ['phone', 'VARCHAR(50) DEFAULT NULL'],
     ['shop_address', 'TEXT DEFAULT NULL'],
-    ['shop_province', 'VARCHAR(255) DEFAULT "TP. Hồ Chí Minh"'],
+    ['shop_province', "VARCHAR(255) DEFAULT 'TP. Hồ Chí Minh'"],
     ['shop_lat', 'DOUBLE DEFAULT NULL'],
     ['shop_lng', 'DOUBLE DEFAULT NULL']
   ].forEach(([column, definition]) => {
@@ -2091,8 +2091,7 @@ app.put('/api/shop/profile', (req, res) => {
         console.error('Không thể cập nhật hồ sơ Shop:', err);
         return res.status(500).json({ success: false, message: 'Không thể lưu thông tin Shop.' });
       }
-      if (!result.affectedRows) return res.status(404).json({ success: false, message: 'Không tìm thấy hồ sơ Shop.' });
-      res.json({
+      const sendUpdatedProfile = () => res.json({
         success: true,
         message: 'Đã cập nhật thông tin Shop.',
         data: {
@@ -2105,6 +2104,15 @@ app.put('/api/shop/profile', (req, res) => {
           shop_lat: lat,
           shop_lng: lng
         }
+      });
+      if (result.affectedRows > 0) return sendUpdatedProfile();
+      db.query('SELECT id FROM users WHERE id = ? AND role = "shop" LIMIT 1', [req.authUser.id], (lookupErr, rows) => {
+        if (lookupErr) {
+          console.error('Không thể xác nhận hồ sơ Shop sau khi cập nhật:', lookupErr);
+          return res.status(500).json({ success: false, message: 'Không thể xác nhận thông tin Shop đã lưu.' });
+        }
+        if (!rows.length) return res.status(404).json({ success: false, message: 'Không tìm thấy hồ sơ Shop.' });
+        sendUpdatedProfile();
       });
     }
   );

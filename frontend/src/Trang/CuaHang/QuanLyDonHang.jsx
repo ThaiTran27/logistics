@@ -65,6 +65,60 @@ const isWithinHcmcBoundary = (lat, lng) => {
   ));
 };
 
+const toHcmcLocation = (place, index = 0) => {
+  const properties = place.properties || {};
+  const lat = Number(place.geometry?.coordinates?.[1] ?? place.lat);
+  const lng = Number(place.geometry?.coordinates?.[0] ?? place.lon);
+  const displayName = place.display_name || [
+    properties.name,
+    properties.housenumber && properties.street ? `${properties.housenumber} ${properties.street}` : properties.street,
+    properties.suburb || properties.district,
+    properties.city || properties.county,
+    properties.state
+  ].filter(Boolean).filter((value, position, values) => values.indexOf(value) === position).join(', ');
+
+  return {
+    place_id: place.place_id || `photon-${properties.osm_type || 'place'}-${properties.osm_id || index}`,
+    lat: String(lat),
+    lon: String(lng),
+    display_name: displayName || 'Địa điểm đã chọn'
+  };
+};
+
+const searchHcmcLocations = async (query, limit = 8) => {
+  let serviceUnavailable = false;
+  try {
+    const response = await fetch(`https://nominatim.openstreetmap.org/search?format=jsonv2&limit=${limit}&countrycodes=vn&viewbox=${HCMC_NOMINATIM_VIEWBOX}&bounded=1&q=${encodeURIComponent(query)}`, {
+      headers: { 'Accept-Language': 'vi' }
+    });
+    if (!response.ok) throw new Error(`Nominatim HTTP ${response.status}`);
+    const places = await response.json();
+    const options = Array.isArray(places)
+      ? places.filter((place) => isWithinHcmcBoundary(place.lat, place.lon)).map(toHcmcLocation)
+      : [];
+    if (options.length) return { places: options, serviceUnavailable: false };
+  } catch (error) {
+    serviceUnavailable = true;
+    console.warn('Không tìm được địa chỉ bằng Nominatim:', error);
+  }
+
+  try {
+    const response = await fetch(`https://photon.komoot.io/api/?limit=${Math.max(limit, 10)}&lang=default&q=${encodeURIComponent(`${query}, Thành phố Hồ Chí Minh, Việt Nam`)}`, {
+      headers: { 'Accept-Language': 'vi' }
+    });
+    if (!response.ok) throw new Error(`Photon HTTP ${response.status}`);
+    const result = await response.json();
+    const places = Array.isArray(result?.features) ? result.features : [];
+    const options = places.map(toHcmcLocation)
+      .filter((place) => isWithinHcmcBoundary(place.lat, place.lon))
+      .slice(0, limit);
+    return { places: options, serviceUnavailable: serviceUnavailable && options.length === 0 };
+  } catch (error) {
+    console.warn('Không tìm được địa chỉ bằng Photon:', error);
+    return { places: [], serviceUnavailable: true };
+  }
+};
+
 const shopMarkerIcon = new L.Icon({
   iconUrl: iconMarkerUrl,
   shadowUrl: iconShadowUrl,
@@ -155,19 +209,106 @@ function ShopMapPicker({ value, onSelect }) {
 }
 
 function LocationMapTiles() {
+  const map = useMap();
+  const [tileSourceIndex, setTileSourceIndex] = useState(0);
+  const [retryAttempt, setRetryAttempt] = useState(0);
   const [tilesUnavailable, setTilesUnavailable] = useState(false);
+  const tileActivity = useRef({ sourceIndex: 0, loaded: 0, failed: 0, timer: null });
+  const tileSources = [
+    {
+      attribution: '&copy; OpenStreetMap contributors',
+      url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png'
+    },
+    {
+      attribution: '&copy; OpenStreetMap contributors &copy; CARTO',
+      url: 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png'
+    },
+    {
+      attribution: 'Tiles &copy; Esri',
+      url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}'
+    }
+  ];
+  const tileSource = tileSources[tileSourceIndex];
+
+  useEffect(() => () => {
+    if (tileActivity.current.timer) clearTimeout(tileActivity.current.timer);
+  }, []);
+
+  const scheduleFallbackCheck = (sourceIndex) => {
+    if (sourceIndex !== tileSourceIndex || tileActivity.current.sourceIndex !== sourceIndex) return;
+    const total = tileActivity.current.loaded + tileActivity.current.failed;
+    if (tileActivity.current.failed < 4 || total === 0
+      || tileActivity.current.failed / total < 0.75) return;
+    if (tileActivity.current.timer) clearTimeout(tileActivity.current.timer);
+    tileActivity.current.timer = setTimeout(() => {
+      const latest = tileActivity.current;
+      const latestTotal = latest.loaded + latest.failed;
+      if (latest.sourceIndex !== sourceIndex || latest.loaded > 0
+        || latest.failed < 4 || latestTotal === 0
+        || latest.failed / latestTotal < 0.75) return;
+      if (sourceIndex < tileSources.length - 1) {
+        setTileSourceIndex((current) => current === sourceIndex ? current + 1 : current);
+      } else {
+        setTilesUnavailable(true);
+      }
+    }, 2500);
+  };
+
+  const handleTileLoading = () => {
+    if (tileActivity.current.timer) clearTimeout(tileActivity.current.timer);
+    tileActivity.current = { sourceIndex: tileSourceIndex, loaded: 0, failed: 0, timer: null };
+  };
+
+  const handleTileLoad = () => {
+    if (tileActivity.current.sourceIndex !== tileSourceIndex) return;
+    tileActivity.current.loaded += 1;
+    if (tileActivity.current.timer && tileActivity.current.failed / (tileActivity.current.loaded + tileActivity.current.failed) < 0.75) {
+      clearTimeout(tileActivity.current.timer);
+      tileActivity.current.timer = null;
+    }
+  };
+
+  const handleTileError = () => {
+    if (tileActivity.current.sourceIndex !== tileSourceIndex) return;
+    tileActivity.current.failed += 1;
+    scheduleFallbackCheck(tileSourceIndex);
+  };
+
+  const retryTiles = () => {
+    if (tileActivity.current.timer) clearTimeout(tileActivity.current.timer);
+    tileActivity.current = { sourceIndex: 0, loaded: 0, failed: 0, timer: null };
+    setTilesUnavailable(false);
+    setTileSourceIndex(0);
+    setRetryAttempt((current) => current + 1);
+  };
+
+  const openMapService = () => {
+    const center = map.getCenter();
+    window.open(`https://www.openstreetmap.org/#map=${map.getZoom()}/${center.lat}/${center.lng}`, '_blank', 'noopener,noreferrer');
+  };
+
+  const trackTileEvents = {
+    loading: handleTileLoading,
+    tileload: handleTileLoad,
+    tileerror: handleTileError
+  };
 
   return (
     <>
       <TileLayer
-        attribution='&copy; OpenStreetMap contributors'
-        url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-        eventHandlers={{ tileerror: () => setTilesUnavailable(true) }}
+        key={`${tileSourceIndex}-${retryAttempt}`}
+        attribution={tileSource.attribution}
+        url={tileSource.url}
+        eventHandlers={trackTileEvents}
       />
       {tilesUnavailable && (
-        <div className="leaflet-bottom leaflet-left pointer-events-none">
-          <div role="status" className="m-2 max-w-64 rounded-lg bg-amber-100 px-3 py-2 text-xs font-semibold text-amber-900 shadow">
-            Không tải được nền bản đồ. Kiểm tra kết nối Internet; bạn vẫn có thể chọn tọa độ trên bản đồ.
+        <div className="leaflet-top leaflet-left pointer-events-none">
+          <div role="status" className="m-2 max-w-80 rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs font-semibold text-amber-950 shadow">
+            <p>Không tải được nền bản đồ từ OpenStreetMap, CARTO hoặc Esri. Chọn vị trí bằng tìm kiếm/tọa độ hoặc mở bản đồ ngoài.</p>
+            <div className="mt-2 flex gap-2">
+              <button type="button" onClick={retryTiles} className="pointer-events-auto rounded bg-white px-2 py-1 font-bold text-amber-950 ring-1 ring-amber-300 hover:bg-amber-100">Thử lại</button>
+              <button type="button" onClick={openMapService} className="pointer-events-auto rounded bg-white px-2 py-1 font-bold text-amber-950 ring-1 ring-amber-300 hover:bg-amber-100">Mở OpenStreetMap</button>
+            </div>
           </div>
         </div>
       )}
@@ -224,11 +365,17 @@ export default function QuanLyDonHang() {
   const [showReceiverMap, setShowReceiverMap] = useState(false);
   const [shopMapSearch, setShopMapSearch] = useState('');
   const [shopSuggestions, setShopSuggestions] = useState([]);
-  const [receiverMapSearch, setReceiverMapSearch] = useState('');
+  const [shopSearchMessage, setShopSearchMessage] = useState('');
+  const [shopSearchBusy, setShopSearchBusy] = useState(false);
   const [receiverSuggestions, setReceiverSuggestions] = useState([]);
+  const [receiverSearchMessage, setReceiverSearchMessage] = useState('');
+  const [receiverSearchBusy, setReceiverSearchBusy] = useState(false);
   const shopReverseGeocodeRequest = useRef(0);
   const receiverReverseGeocodeRequest = useRef(0);
   const profileReverseGeocodeRequest = useRef(0);
+  const profileSearchRequest = useRef(0);
+  const shopSearchRequest = useRef(0);
+  const receiverSearchRequest = useRef(0);
   
   const [shippingFee, setShippingFee] = useState(0);
   const [chargeableWeight, setChargeableWeight] = useState(0); // Trọng lượng tính cước cuối cùng
@@ -254,6 +401,8 @@ export default function QuanLyDonHang() {
   const [showProfileMap, setShowProfileMap] = useState(false);
   const [profileMapSearch, setProfileMapSearch] = useState('');
   const [profileSuggestions, setProfileSuggestions] = useState([]);
+  const [profileSearchBusy, setProfileSearchBusy] = useState(false);
+  const [profileSearchMessage, setProfileSearchMessage] = useState('');
   const [shopWebhook, setShopWebhook] = useState({ target_url: '', enabled: false, secret_configured: false });
   const [apiKeyName, setApiKeyName] = useState('');
   const [revealedCredential, setRevealedCredential] = useState(null);
@@ -280,6 +429,9 @@ export default function QuanLyDonHang() {
   
   const shopId = localStorage.getItem('user_id');
   const shopName = shopProfile.full_name || localStorage.getItem('full_name') || 'Cửa Hàng Đối Tác';
+  const profileLocationValid = shopProfile.shop_lat !== null && shopProfile.shop_lat !== ''
+    && shopProfile.shop_lng !== null && shopProfile.shop_lng !== ''
+    && isWithinHcmcBoundary(shopProfile.shop_lat, shopProfile.shop_lng);
 
   const taiHoSoShop = useCallback(async () => {
     setShopProfileLoading(true);
@@ -864,26 +1016,34 @@ export default function QuanLyDonHang() {
   };
 
   const searchProfileLocation = async (query) => {
+    const requestId = ++profileSearchRequest.current;
     const cleanQuery = query.trim();
     setProfileMapSearch(query);
     setShopProfileError('');
+    setProfileSearchMessage('');
     if (cleanQuery.length < 2) {
       setProfileSuggestions([]);
+      setProfileSearchMessage('Nhập ít nhất 2 ký tự để tìm địa chỉ.');
       return;
     }
+    setProfileSearchBusy(true);
     try {
-      const response = await fetch(`https://nominatim.openstreetmap.org/search?format=jsonv2&limit=5&countrycodes=vn&viewbox=${HCMC_NOMINATIM_VIEWBOX}&bounded=1&q=${encodeURIComponent(`${cleanQuery}, TP. Hồ Chí Minh, Việt Nam`)}`, {
-        headers: { 'Accept-Language': 'vi' }
-      });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const places = await response.json();
-      setProfileSuggestions(Array.isArray(places)
-        ? places.filter((place) => isWithinHcmcBoundary(place.lat, place.lon))
-        : []);
+      const { places: options, serviceUnavailable } = await searchHcmcLocations(cleanQuery);
+      if (requestId !== profileSearchRequest.current) return;
+      setProfileSuggestions(options);
+      setProfileSearchMessage(options.length
+        ? `Tìm thấy ${options.length} địa điểm trong TP. Hồ Chí Minh. Hãy chọn một kết quả để xác nhận vị trí.`
+        : serviceUnavailable
+          ? 'Không kết nối được dịch vụ tìm địa chỉ. Kiểm tra Internet hoặc chọn vị trí trực tiếp trên bản đồ.'
+          : 'Không tìm thấy địa chỉ trong TP. Hồ Chí Minh. Hãy thử nhập tên đường/quận ngắn hơn hoặc chọn trên bản đồ.');
     } catch (error) {
+      if (requestId !== profileSearchRequest.current) return;
       console.error('Lỗi tìm địa chỉ Shop:', error);
       setProfileSuggestions([]);
+      setProfileSearchMessage('Không kết nối được dịch vụ tìm địa chỉ. Kiểm tra Internet hoặc chọn vị trí trực tiếp trên bản đồ.');
       setShopProfileError('Không tìm được địa chỉ. Bạn vẫn có thể chọn vị trí trực tiếp trên bản đồ.');
+    } finally {
+      if (requestId === profileSearchRequest.current) setProfileSearchBusy(false);
     }
   };
 
@@ -904,6 +1064,31 @@ export default function QuanLyDonHang() {
     }));
     setProfileMapSearch(place.display_name || '');
     setProfileSuggestions([]);
+    setProfileSearchMessage('Đã chọn địa chỉ. Bấm “Lưu thông tin Shop” để lưu vị trí lấy hàng.');
+    setShopProfileError('');
+  };
+
+  const confirmManualProfileLocation = () => {
+    const latitude = Number(shopProfile.shop_lat);
+    const longitude = Number(shopProfile.shop_lng);
+    const address = profileMapSearch.trim();
+    if (!address) {
+      setShopProfileError('Nhập địa chỉ Shop trước khi xác nhận tọa độ.');
+      return;
+    }
+    if (!isWithinHcmcBoundary(latitude, longitude)) {
+      setShopProfileError('Nhập đúng vĩ độ và kinh độ nằm trong phạm vi TP. Hồ Chí Minh.');
+      return;
+    }
+    profileReverseGeocodeRequest.current += 1;
+    setShopProfile((current) => ({
+      ...current,
+      shop_address: address,
+      shop_province: 'TP. Hồ Chí Minh',
+      shop_lat: latitude,
+      shop_lng: longitude
+    }));
+    setProfileSearchMessage('Đã xác nhận địa chỉ và tọa độ. Bấm “Lưu thông tin Shop” để lưu.');
     setShopProfileError('');
   };
 
@@ -918,6 +1103,7 @@ export default function QuanLyDonHang() {
       shop_lng: lng
     }));
     setProfileMapSearch(fallbackAddress);
+    setProfileSearchMessage('Đã chọn tọa độ trên bản đồ. Bấm “Lưu thông tin Shop” để lưu vị trí lấy hàng.');
     try {
       const response = await fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}&zoom=18&addressdetails=1`, {
         headers: { 'Accept-Language': 'vi' }
@@ -928,6 +1114,7 @@ export default function QuanLyDonHang() {
       const address = result?.display_name || fallbackAddress;
       setShopProfile((current) => ({ ...current, shop_address: address, shop_lat: lat, shop_lng: lng }));
       setProfileMapSearch(address);
+      setProfileSearchMessage('Đã lấy địa chỉ từ bản đồ. Bấm “Lưu thông tin Shop” để lưu vị trí lấy hàng.');
     } catch (error) {
       if (requestId === profileReverseGeocodeRequest.current) {
         console.warn('Không lấy được địa chỉ Shop từ bản đồ; vẫn giữ tọa độ đã chọn:', error);
@@ -1002,26 +1189,34 @@ export default function QuanLyDonHang() {
   };
 
   const searchShopLocation = async (query) => {
+    const requestId = ++shopSearchRequest.current;
     const cleanQuery = query.trim();
     setShopMapSearch(query);
+    setShopSearchMessage('');
     if (!cleanQuery || cleanQuery.length < 2) {
       setShopSuggestions([]);
+      setShopSearchBusy(false);
+      setShopSearchMessage('Nhập ít nhất 2 ký tự để tìm địa chỉ.');
       return;
     }
 
+    setShopSearchBusy(true);
     try {
-      const res = await fetch(`https://nominatim.openstreetmap.org/search?format=jsonv2&limit=5&countrycodes=vn&viewbox=${HCMC_NOMINATIM_VIEWBOX}&bounded=1&q=${encodeURIComponent(`${cleanQuery}, TP. Hồ Chí Minh, Việt Nam`)}`, {
-        headers: { 'Accept-Language': 'vi' }
-      });
-      if (!res.ok) {
-        throw new Error(`HTTP ${res.status}`);
-      }
-      const data = await res.json();
-      const options = Array.isArray(data) ? data.filter((place) => isWithinHcmcBoundary(place.lat, place.lon)) : [];
-      setShopSuggestions(options);
+      const { places, serviceUnavailable } = await searchHcmcLocations(cleanQuery, 5);
+      if (requestId !== shopSearchRequest.current) return;
+      setShopSuggestions(places);
+      setShopSearchMessage(places.length
+        ? 'Chọn địa chỉ trong kết quả để xác nhận vị trí.'
+        : serviceUnavailable
+          ? 'Không kết nối được dịch vụ tìm địa chỉ. Có thể nhập tọa độ hoặc chọn trên bản đồ.'
+          : 'Không tìm thấy địa chỉ trong TP. Hồ Chí Minh. Thử nhập tên đường/phường ngắn hơn.');
     } catch (error) {
+      if (requestId !== shopSearchRequest.current) return;
       console.error('Lỗi tìm kiếm địa điểm:', error);
       setShopSuggestions([]);
+      setShopSearchMessage('Không tìm được địa chỉ. Có thể nhập tọa độ hoặc chọn trên bản đồ.');
+    } finally {
+      if (requestId === shopSearchRequest.current) setShopSearchBusy(false);
     }
   };
 
@@ -1036,6 +1231,7 @@ export default function QuanLyDonHang() {
     setForm((prev) => ({ ...prev, shop_address: displayName, shop_lat: lat, shop_lng: lng, shop_location_verified: !String(place.place_id).startsWith('fallback-') }));
     setShopMapSearch(displayName);
     setShopSuggestions([]);
+    setShopSearchMessage('Đã chọn địa chỉ. Tọa độ lấy hàng đã được xác nhận.');
     setShowShopMap(true);
   };
 
@@ -1049,7 +1245,6 @@ export default function QuanLyDonHang() {
       receiver_lng: lng,
       receiver_location_verified: true
     }));
-    setReceiverMapSearch(fallbackAddress);
 
     try {
       const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}&zoom=18&addressdetails=1`, {
@@ -1060,7 +1255,6 @@ export default function QuanLyDonHang() {
       if (requestId !== receiverReverseGeocodeRequest.current) return;
       const detail = data?.display_name || fallbackAddress;
       setForm((prev) => ({ ...prev, receiver_address: detail, receiver_lat: lat, receiver_lng: lng, receiver_location_verified: true }));
-      setReceiverMapSearch(detail);
     } catch (error) {
       if (requestId === receiverReverseGeocodeRequest.current) {
         console.warn('Không lấy được địa chỉ giao hàng từ bản đồ; vẫn giữ tọa độ đã chọn:', error);
@@ -1069,26 +1263,33 @@ export default function QuanLyDonHang() {
   };
 
   const searchReceiverLocation = async (query) => {
+    const requestId = ++receiverSearchRequest.current;
     const cleanQuery = query.trim();
-    setReceiverMapSearch(query);
+    setReceiverSearchMessage('');
     if (!cleanQuery || cleanQuery.length < 2) {
       setReceiverSuggestions([]);
+      setReceiverSearchBusy(false);
+      setReceiverSearchMessage('Nhập ít nhất 2 ký tự để tìm địa chỉ.');
       return;
     }
 
+    setReceiverSearchBusy(true);
     try {
-      const res = await fetch(`https://nominatim.openstreetmap.org/search?format=jsonv2&limit=5&countrycodes=vn&viewbox=${HCMC_NOMINATIM_VIEWBOX}&bounded=1&q=${encodeURIComponent(`${cleanQuery}, TP. Hồ Chí Minh, Việt Nam`)}`, {
-        headers: { 'Accept-Language': 'vi' }
-      });
-      if (!res.ok) {
-        throw new Error(`HTTP ${res.status}`);
-      }
-      const data = await res.json();
-      const options = Array.isArray(data) ? data.filter((place) => isWithinHcmcBoundary(place.lat, place.lon)) : [];
-      setReceiverSuggestions(options);
+      const { places, serviceUnavailable } = await searchHcmcLocations(cleanQuery, 5);
+      if (requestId !== receiverSearchRequest.current) return;
+      setReceiverSuggestions(places);
+      setReceiverSearchMessage(places.length
+        ? 'Chọn địa chỉ trong kết quả để xác nhận vị trí.'
+        : serviceUnavailable
+          ? 'Không kết nối được dịch vụ tìm địa chỉ. Bấm “Chọn trên bản đồ” để chọn điểm giao.'
+          : 'Không tìm thấy địa chỉ trong TP. Hồ Chí Minh. Thử nhập tên đường/phường ngắn hơn.');
     } catch (error) {
+      if (requestId !== receiverSearchRequest.current) return;
       console.error('Lỗi tìm kiếm địa chỉ giao hàng:', error);
       setReceiverSuggestions([]);
+      setReceiverSearchMessage('Không tìm được địa chỉ. Bấm “Chọn trên bản đồ” để chọn điểm giao.');
+    } finally {
+      if (requestId === receiverSearchRequest.current) setReceiverSearchBusy(false);
     }
   };
 
@@ -1101,7 +1302,8 @@ export default function QuanLyDonHang() {
     }
     const displayName = place.display_name || 'Địa điểm giao hàng đã chọn';
     setForm((prev) => ({ ...prev, receiver_address: displayName, receiver_lat: lat, receiver_lng: lng, receiver_location_verified: !String(place.place_id).startsWith('fallback-') }));
-    setReceiverMapSearch(displayName);
+    setReceiverSearchMessage('Đã chọn địa chỉ. Tọa độ giao đã được xác nhận.');
+    setReceiverSuggestions([]);
     setReceiverSuggestions([]);
     setShowReceiverMap(true);
   };
@@ -1398,10 +1600,31 @@ export default function QuanLyDonHang() {
                   <div className="rounded-xl border border-blue-100 bg-blue-50/50 p-4">
                     <label className="block text-sm font-bold text-slate-700">Tìm địa chỉ lấy hàng tại TP. Hồ Chí Minh
                       <div className="mt-1 flex gap-2">
-                        <input type="search" value={profileMapSearch} onChange={(event) => searchProfileLocation(event.target.value)} placeholder="Nhập số nhà, tên đường, phường hoặc địa điểm..." className="min-w-0 flex-1 rounded-lg border border-slate-300 bg-white px-3 py-2.5 font-normal" />
-                        <button type="button" onClick={() => searchProfileLocation(profileMapSearch)} className="rounded-lg bg-slate-700 px-4 py-2.5 font-bold text-white hover:bg-slate-800">Tìm</button>
+                        <input
+                          type="search"
+                          value={profileMapSearch}
+                          onChange={(event) => {
+                            profileSearchRequest.current += 1;
+                            setProfileMapSearch(event.target.value);
+                            setProfileSuggestions([]);
+                            setProfileSearchMessage('');
+                            setProfileSearchBusy(false);
+                          }}
+                          onKeyDown={(event) => {
+                            if (event.key === 'Enter') {
+                              event.preventDefault();
+                              searchProfileLocation(profileMapSearch);
+                            }
+                          }}
+                          placeholder="Nhập số nhà, tên đường, phường hoặc địa điểm..."
+                          className="min-w-0 flex-1 rounded-lg border border-slate-300 bg-white px-3 py-2.5 font-normal"
+                        />
+                        <button type="button" disabled={profileSearchBusy} onClick={() => searchProfileLocation(profileMapSearch)} className="rounded-lg bg-slate-700 px-4 py-2.5 font-bold text-white hover:bg-slate-800 disabled:cursor-wait disabled:opacity-60">
+                          {profileSearchBusy ? 'Đang tìm...' : 'Tìm'}
+                        </button>
                       </div>
                     </label>
+                    {profileSearchMessage && <p role="status" className="mt-2 text-xs font-semibold text-blue-800">{profileSearchMessage}</p>}
                     {profileSuggestions.length > 0 && (
                       <div className="mt-2 space-y-1 rounded-lg border border-slate-200 bg-white p-2">
                         {profileSuggestions.map((place) => (
@@ -1412,6 +1635,43 @@ export default function QuanLyDonHang() {
                       </div>
                     )}
                     <p className="mt-3 text-sm text-slate-600"><strong>Địa chỉ đã chọn:</strong> {shopProfile.shop_address || 'Chưa chọn địa chỉ.'}</p>
+                    <details className="mt-4 rounded-lg border border-slate-200 bg-white p-3">
+                      <summary className="cursor-pointer text-sm font-bold text-slate-700">Không tải được bản đồ/tìm kiếm? Nhập tọa độ thủ công</summary>
+                      <p className="mt-2 text-xs text-slate-600">
+                        Nhập vĩ độ và kinh độ của địa chỉ (có thể lấy bằng cách nhấn giữ điểm trên Google Maps). Ví dụ gần đường Nguyễn Văn Bảo, Gò Vấp: 10.8231, 106.6881.
+                      </p>
+                      <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                        <label className="text-xs font-bold text-slate-600">Vĩ độ (latitude)
+                          <input
+                            type="number"
+                            step="any"
+                            value={shopProfile.shop_lat ?? ''}
+                            onChange={(event) => setShopProfile((current) => ({
+                              ...current,
+                              shop_lat: event.target.value === '' ? null : Number(event.target.value)
+                            }))}
+                            placeholder="10.8231"
+                            className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm font-normal"
+                          />
+                        </label>
+                        <label className="text-xs font-bold text-slate-600">Kinh độ (longitude)
+                          <input
+                            type="number"
+                            step="any"
+                            value={shopProfile.shop_lng ?? ''}
+                            onChange={(event) => setShopProfile((current) => ({
+                              ...current,
+                              shop_lng: event.target.value === '' ? null : Number(event.target.value)
+                            }))}
+                            placeholder="106.6881"
+                            className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm font-normal"
+                          />
+                        </label>
+                      </div>
+                      <button type="button" onClick={confirmManualProfileLocation} className="mt-3 rounded-lg bg-slate-700 px-4 py-2 text-sm font-bold text-white hover:bg-slate-800">
+                        Xác nhận địa chỉ và tọa độ
+                      </button>
+                    </details>
                     <button type="button" onClick={() => setShowProfileMap((visible) => !visible)} className="mt-3 text-sm font-bold text-blue-700 hover:underline">
                       {showProfileMap ? 'Ẩn bản đồ' : 'Chọn vị trí trực tiếp trên bản đồ'}
                     </button>
@@ -1419,8 +1679,8 @@ export default function QuanLyDonHang() {
                       <div className="mt-3 overflow-hidden rounded-xl">
                         <MapContainer
                           center={[
-                            Number.isFinite(Number(shopProfile.shop_lat)) ? Number(shopProfile.shop_lat) : 10.762622,
-                            Number.isFinite(Number(shopProfile.shop_lng)) ? Number(shopProfile.shop_lng) : 106.660172
+                            profileLocationValid ? Number(shopProfile.shop_lat) : 10.762622,
+                            profileLocationValid ? Number(shopProfile.shop_lng) : 106.660172
                           ]}
                           zoom={13}
                           maxBounds={HCMC_MAP_BOUNDS}
@@ -1430,12 +1690,16 @@ export default function QuanLyDonHang() {
                         >
                           <LocationMapTiles />
                           <HcmcBoundaryOverlay />
+                          <RecenterMap value={{
+                            lat: profileLocationValid ? Number(shopProfile.shop_lat) : 10.762622,
+                            lng: profileLocationValid ? Number(shopProfile.shop_lng) : 106.660172
+                          }} />
                           <MapClickHandler onSelect={updateProfileLocationFromMap} onOutside={() => window.alert('Vui lòng chọn vị trí trong phạm vi phục vụ TP. Hồ Chí Minh.')} />
-                          {isWithinHcmcBoundary(shopProfile.shop_lat, shopProfile.shop_lng) && <Marker position={[Number(shopProfile.shop_lat), Number(shopProfile.shop_lng)]} icon={shopMarkerIcon} />}
+                          {profileLocationValid && <Marker position={[Number(shopProfile.shop_lat), Number(shopProfile.shop_lng)]} icon={shopMarkerIcon} />}
                         </MapContainer>
                       </div>
                     )}
-                    {isWithinHcmcBoundary(shopProfile.shop_lat, shopProfile.shop_lng) && (
+                    {profileLocationValid && (
                       <p className="mt-2 text-xs text-emerald-700">Tọa độ đã chọn: {Number(shopProfile.shop_lat).toFixed(5)}, {Number(shopProfile.shop_lng).toFixed(5)}</p>
                     )}
                   </div>
@@ -1919,19 +2183,33 @@ export default function QuanLyDonHang() {
                           <input
                             type="text"
                             value={shopMapSearch}
-                            onChange={(e) => searchShopLocation(e.target.value)}
+                            onChange={(event) => {
+                              shopSearchRequest.current += 1;
+                              setShopMapSearch(event.target.value);
+                              setShopSuggestions([]);
+                              setShopSearchMessage('');
+                              setShopSearchBusy(false);
+                            }}
+                            onKeyDown={(event) => {
+                              if (event.key === 'Enter') {
+                                event.preventDefault();
+                                searchShopLocation(shopMapSearch);
+                              }
+                            }}
                             placeholder="Nhập tên địa điểm, đường, phường, quận..."
                             className="flex-1 rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-700 outline-none focus:border-blue-400"
                           />
                           <button
                             type="button"
+                            disabled={shopSearchBusy}
                             onClick={() => searchShopLocation(shopMapSearch)}
-                            className="rounded-xl bg-slate-700 px-3 py-2.5 text-sm font-bold text-white hover:bg-slate-800"
+                            className="rounded-xl bg-slate-700 px-3 py-2.5 text-sm font-bold text-white hover:bg-slate-800 disabled:cursor-wait disabled:opacity-60"
                           >
-                            Tìm
+                            {shopSearchBusy ? 'Đang tìm...' : 'Tìm'}
                           </button>
                         </div>
 
+                        {shopSearchMessage && <p role="status" className="mt-2 text-xs font-semibold text-slate-700">{shopSearchMessage}</p>}
                         {shopSuggestions.length > 0 && (
                           <div className="mt-3 space-y-2 rounded-xl border border-slate-200 bg-white p-2">
                             {shopSuggestions.map((place) => (
@@ -1968,61 +2246,73 @@ export default function QuanLyDonHang() {
                       <textarea rows="2" required
                         className="w-full pl-11 pr-4 py-3.5 bg-slate-50 border-2 border-transparent rounded-xl outline-none focus:bg-white focus:border-blue-400 transition-all font-medium resize-none"
                         placeholder="Số nhà, tên đường, phường/xã, quận/huyện..."
-                        value={form.receiver_address} onChange={e => setForm({...form, receiver_address: e.target.value, receiver_location_verified: false})} 
+                        value={form.receiver_address}
+                        onChange={(event) => {
+                          receiverReverseGeocodeRequest.current += 1;
+                          receiverSearchRequest.current += 1;
+                          const keepSelectedPoint = form.receiver_location_verified;
+                          setForm((current) => ({
+                            ...current,
+                            receiver_address: event.target.value,
+                            receiver_location_verified: keepSelectedPoint
+                          }));
+                          setReceiverSuggestions([]);
+                          setReceiverSearchBusy(false);
+                          setReceiverSearchMessage(keepSelectedPoint
+                            ? 'Địa chỉ được sửa; tọa độ điểm đã chọn trên bản đồ vẫn được giữ.'
+                            : '');
+                        }}
                       ></textarea>
                     </div>
-                    <div className="mt-3 flex items-center justify-between gap-3 flex-wrap">
+                    <div className="mt-3 flex flex-wrap items-center gap-3">
+                      <button
+                        type="button"
+                        disabled={receiverSearchBusy}
+                        onClick={() => searchReceiverLocation(form.receiver_address)}
+                        className="inline-flex items-center gap-2 rounded-xl bg-slate-700 px-4 py-2 text-sm font-bold text-white shadow-sm hover:bg-slate-800 disabled:cursor-wait disabled:opacity-60"
+                      >
+                        {receiverSearchBusy ? 'Đang tìm...' : 'Tìm địa chỉ'}
+                      </button>
                       <button
                         type="button"
                         onClick={() => setShowReceiverMap((prev) => !prev)}
                         className="inline-flex items-center gap-2 rounded-xl bg-indigo-600 px-4 py-2 text-sm font-bold text-white shadow-sm hover:bg-indigo-700"
                       >
-                        <MapPinned size={16} /> {showReceiverMap ? 'Ẩn bản đồ' : 'Chọn điểm giao'}
+                        <MapPinned size={16} /> {showReceiverMap ? 'Ẩn bản đồ' : 'Chọn trên bản đồ'}
                       </button>
-                      <span className="text-xs text-slate-500 font-medium">
-                        {form.receiver_location_verified ? `Đã xác nhận: ${form.receiver_lat.toFixed(5)}, ${form.receiver_lng.toFixed(5)}` : 'Chưa xác nhận điểm giao'}
+                      <span role="status" className="text-xs font-medium text-slate-500">
+                        {form.receiver_location_verified
+                          ? `Đã chọn điểm giao: ${form.receiver_lat.toFixed(5)}, ${form.receiver_lng.toFixed(5)}`
+                          : 'Chọn một kết quả tìm kiếm hoặc bấm lên bản đồ để xác nhận điểm giao.'}
                       </span>
                     </div>
 
-                    <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-3">
-                      <div className="flex gap-2">
-                        <input
-                          type="text"
-                          value={receiverMapSearch}
-                          onChange={(e) => searchReceiverLocation(e.target.value)}
-                          placeholder="Nhập tên đường, địa chỉ chi tiết, phường, quận..."
-                          className="flex-1 rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-700 outline-none focus:border-indigo-400"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => searchReceiverLocation(receiverMapSearch)}
-                          className="rounded-xl bg-slate-700 px-3 py-2.5 text-sm font-bold text-white hover:bg-slate-800"
-                        >
-                          Tìm
-                        </button>
+                    {receiverSearchMessage && <p role="status" className="mt-2 text-xs font-semibold text-slate-700">{receiverSearchMessage}</p>}
+                    {receiverSuggestions.length > 0 && (
+                      <div className="mt-3 space-y-2 rounded-xl border border-slate-200 bg-white p-2">
+                        {receiverSuggestions.map((place) => (
+                          <button
+                            key={`${place.place_id}-${place.display_name}`}
+                            type="button"
+                            onClick={() => selectSuggestedReceiverLocation(place)}
+                            className="block w-full rounded-lg border border-transparent px-3 py-2 text-left text-sm text-slate-600 hover:border-indigo-200 hover:bg-indigo-50"
+                          >
+                            {place.display_name}
+                          </button>
+                        ))}
                       </div>
-
-                      {receiverSuggestions.length > 0 && (
-                        <div className="mt-3 space-y-2 rounded-xl border border-slate-200 bg-white p-2">
-                          {receiverSuggestions.map((place) => (
-                            <button
-                              key={`${place.place_id}-${place.display_name}`}
-                              type="button"
-                              onClick={() => selectSuggestedReceiverLocation(place)}
-                              className="block w-full rounded-lg border border-transparent px-3 py-2 text-left text-sm text-slate-600 hover:border-indigo-200 hover:bg-indigo-50"
-                            >
-                              {place.display_name}
-                            </button>
-                          ))}
-                        </div>
-                      )}
-                    </div>
+                    )}
 
                     {showReceiverMap && (
                       <div className="mt-4 rounded-2xl border border-slate-200 overflow-hidden bg-slate-50 p-2">
+                        <p className="px-2 pb-2 text-sm font-semibold text-slate-700">Bấm trực tiếp vào vị trí giao trên bản đồ để chọn điểm.</p>
                         <MapContainer center={[(form.receiver_lat ?? form.shop_lat ?? 10.762622), (form.receiver_lng ?? form.shop_lng ?? 106.660172)]} zoom={13} maxBounds={HCMC_MAP_BOUNDS} maxBoundsViscosity={1} scrollWheelZoom={true} className="h-64 w-full rounded-xl border border-slate-200">
                           <LocationMapTiles />
                           <HcmcBoundaryOverlay />
+                          <RecenterMap value={{
+                            lat: Number(form.receiver_lat ?? form.shop_lat ?? 10.762622),
+                            lng: Number(form.receiver_lng ?? form.shop_lng ?? 106.660172)
+                          }} />
                           <Marker position={[(form.receiver_lat ?? form.shop_lat ?? 10.762622), (form.receiver_lng ?? form.shop_lng ?? 106.660172)]} icon={shopMarkerIcon} />
                           <MapClickHandlerReceiver onSelect={updateReceiverLocationFromMap} />
                         </MapContainer>
