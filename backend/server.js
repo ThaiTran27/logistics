@@ -3787,6 +3787,21 @@ app.post('/api/warehouse/scan', (req, res) => {
     if (!Number.isInteger(currentWarehouseId) || currentWarehouseId <= 0) {
       return res.status(400).json({ success: false, message: 'Mã kho quét không hợp lệ.' });
     }
+    const rejectWrongWarehouse = (expectedWarehouseId, selectedWarehouseId) => {
+      db.query(
+        'SELECT id, name FROM warehouses WHERE id IN (?, ?)',
+        [expectedWarehouseId, selectedWarehouseId],
+        (warehouseErr, warehouses) => {
+          if (warehouseErr) return res.status(500).json({ success: false, message: 'Không thể kiểm tra kho được phân tuyến: ' + warehouseErr.sqlMessage });
+          const expectedWarehouse = warehouses.find((warehouse) => Number(warehouse.id) === Number(expectedWarehouseId));
+          const selectedWarehouse = warehouses.find((warehouse) => Number(warehouse.id) === Number(selectedWarehouseId));
+          res.status(409).json({
+            success: false,
+            message: `Đơn này được phân tuyến đến "${expectedWarehouse?.name || `kho #${expectedWarehouseId}`}", nhưng bạn đang chọn "${selectedWarehouse?.name || `kho #${selectedWarehouseId}`}". Hãy quét tại đúng kho được phân tuyến.`
+          });
+        }
+      );
+    };
 
     if (order.status === 'picked_up') {
       expectedWarehouseId = Number(order.origin_warehouse_id);
@@ -3800,7 +3815,7 @@ app.post('/api/warehouse/scan', (req, res) => {
         if (Number(order.current_warehouse_id) !== Number(order.origin_warehouse_id)) {
           return res.status(409).json({ success: false, message: 'Đơn chưa được ghi nhận tại kho phường nguồn trước khi trung chuyển.' });
         }
-        if (currentWarehouseId !== centralWarehouseId) return res.status(409).json({ success: false, message: 'Đơn trung chuyển này cần được quét tại kho tổng.' });
+        if (currentWarehouseId !== centralWarehouseId) return rejectWrongWarehouse(centralWarehouseId, currentWarehouseId);
         finalizeScan(centralWarehouseId, 'at_central_warehouse', 'Đã nhập kho tổng, chờ phân luồng về kho con đích.');
       });
       return;
@@ -3838,7 +3853,7 @@ app.post('/api/warehouse/scan', (req, res) => {
     }
 
     if (expectedWarehouseId && currentWarehouseId !== expectedWarehouseId) {
-      return res.status(409).json({ success: false, message: 'Mã kho quét không khớp với kho được phân tuyến cho đơn này.' });
+      return rejectWrongWarehouse(expectedWarehouseId, currentWarehouseId);
     }
     finalizeScan(currentWarehouseId, newStatus, message);
 
@@ -3847,7 +3862,7 @@ app.post('/api/warehouse/scan', (req, res) => {
       newStatus = 'at_destination_warehouse';
       message = 'Đã nhận hàng tại kho con đích. Chờ Điều phối phân công tài xế giao.';
       if (currentWarehouseId !== expectedWarehouseId) {
-        return res.status(409).json({ success: false, message: 'Mã kho quét không khớp với kho con đích được phân tuyến cho đơn này.' });
+        return rejectWrongWarehouse(expectedWarehouseId, currentWarehouseId);
       }
       finalizeScan(currentWarehouseId, newStatus, message);
     }

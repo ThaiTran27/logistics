@@ -127,40 +127,62 @@ Nên chạy theo đúng thứ tự dưới đây để kiểm tra trạng thái 
 ### A. Tạo đơn — Shop
 
 1. Đăng nhập `shop2@smartlogistics.vn` với mật khẩu `123`.
-2. Vào `/cua-hang`, mở chức năng tạo đơn.
-3. Điền thông tin Shop, người nhận, số điện thoại, địa chỉ, cân nặng, kích thước, dịch vụ và khoản COD nếu muốn kiểm tra COD.
-4. Chọn vị trí Shop và điểm giao trên bản đồ.
-5. Gửi đơn và ghi lại mã vận đơn.
+2. Vào `/cua-hang` → **Tạo Đơn Giao Hàng**.
+3. Điền bộ dữ liệu test cơ bản sau (số điện thoại là dữ liệu giả; email hãy thay bằng hộp thư bạn có thể mở):
 
-**Điều kiện dữ liệu:** số điện thoại người nhận bắt đầu bằng `0`, dài 10–11 chữ số; cân nặng, kích thước và khoảng cách phải lớn hơn 0; tọa độ Shop và người nhận phải nằm trong vùng phục vụ TP. Hồ Chí Minh.
+   | Trường | Giá trị để nhập |
+   |---|---|
+   | Tên người nhận | `Nguyễn Thị Mai Test` |
+   | Số điện thoại | `0901000010` |
+   | Email người nhận | Email của bạn để nhận OTP giao hàng |
+   | Địa chỉ Shop/điểm lấy | Chọn bằng ô tìm bản đồ, không chỉ gõ vào ô địa chỉ |
+   | Địa chỉ giao | Chọn bằng ô tìm bản đồ, không chỉ gõ vào ô địa chỉ |
+   | Cân nặng | `1` kg |
+   | Dài × rộng × cao | `10` × `10` × `10` cm |
+   | Giá trị hàng | `0` |
+   | COD | `0` cho lượt test không cần ký quỹ |
+   | Người trả cước | Người gửi |
+   | Dịch vụ | Tiêu chuẩn |
+   | Hàng dễ vỡ / vùng xa | Không |
 
-**Kỳ vọng:** tạo đơn thành công, có mã vận đơn, trạng thái ban đầu `pending` và đơn hiện trong danh sách Shop/Điều hành.
+4. Để đơn đi vào đúng kho Gò Vấp cho tài khoản `kho2`, tại ô tìm vị trí Shop nhập `Số 2 Nguyễn Văn Bảo, Phường 4, Gò Vấp, TP. Hồ Chí Minh`, bấm **Tìm** rồi chọn kết quả gợi ý. Kiểm tra trạng thái vị trí Shop báo **Đã xác nhận** và tọa độ gần `10.8231, 106.6881`.
+5. Tại ô tìm vị trí giao, nhập `Số 15 Lê Duẩn, Bến Nghé, Quận 1, TP. Hồ Chí Minh`, bấm **Tìm** rồi chọn kết quả gợi ý. Kiểm tra trạng thái điểm giao báo **Đã xác nhận** và tọa độ nằm gần `10.7798, 106.6990`.
+6. Nếu chọn gợi ý không được, hãy kiểm tra kết nối Internet tới dịch vụ tìm địa chỉ OpenStreetMap. Có thể bấm trực tiếp lên bản đồ trong vùng TP. Hồ Chí Minh; nếu nền bản đồ xám, ưu tiên ô tìm địa chỉ để có thể xác định chính xác điểm gần kho nào. Sau khi chọn điểm, không sửa tay nội dung địa chỉ vì thao tác sửa sẽ bỏ trạng thái xác nhận vị trí.
+7. Gửi đơn, ghi lại mã vận đơn hiển thị. Không dùng mã ví dụ `SLTEST...` cho lượt tạo đơn mới.
+
+**Kỳ vọng:** đơn tạo thành công với trạng thái `pending`. Tọa độ Shop phải thuộc TP. Hồ Chí Minh và gần kho Gò Vấp; tọa độ giao phải thuộc TP. Hồ Chí Minh. Nếu điểm Shop để mặc định, hệ thống có thể chọn kho Quận 1 thay vì Gò Vấp.
 
 ### B. Phân tài xế lấy hàng — Điều hành
 
 1. Đăng nhập `dieu_hanh@smartlogistics.vn`.
 2. Vào `/dieu-hanh` → **Phân Tuyến Tài Xế**.
-3. Chọn đơn `pending`, chọn nhiệm vụ lấy hàng và tài xế lấy hàng còn hoạt động.
-4. Xác nhận phân công.
+3. Tìm đúng mã vận đơn vừa ghi lại; xác nhận người nhận là `Nguyễn Thị Mai Test` để tránh chọn nhầm đơn seed.
+4. Chọn nhiệm vụ lấy hàng tại Shop (`pickup`) và tài xế lấy hàng đang hoạt động, ví dụ `taixe2@smartlogistics.vn`.
+5. Xác nhận phân công. Hệ thống tự chọn kho con gần tọa độ Shop nhất.
 
-**Kỳ vọng:** đơn sang `picking`; tài xế được phân công nhìn thấy đơn trong `/tai-xe`.
+**Kỳ vọng:** đơn sang `picking`; đơn xuất hiện trong danh sách nhiệm vụ của `taixe2`. Với tọa độ Shop gần `10.8231, 106.6881`, kho nguồn cần là kho con Gò Vấp.
 
 ### C. Lấy hàng tại Shop — Tài xế lấy hàng
 
-1. Đăng nhập `taixe2@smartlogistics.vn`.
-2. Vào `/tai-xe`, mở nhiệm vụ vừa nhận.
-3. Quét mã vận đơn hoặc xác nhận đã lấy hàng theo màn hình.
+1. Đăng xuất khỏi Điều hành; đăng nhập `taixe2@smartlogistics.vn` với mật khẩu `123`.
+2. Mở `/tai-xe` → **Đơn cần lấy** → đúng đơn `Nguyễn Thị Mai Test` → **Mở camera quét mã nhận hàng**.
+3. Cho phép trình duyệt dùng camera. Đưa nhãn mã vạch của đúng đơn vào khung, giữ máy ổn định và đủ sáng.
+4. Nếu camera không hoạt động/không đọc được, nhập **mã vận đơn thật vừa tạo ở bước A** vào ô dự phòng rồi nhấn **Xác nhận**. Không nhập mã ở ví dụ trong README. Có thể dùng máy quét USB/Bluetooth: đặt con trỏ vào ô dự phòng và quét nhãn.
+5. Nếu hiện “Mã quét không khớp”, đối chiếu mã đang hiện trong hộp quét với nhãn; nếu hiện lỗi kết nối, kiểm tra backend đang chạy ở cổng `5000`.
 
-**Kỳ vọng:** đơn sang `picked_up`; đơn chờ kho nguồn quét nhận.
+**Kỳ vọng:** chỉ mã khớp với đơn đang mở mới được xác nhận; thông báo thành công hiện ra và trạng thái đơn sang `picked_up`. Sau đó bàn giao kiện cho Kho Gò Vấp quét nhập. Phải ở `/tai-xe`, không phải `/dieu-hanh`.
 
 ### D. Nhập kho nguồn — Kho
 
-1. Đăng nhập `kho2@smartlogistics.vn` để kiểm tra kho Gò Vấp.
-2. Vào `/kho`, xác nhận kho đang chọn là kho được gán.
-3. Nếu kho chưa có vị trí kệ, khai báo vị trí kệ trước.
-4. Quét/nhập mã vận đơn và mã vị trí kệ; có thể dùng chế độ chuyển tải nhanh nếu phù hợp nghiệp vụ.
+1. Đăng xuất khỏi tài xế; đăng nhập `kho2@smartlogistics.vn` với mật khẩu `123`.
+2. Vào `/kho` → **Máy Quét Mã Vạch**; xác nhận kho đang thao tác là **Kho con Gò Vấp**.
+3. Tại phần **Tạo nhãn vị trí kệ mới**, nhập mã `TEST-A1-03` và tên `Kệ test Gò Vấp`, sau đó nhấn **Tạo mã và nhãn mã vạch**. Nếu mã này đã tồn tại từ lần test trước, đổi mã thành `TEST-A1-04`. Khi tạo thành công, giao diện tự chọn vị trí vừa tạo.
+4. Nhập/quét đúng mã vận đơn đã ghi ở bước A. Nếu không có máy quét, nhập mã vào ô lớn bên dưới rồi nhấn Enter.
+5. Xác nhận kết quả nhập kho; mở danh sách tồn kho để kiểm tra đơn và vị trí kệ `TEST-A1-03` (hoặc mã mới bạn vừa tạo).
 
-**Kỳ vọng:** kho nguồn nhận đúng đơn và trạng thái thành `at_origin_warehouse`. Quét nhầm kho hoặc mã kệ không thuộc kho phải bị từ chối.
+**Kỳ vọng:** đơn sang `at_origin_warehouse`, hiện trong tồn kho Gò Vấp tại vị trí kệ vừa tạo. Nếu thông báo đơn được phân tuyến đến kho khác, dừng tại đây: đơn phải được tạo với vị trí Shop gần Gò Vấp **trước khi Điều hành phân công**, vì đổi địa chỉ sau khi phân công không đổi kho nguồn.
+
+Kho nguồn được hệ thống xác định khi Điều hành phân công tài xế lấy hàng: hệ thống chọn kho con đang hoạt động gần tọa độ Shop nhất. Ví dụ, tọa độ Shop mặc định `10.762622, 106.660172` gần kho Quận 1 hơn kho Gò Vấp. Vì tài khoản `kho2` chỉ thao tác tại kho Gò Vấp, đơn được tạo ở vị trí mặc định có thể không quét nhận được tại tài khoản này. Nếu quét sai kho, backend trả tên kho được phân tuyến và tên kho đang chọn; với bộ dữ liệu mẫu ở bước A, kho nguồn dự kiến là Gò Vấp.
 
 ### E. Trung chuyển kho nguồn → kho tổng
 
@@ -265,11 +287,12 @@ Các đơn này được seed ở nhiều trạng thái khác nhau để kiểm 
 |---|---|
 | Backend không khởi động/kết nối DB lỗi | MySQL đang chạy chưa; database đã import chưa; thông tin host/user/password/database trong `server.js` có đúng không. |
 | Frontend mở được nhưng API lỗi | Backend có chạy ở cổng `5000` không; frontend `VITE_API_URL` có đúng không. Một số màn hình hiện gọi trực tiếp `localhost:5000`. |
+| Bản đồ hiện nền xám/không thấy đường phố | Kiểm tra kết nối Internet tới dịch vụ tile OpenStreetMap. Khi chọn điểm, tọa độ vẫn được xác nhận; nếu tra địa chỉ ngược không truy cập được, biểu mẫu giữ địa chỉ dạng tọa độ để bạn có thể tiếp tục kiểm tra. |
 | Báo không có quyền | Đăng nhập đúng tài khoản/role của màn hình; đăng xuất và đăng nhập lại sau khi đổi tài khoản. |
 | Kho không tải được hoặc bị chặn | Tài khoản quản lý kho phải được gán `warehouse_id`; quản lý kho bị giới hạn theo phạm vi kho. |
 | Không quét được mã | Cấp quyền camera; thử nhập mã thủ công nếu giao diện có trường nhập. |
 | Chấm công/GPS không chạy | Cấp quyền camera và vị trí trong trình duyệt; kiểm tra thiết bị có GPS/vị trí khả dụng. |
-| Nhập kho báo sai vị trí | Đơn phải đang ở đúng chặng; chọn đúng kho và mã kệ đã khai báo tại kho đó. |
+| Nhập kho báo sai vị trí/kho | Đơn phải đang ở đúng chặng; chọn đúng kho được phân tuyến (kho gần vị trí Shop nhất ở chặng lấy hàng) và mã kệ đã khai báo tại kho đó. |
 | Không phân công được tài xế giao | Kiểm tra role tài xế, trạng thái đơn, tài xế đang có nhiệm vụ khác và số dư ký quỹ khả dụng khi đơn có khoản phải thu. |
 | Không hoàn tất giao hàng | Cần OTP đúng; ảnh minh chứng; chữ ký nếu thành công; xác nhận thu tiền và phương thức COD khi có khoản phải thu. |
 | Không nhận được email OTP | Kiểm tra cấu hình SMTP và địa chỉ email người nhận. Có thể kiểm tra OTP trong database test. |
@@ -280,4 +303,3 @@ Các đơn này được seed ở nhiều trạng thái khác nhau để kiểm 
 - `frontend`: `npm run build` chạy thành công; Vite cảnh báo bundle JavaScript lớn hơn 500 kB.
 - `frontend`: `npm run lint` hiện không đạt (26 lỗi, 10 cảnh báo theo lần chạy kiểm tra gần nhất).
 - `backend`: chưa có bộ test tự động được cấu hình.
-

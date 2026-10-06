@@ -1,5 +1,5 @@
 import { apiFetch as fetch } from '../../utils/apiFetch.js';
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { MapContainer, TileLayer, Marker, Popup, Polyline, GeoJSON, useMap, useMapEvents } from 'react-leaflet';
 import { io } from 'socket.io-client';
 import * as XLSX from 'xlsx';
@@ -124,11 +124,13 @@ function LiveTrackingMap({ route, driverLocation }) {
   );
 }
 
-function MapClickHandler({ onSelect }) {
+function MapClickHandler({ onSelect, onOutside }) {
   useMapEvents({
     click: (event) => {
       if (isWithinHcmcBoundary(event.latlng.lat, event.latlng.lng)) {
         onSelect(event.latlng.lat, event.latlng.lng);
+      } else {
+        onOutside();
       }
     }
   });
@@ -150,15 +152,33 @@ function RecenterMap({ value }) {
 function ShopMapPicker({ value, onSelect }) {
   return (
     <MapContainer center={[value.lat, value.lng]} zoom={13} maxBounds={HCMC_MAP_BOUNDS} maxBoundsViscosity={1} scrollWheelZoom={true} className="h-64 w-full rounded-xl border border-slate-200">
+      <LocationMapTiles />
+      <HcmcBoundaryOverlay />
+      <RecenterMap value={value} />
+      <MapClickHandler onSelect={onSelect} onOutside={() => window.alert('Vui lòng chọn vị trí trong phạm vi phục vụ TP. Hồ Chí Minh.')} />
+      <Marker position={[value.lat, value.lng]} icon={shopMarkerIcon} />
+    </MapContainer>
+  );
+}
+
+function LocationMapTiles() {
+  const [tilesUnavailable, setTilesUnavailable] = useState(false);
+
+  return (
+    <>
       <TileLayer
         attribution='&copy; OpenStreetMap contributors'
         url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+        eventHandlers={{ tileerror: () => setTilesUnavailable(true) }}
       />
-      <HcmcBoundaryOverlay />
-      <RecenterMap value={value} />
-      <MapClickHandler onSelect={onSelect} />
-      <Marker position={[value.lat, value.lng]} icon={shopMarkerIcon} />
-    </MapContainer>
+      {tilesUnavailable && (
+        <div className="leaflet-bottom leaflet-left pointer-events-none">
+          <div role="status" className="m-2 max-w-64 rounded-lg bg-amber-100 px-3 py-2 text-xs font-semibold text-amber-900 shadow">
+            Không tải được nền bản đồ. Kiểm tra kết nối Internet; bạn vẫn có thể chọn tọa độ trên bản đồ.
+          </div>
+        </div>
+      )}
+    </>
   );
 }
 
@@ -167,6 +187,8 @@ function MapClickHandlerReceiver({ onSelect }) {
     click: (event) => {
       if (isWithinHcmcBoundary(event.latlng.lat, event.latlng.lng)) {
         onSelect(event.latlng.lat, event.latlng.lng);
+      } else {
+        window.alert('Vui lòng chọn vị trí trong phạm vi phục vụ TP. Hồ Chí Minh.');
       }
     }
   });
@@ -211,6 +233,8 @@ export default function QuanLyDonHang() {
   const [shopSuggestions, setShopSuggestions] = useState([]);
   const [receiverMapSearch, setReceiverMapSearch] = useState('');
   const [receiverSuggestions, setReceiverSuggestions] = useState([]);
+  const shopReverseGeocodeRequest = useRef(0);
+  const receiverReverseGeocodeRequest = useRef(0);
   
   const [shippingFee, setShippingFee] = useState(0);
   const [chargeableWeight, setChargeableWeight] = useState(0); // Trọng lượng tính cước cuối cùng
@@ -788,18 +812,31 @@ export default function QuanLyDonHang() {
   };
 
   const updateShopLocationFromMap = async (lat, lng) => {
-    setForm((prev) => ({ ...prev, shop_lat: lat, shop_lng: lng }));
+    const requestId = ++shopReverseGeocodeRequest.current;
+    const fallbackAddress = `Vị trí trên bản đồ (${lat.toFixed(5)}, ${lng.toFixed(5)})`;
+    setForm((prev) => ({
+      ...prev,
+      shop_address: fallbackAddress,
+      shop_lat: lat,
+      shop_lng: lng,
+      shop_location_verified: true
+    }));
+    setShopMapSearch(fallbackAddress);
 
     try {
       const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}&zoom=18&addressdetails=1`, {
         headers: { 'Accept-Language': 'vi' }
       });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
-      const detail = data?.display_name || 'Địa điểm đã chọn trên bản đồ';
+      if (requestId !== shopReverseGeocodeRequest.current) return;
+      const detail = data?.display_name || fallbackAddress;
       setForm((prev) => ({ ...prev, shop_address: detail, shop_lat: lat, shop_lng: lng, shop_location_verified: true }));
       setShopMapSearch(detail);
     } catch (error) {
-      console.error('Không lấy được địa chỉ từ bản đồ:', error);
+      if (requestId === shopReverseGeocodeRequest.current) {
+        console.warn('Không lấy được địa chỉ từ bản đồ; vẫn giữ tọa độ đã chọn:', error);
+      }
     }
   };
 
@@ -842,18 +879,31 @@ export default function QuanLyDonHang() {
   };
 
   const updateReceiverLocationFromMap = async (lat, lng) => {
-    setForm((prev) => ({ ...prev, receiver_lat: lat, receiver_lng: lng, receiver_location_verified: true }));
+    const requestId = ++receiverReverseGeocodeRequest.current;
+    const fallbackAddress = `Vị trí trên bản đồ (${lat.toFixed(5)}, ${lng.toFixed(5)})`;
+    setForm((prev) => ({
+      ...prev,
+      receiver_address: fallbackAddress,
+      receiver_lat: lat,
+      receiver_lng: lng,
+      receiver_location_verified: true
+    }));
+    setReceiverMapSearch(fallbackAddress);
 
     try {
       const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}&zoom=18&addressdetails=1`, {
         headers: { 'Accept-Language': 'vi' }
       });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
-      const detail = data?.display_name || 'Địa điểm giao hàng đã chọn';
+      if (requestId !== receiverReverseGeocodeRequest.current) return;
+      const detail = data?.display_name || fallbackAddress;
       setForm((prev) => ({ ...prev, receiver_address: detail, receiver_lat: lat, receiver_lng: lng, receiver_location_verified: true }));
       setReceiverMapSearch(detail);
     } catch (error) {
-      console.error('Không lấy được địa chỉ giao hàng từ bản đồ:', error);
+      if (requestId === receiverReverseGeocodeRequest.current) {
+        console.warn('Không lấy được địa chỉ giao hàng từ bản đồ; vẫn giữ tọa độ đã chọn:', error);
+      }
     }
   };
 
@@ -1700,10 +1750,7 @@ export default function QuanLyDonHang() {
                     {showReceiverMap && (
                       <div className="mt-4 rounded-2xl border border-slate-200 overflow-hidden bg-slate-50 p-2">
                         <MapContainer center={[(form.receiver_lat ?? form.shop_lat ?? 10.762622), (form.receiver_lng ?? form.shop_lng ?? 106.660172)]} zoom={13} maxBounds={HCMC_MAP_BOUNDS} maxBoundsViscosity={1} scrollWheelZoom={true} className="h-64 w-full rounded-xl border border-slate-200">
-                          <TileLayer
-                            attribution='&copy; OpenStreetMap contributors'
-                            url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-                          />
+                          <LocationMapTiles />
                           <HcmcBoundaryOverlay />
                           <Marker position={[(form.receiver_lat ?? form.shop_lat ?? 10.762622), (form.receiver_lng ?? form.shop_lng ?? 106.660172)]} icon={shopMarkerIcon} />
                           <MapClickHandlerReceiver onSelect={updateReceiverLocationFromMap} />

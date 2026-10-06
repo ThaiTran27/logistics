@@ -330,7 +330,10 @@ function MotorcycleDriverApp() {
   const [dangCapNhat, setDangCapNhat] = useState(false);
   const [donCanQuet, setDonCanQuet] = useState(null);
   const [loiQuetMa, setLoiQuetMa] = useState('');
+  const [maVanDonNhapTay, setMaVanDonNhapTay] = useState('');
+  const [dangXacNhanMaQuet, setDangXacNhanMaQuet] = useState(false);
   const [maOtpGiaoHang, setMaOtpGiaoHang] = useState('');
+  const pickupScanBusyRef = useRef(false);
 
   const driverId = localStorage.getItem('user_id');
   const driverRole = localStorage.getItem('role') || localStorage.getItem('user_role');
@@ -492,12 +495,58 @@ function MotorcycleDriverApp() {
 
   const xacNhanDaLayHang = (order) => {
     setLoiQuetMa('');
+    setMaVanDonNhapTay('');
     setDonCanQuet(order);
   };
 
+  const xacNhanMaVanDon = useCallback(async (decodedText) => {
+    if (!donCanQuet || pickupScanBusyRef.current) return;
+    const scannedCode = String(decodedText || '').trim().toUpperCase();
+    const expectedCode = String(donCanQuet.tracking_code || '').trim().toUpperCase();
+    if (!scannedCode) {
+      setLoiQuetMa('Không đọc được mã. Hãy thử lại hoặc nhập mã vận đơn bên dưới.');
+      return;
+    }
+    if (scannedCode !== expectedCode) {
+      setLoiQuetMa('Mã quét không khớp với vận đơn đang nhận. Vui lòng quét lại đúng nhãn.');
+      return;
+    }
+
+    pickupScanBusyRef.current = true;
+    setDangXacNhanMaQuet(true);
+    setLoiQuetMa('');
+    try {
+      const response = await fetch(`http://localhost:5000/api/orders/${donCanQuet.id}/status`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'Idempotency-Key': `${driverId}-${donCanQuet.id}-picked_up`
+        },
+        body: JSON.stringify({ status: 'picked_up', user_id: driverId, tracking_code: donCanQuet.tracking_code })
+      });
+      const result = await response.json();
+      if (!response.ok || !result.success) throw new Error(result.message || 'Không thể xác nhận nhận hàng.');
+      batDauPhatToaDo(donCanQuet.id, donCanQuet.tracking_code);
+      setDonCanQuet(null);
+      setMaVanDonNhapTay('');
+      const routeResponse = await fetch(`http://localhost:5000/api/orders/${donCanQuet.id}/route`);
+      const routeResult = await routeResponse.json();
+      if (routeResult.success) setRouteInfo(routeResult.data);
+      alert(result.offline_queued
+        ? 'Đã lưu xác nhận lấy hàng trên thiết bị. Tự động đồng bộ khi mạng quay lại.'
+        : 'Đã xác nhận đúng mã vận đơn. Vui lòng bàn giao kiện hàng cho Thủ kho quét nhập.');
+      taiDuLieu();
+    } catch (error) {
+      setLoiQuetMa(error.message || 'Lỗi kết nối máy chủ.');
+    } finally {
+      pickupScanBusyRef.current = false;
+      setDangXacNhanMaQuet(false);
+    }
+  }, [donCanQuet, driverId, batDauPhatToaDo, taiDuLieu]);
+
   useEffect(() => {
     if (!donCanQuet) return undefined;
-    let scanned = false;
+    let active = true;
     const scanner = new Html5QrcodeScanner('driver-pickup-barcode', {
       fps: 10,
       qrbox: { width: 240, height: 160 },
@@ -510,41 +559,13 @@ function MotorcycleDriverApp() {
       rememberLastUsedCamera: false
     }, false);
     scanner.render(async (decodedText) => {
-      if (scanned) return;
-      if (decodedText.trim() !== String(donCanQuet.tracking_code).trim()) {
-        setLoiQuetMa('Mã quét không khớp với vận đơn đang nhận. Vui lòng quét lại đúng nhãn.');
-        return;
-      }
-      scanned = true;
-      try {
-        const response = await fetch(`http://localhost:5000/api/orders/${donCanQuet.id}/status`, {
-          method: 'PUT',
-          headers: {
-            'Content-Type': 'application/json',
-            'Idempotency-Key': `${driverId}-${donCanQuet.id}-picked_up`
-          },
-          body: JSON.stringify({ status: 'picked_up', user_id: driverId, tracking_code: donCanQuet.tracking_code })
-        });
-        const result = await response.json();
-        if (!response.ok || !result.success) throw new Error(result.message || 'Không thể xác nhận nhận hàng.');
-        batDauPhatToaDo(donCanQuet.id, donCanQuet.tracking_code);
-        setDonCanQuet(null);
-        const routeResponse = await fetch(`http://localhost:5000/api/orders/${donCanQuet.id}/route`);
-        const routeResult = await routeResponse.json();
-        if (routeResult.success) setRouteInfo(routeResult.data);
-        alert(result.offline_queued
-          ? 'Đã lưu xác nhận lấy hàng trên thiết bị. Tự động đồng bộ khi mạng quay lại.'
-          : 'Đã quét đúng mã vận đơn. Vui lòng bàn giao kiện hàng cho Thủ kho quét nhập.');
-        taiDuLieu();
-      } catch (error) {
-        scanned = false;
-        setLoiQuetMa(error.message || 'Lỗi kết nối máy chủ.');
-      }
+      if (active) await xacNhanMaVanDon(decodedText);
     }, () => {});
     return () => {
+      active = false;
       scanner.clear().catch((error) => console.warn('Không thể dừng camera quét mã:', error));
     };
-  }, [donCanQuet, driverId, batDauPhatToaDo, taiDuLieu]);
+  }, [donCanQuet, xacNhanMaVanDon]);
 
   useEffect(() => {
     if (!scanningTripBags) return undefined;
@@ -1228,7 +1249,36 @@ function MotorcycleDriverApp() {
               </div>
               <div id="driver-pickup-barcode" />
               {loiQuetMa && <p role="alert" className="mt-3 rounded-lg bg-red-50 p-3 text-sm font-bold text-red-700">{loiQuetMa}</p>}
-              <p className="mt-3 text-xs text-slate-500">Chỉ trạng thái vận đơn khớp mới được xác nhận nhận hàng.</p>
+              <form
+                className="mt-4 space-y-2 border-t border-slate-100 pt-4"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  xacNhanMaVanDon(maVanDonNhapTay);
+                }}
+              >
+                <label htmlFor="pickup-tracking-code" className="block text-sm font-bold text-slate-700">
+                  Camera không quét được? Nhập mã vận đơn hoặc dùng máy quét USB/Bluetooth
+                </label>
+                <div className="flex gap-2">
+                  <input
+                    id="pickup-tracking-code"
+                    type="text"
+                    autoComplete="off"
+                    value={maVanDonNhapTay}
+                    onChange={(event) => setMaVanDonNhapTay(event.target.value)}
+                    placeholder={donCanQuet.tracking_code}
+                    className="min-w-0 flex-1 rounded-lg border border-slate-300 px-3 py-2 font-mono text-sm"
+                  />
+                  <button
+                    type="submit"
+                    disabled={!maVanDonNhapTay.trim() || dangXacNhanMaQuet}
+                    className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-bold text-white disabled:cursor-not-allowed disabled:bg-slate-300"
+                  >
+                    {dangXacNhanMaQuet ? 'Đang xác nhận...' : 'Xác nhận'}
+                  </button>
+                </div>
+              </form>
+              <p className="mt-3 text-xs text-slate-500">Chỉ mã vận đơn đang hiển thị ở trên mới được xác nhận nhận hàng.</p>
             </div>
           </div>
         )}
