@@ -147,7 +147,7 @@ Nên chạy theo đúng thứ tự dưới đây để kiểm tra trạng thái 
    | Hàng dễ vỡ / vùng xa | Không |
 
 5. Tại ô tìm vị trí giao, nhập `Số 15 Lê Duẩn, Bến Nghé, Quận 1, TP. Hồ Chí Minh`, bấm **Tìm** rồi chọn kết quả gợi ý. Kiểm tra trạng thái điểm giao báo **Đã xác nhận** và tọa độ nằm gần `10.7798, 106.6990`. Không phải chọn Quận/Huyện; có thể thử một địa chỉ ở khu vực khác trong TP. Hồ Chí Minh.
-6. Nếu chọn gợi ý không được, hãy kiểm tra kết nối Internet tới dịch vụ tìm địa chỉ OpenStreetMap. Có thể bấm trực tiếp lên bản đồ trong vùng TP. Hồ Chí Minh; nếu nền bản đồ xám, ưu tiên ô tìm địa chỉ để có thể xác định chính xác điểm gần kho nào. Sau khi chọn điểm, không sửa tay nội dung địa chỉ vì thao tác sửa sẽ bỏ trạng thái xác nhận vị trí.
+6. Bấm **Tìm** hoặc nhấn Enter, sau đó phải chọn một kết quả để xác nhận vị trí; chỉ gõ địa chỉ chưa đủ để lưu. Nếu không có kết quả, thử nhập tên đường/phường ngắn hơn. Có thể chọn trực tiếp trên bản đồ; nếu nền bản đồ trống hoàn toàn, kiểm tra mạng/firewall có chặn các máy chủ tile và dịch vụ địa chỉ không. Sau khi chọn điểm, không sửa tay nội dung địa chỉ vì thao tác sửa sẽ bỏ trạng thái xác nhận vị trí.
 7. Gửi đơn, ghi lại mã vận đơn hiển thị. Không dùng mã ví dụ `SLTEST...` cho lượt tạo đơn mới.
 8. Tạo thêm một đơn khác: địa chỉ lấy hàng phải tiếp tục tự điền như hồ sơ đã lưu; chọn một địa chỉ giao khác trong TP. Hồ Chí Minh để xác nhận không bị giới hạn vào một quận/huyện cụ thể.
 
@@ -290,7 +290,8 @@ Các đơn này được seed ở nhiều trạng thái khác nhau để kiểm 
 |---|---|
 | Backend không khởi động/kết nối DB lỗi | MySQL đang chạy chưa; database đã import chưa; thông tin host/user/password/database trong `server.js` có đúng không. |
 | Frontend mở được nhưng API lỗi | Backend có chạy ở cổng `5000` không; frontend `VITE_API_URL` có đúng không. Một số màn hình hiện gọi trực tiếp `localhost:5000`. |
-| Bản đồ hiện nền xám/không thấy đường phố | Kiểm tra kết nối Internet tới dịch vụ tile OpenStreetMap. Khi chọn điểm, tọa độ vẫn được xác nhận; nếu tra địa chỉ ngược không truy cập được, biểu mẫu giữ địa chỉ dạng tọa độ để bạn có thể tiếp tục kiểm tra. |
+| Bản đồ hiện nền xám/không thấy đường phố | Màn Shop lần lượt thử nền OpenStreetMap, CARTO và Esri. Nếu cả ba không tải, kiểm tra Internet/firewall hoặc DNS có chặn máy chủ bản đồ không. Khi đó ô tìm địa chỉ thử Nominatim rồi Photon; chọn một kết quả mới xác nhận được điểm. |
+| Đã gõ địa chỉ Shop nhưng vẫn báo chưa chọn địa chỉ | Bấm **Tìm** hoặc Enter, đợi kết quả, rồi bấm chọn một gợi ý. Gõ chữ trong ô tìm kiếm chưa lưu địa chỉ/tọa độ. Nếu cả hai dịch vụ tìm kiếm không truy cập được, kết nối mạng hoặc firewall cần cho phép các dịch vụ bản đồ/địa chỉ. |
 | Báo không có quyền | Đăng nhập đúng tài khoản/role của màn hình; đăng xuất và đăng nhập lại sau khi đổi tài khoản. |
 | Kho không tải được hoặc bị chặn | Tài khoản quản lý kho phải được gán `warehouse_id`; quản lý kho bị giới hạn theo phạm vi kho. |
 | Không quét được mã | Cấp quyền camera; thử nhập mã thủ công nếu giao diện có trường nhập. |
