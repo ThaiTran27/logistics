@@ -11,11 +11,20 @@
 
 ## 2. Yêu cầu trước khi chạy
 
-- Node.js và npm.
-- MySQL đang chạy local.
+- Node.js 22.12 trở lên và npm (đi kèm Node.js). Phiên bản này đáp ứng lệnh `--env-file-if-exists` của backend và yêu cầu của Vite.
+- MySQL 8.0 trở lên đang chạy trên máy local.
+- MySQL Workbench (khuyến nghị để nạp file SQL) hoặc MySQL Client.
+- Git để tải mã nguồn nếu bạn chưa có thư mục dự án.
 - Trình duyệt hiện đại. Camera, microphone hoặc GPS cần được cấp quyền khi kiểm tra các tính năng tương ứng.
 
-Backend hiện cấu hình MySQL trực tiếp trong `backend/server.js`:
+Mở PowerShell hoặc terminal trong VS Code tại thư mục gốc dự án (thư mục có `backend`, `frontend` và `README.md`). Kiểm tra Node.js/npm:
+
+```powershell
+node --version
+npm --version
+```
+
+Backend hiện kết nối MySQL trực tiếp trong `backend/server.js`, không đọc thông tin kết nối database từ `.env`:
 
 | Thuộc tính | Giá trị mặc định |
 |---|---|
@@ -24,22 +33,61 @@ Backend hiện cấu hình MySQL trực tiếp trong `backend/server.js`:
 | Password | rỗng |
 | Database | `smart_logistics_v2` |
 
-Nếu MySQL của bạn có thông tin đăng nhập khác, sửa cấu hình này trong `backend/server.js` trước khi khởi động. Các giá trị DB chưa được đọc từ biến môi trường.
+Nếu MySQL của bạn dùng tài khoản/mật khẩu khác, hãy sửa đúng các thuộc tính `host`, `user`, `password` trong đối tượng `mysql.createConnection` của `backend/server.js` cho môi trường local trước khi chạy backend. Không đặt mật khẩu thật vào Git hoặc chia sẻ mã nguồn có mật khẩu; không dùng cấu hình mặc định này cho môi trường production.
 
 ## 3. Cài đặt database
 
-> **Cảnh báo dữ liệu:** `backend/smart_logistics_v2.sql` tạo database `smart_logistics_v2`, xóa các bảng hiện có rồi tạo lại và nạp dữ liệu mẫu. Chỉ chạy trên database/máy test hoặc sao lưu dữ liệu trước. Không chạy trên môi trường có dữ liệu cần giữ.
+### 3.1. Lưu ý trước khi nạp SQL
 
-1. Khởi động MySQL.
-2. Mở `backend/smart_logistics_v2.sql` bằng MySQL Workbench hoặc công cụ MySQL tương đương.
-3. Chạy toàn bộ script.
-4. Xác nhận database `smart_logistics_v2` cùng các bảng và dữ liệu seed đã được tạo.
+> **Cảnh báo: thao tác này xóa dữ liệu.** File `backend/smart_logistics_v2.sql` chọn database `smart_logistics_v2`, xóa rồi tạo lại các bảng ứng dụng được liệt kê trong script và nạp dữ liệu mẫu. Chạy lại script sẽ làm mất đơn hàng, tài khoản và dữ liệu nghiệp vụ đang có trong các bảng đó. Chỉ nạp vào môi trường test hoặc sao lưu trước; tuyệt đối không chạy trên database có dữ liệu cần giữ.
 
-Script mẫu tạo kho tổng, kho con Gò Vấp và Quận 1, người dùng thử nghiệm, đơn hàng mẫu, tin tức, yêu cầu website, nghỉ phép, chấm công và dữ liệu nhân sự liên quan.
+Script **không xóa toàn bộ database**: nếu database chưa tồn tại thì script tự tạo; nếu đã có thì những bảng ứng dụng mà script quản lý sẽ bị tạo lại. Backend còn tự tạo một số bảng mở rộng bằng `CREATE TABLE IF NOT EXISTS` sau khi kết nối thành công.
+
+### 3.2. Nạp database bằng MySQL Workbench (khuyến nghị)
+
+1. Mở MySQL Workbench và kết nối tới MySQL local. Nếu chưa có kết nối, tạo kết nối với `Hostname: localhost`, `Port: 3306`, `Username: root`; nhập mật khẩu của MySQL khi được hỏi. Mật khẩu kết nối Workbench là mật khẩu MySQL trên máy bạn, không nhất thiết rỗng.
+2. Trong Workbench, chọn **File → Open SQL Script...**, mở file `backend/smart_logistics_v2.sql` trong thư mục dự án. Đường dẫn thường là `<thư-mục-dự-án>\backend\smart_logistics_v2.sql`.
+3. Kiểm tra tab SQL đang dùng kết nối local đúng. Chọn **Execute All** (biểu tượng tia sét) để chạy toàn bộ script, không chỉ chạy câu lệnh tại vị trí con trỏ.
+4. Chờ chạy xong. Kết quả cuối script là `Database smart_logistics_v2 đã được khởi tạo thành công!`. Nếu Workbench báo lỗi, đọc dòng lỗi đầu tiên và kiểm tra kết nối/phiên bản MySQL; không tiếp tục bằng cách chạy đi chạy lại script trên database có dữ liệu cần giữ.
+5. Làm mới **SCHEMAS** ở khung bên trái. Mở schema `smart_logistics_v2` và xác nhận đã có các bảng như `users`, `orders`, `warehouses`, `order_status_history`, `shipment_bags` và `linehaul_trips`.
+
+Script nạp sẵn kho tổng, kho con Gò Vấp và Quận 1, tài khoản dùng thử, đơn vận chuyển mẫu, tin tức, yêu cầu dịch vụ/ứng tuyển, nghỉ phép, chấm công và dữ liệu nhân sự. Các bảng `users` và `orders` là nơi lưu thông tin tài khoản và vận đơn; lịch sử trạng thái nằm trong `order_status_history`; dữ liệu kho nằm trong `warehouses` và `warehouse_bin_locations`; luồng bao/chuyến liên kho dùng các bảng `shipment_bags`, `shipment_bag_orders`, `linehaul_trips` và `linehaul_trip_bags`.
+
+### 3.3. Kiểm tra schema và dữ liệu mẫu
+
+Trong một tab SQL Workbench mới, chọn schema `smart_logistics_v2` làm schema mặc định (nhấp đúp vào schema) rồi chạy các câu lệnh sau:
+
+```sql
+USE smart_logistics_v2;
+
+SELECT DATABASE() AS database_dang_chon;
+SHOW TABLES;
+
+SELECT COUNT(*) AS so_tai_khoan FROM users;
+SELECT COUNT(*) AS so_don_hang FROM orders;
+SELECT tracking_code, status
+FROM orders
+WHERE tracking_code LIKE 'SLTEST%'
+ORDER BY tracking_code;
+
+SELECT id, warehouse_type, ward_name, name, is_active
+FROM warehouses
+ORDER BY id;
+```
+
+Kết quả đúng với file seed hiện tại: `database_dang_chon` là `smart_logistics_v2`, có **19 tài khoản**, **9 đơn hàng** (trong đó có 8 mã `SLTEST...`), và có dữ liệu kho tổng/kho con. Nếu số lượng khác, kiểm tra tab **Action Output** xem toàn bộ script đã chạy hết chưa và xác nhận đang xem đúng schema.
+
+> Không cần tự tạo bảng hoặc tự nhập các tài khoản mẫu bằng tay. Sau khi kết nối database thành công, backend sẽ tự tạo bổ sung các bảng mở rộng còn thiếu; phần dữ liệu ban đầu vẫn cần được nạp từ file SQL ở bước trên.
 
 ## 4. Cấu hình tùy chọn
 
-Backend có file mẫu `backend/.env.example`. Tạo bản sao tên `backend/.env` nếu cần cấu hình các tính năng tùy chọn:
+Các giá trị trong phần này **không phải cấu hình kết nối MySQL**. File mẫu `backend/.env.example` dành cho các tính năng tùy chọn. Nếu cần dùng, tại thư mục gốc dự án tạo bản sao:
+
+```powershell
+Copy-Item backend\.env.example backend\.env
+```
+
+Sau đó mở `backend/.env` và điền những giá trị bạn thực sự dùng:
 
 ```dotenv
 # Chat AI: để trống sẽ dùng trợ lý FAQ tích hợp sẵn
@@ -62,7 +110,7 @@ MAIL_FROM=
 
 Không đưa khóa bí mật, mật khẩu thật hoặc thông tin SMTP vào Git. Giữ `JWT_SECRET` và `WEBHOOK_ENCRYPTION_KEY` ổn định giữa các lần khởi động nếu đang cần duy trì phiên đăng nhập hoặc giải mã bí mật webhook đã lưu. Nếu `JWT_SECRET` chưa cấu hình, backend sinh khóa mới khi khởi động; các token cũ sẽ mất hiệu lực sau khi restart.
 
-Frontend mặc định gọi API ở `http://localhost:5000`. Nếu cần đổi địa chỉ API, tạo `frontend/.env`:
+Frontend mặc định gọi API ở `http://localhost:5000`. Chỉ tạo `frontend/.env` nếu backend chạy ở địa chỉ khác:
 
 ```dotenv
 VITE_API_URL=http://localhost:5000
@@ -70,27 +118,27 @@ VITE_API_URL=http://localhost:5000
 
 ## 5. Khởi động ứng dụng
 
-Mở hai cửa sổ terminal.
+Trước khi chạy, đảm bảo MySQL đang hoạt động và đã hoàn thành mục 3. Mở **hai cửa sổ terminal riêng**, mỗi cửa sổ bắt đầu tại thư mục gốc dự án. Cài dependencies một lần cho từng phần; nếu vừa tải mã nguồn hoặc chưa có thư mục `node_modules`, chạy `npm ci`.
 
 ### Terminal 1 — backend
 
 ```powershell
 cd backend
-npm install
+npm ci
 npm start
 ```
 
-Khi khởi động thành công, backend lắng nghe tại `http://localhost:5000`. Kiểm tra terminal có thông báo kết nối database thành công.
+Giữ terminal này mở. Khi thành công, terminal phải hiện thông báo `Đã kết nối Database: smart_logistics_v2` và backend lắng nghe tại `http://localhost:5000`. Mở `http://localhost:5000/api/docs` để xác nhận API hoạt động.
 
 ### Terminal 2 — frontend
 
 ```powershell
 cd frontend
-npm install
+npm ci
 npm run dev
 ```
 
-Mở địa chỉ local Vite in ra trong terminal, thường là `http://localhost:5173`.
+Mở địa chỉ local Vite in ra trong terminal, thường là `http://localhost:5173`. Đăng nhập bằng một email trong mục 6 và mật khẩu seed `123`.
 
 Các lệnh frontend khác:
 
@@ -324,7 +372,10 @@ Các đơn này được seed ở nhiều trạng thái khác nhau để kiểm 
 
 | Hiện tượng | Điều cần kiểm tra |
 |---|---|
-| Backend không khởi động/kết nối DB lỗi | MySQL đang chạy chưa; database đã import chưa; thông tin host/user/password/database trong `server.js` có đúng không. |
+| Backend không khởi động/kết nối DB lỗi | Kiểm tra MySQL service đang chạy và Workbench đăng nhập được; xác nhận schema `smart_logistics_v2` đã được nạp; đối chiếu `host`, `user`, `password`, `database` trong `mysql.createConnection` ở `backend/server.js`. Database hiện không lấy cấu hình từ `.env`. |
+| `Access denied for user` khi backend kết nối | Mật khẩu/tài khoản trong `server.js` không khớp MySQL trên máy. Dùng cùng thông tin đăng nhập kiểm tra trong Workbench, rồi cập nhật cấu hình backend; khởi động lại backend sau khi sửa. |
+| `Unknown database 'smart_logistics_v2'` | Chưa chạy hết `backend/smart_logistics_v2.sql`, hoặc script chạy trên kết nối/schema khác. Thực hiện lại mục 3 trên database test và xác nhận schema bằng `SELECT DATABASE();`. |
+| Lỗi tạo bảng hoặc thiếu bảng khi chạy SQL | Kiểm tra MySQL là phiên bản 8.0 trở lên và xem lỗi đầu tiên trong **Action Output**. Đảm bảo chạy toàn bộ file SQL trên đúng kết nối; sau khi import thành công hãy khởi động lại backend để backend tạo các bảng mở rộng còn thiếu. |
 | Frontend mở được nhưng API lỗi | Backend có chạy ở cổng `5000` không; frontend `VITE_API_URL` có đúng không. Một số màn hình hiện gọi trực tiếp `localhost:5000`. |
 | Bản đồ hiện nền xám/không thấy đường phố | Màn Shop lần lượt thử nền OpenStreetMap, CARTO và Esri. Nếu cả ba không tải, kiểm tra Internet/firewall hoặc DNS có chặn máy chủ bản đồ không. Khi đó ô tìm địa chỉ thử Nominatim rồi Photon; chọn một kết quả mới xác nhận được điểm. |
 | Đã gõ địa chỉ Shop nhưng vẫn báo chưa chọn địa chỉ | Bấm **Tìm** hoặc Enter, đợi kết quả, rồi bấm chọn một gợi ý. Gõ chữ trong ô tìm kiếm chưa lưu địa chỉ/tọa độ. Nếu cả hai dịch vụ tìm kiếm không truy cập được, kết nối mạng hoặc firewall cần cho phép các dịch vụ bản đồ/địa chỉ. |

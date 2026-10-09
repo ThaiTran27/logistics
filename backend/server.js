@@ -4009,21 +4009,22 @@ app.post('/api/warehouse/bags/:id/scan', (req, res) => {
       if (orderErr) return res.status(500).json({ success: false, message: orderErr.sqlMessage });
       if (!orders.length) return res.status(404).json({ success: false, message: 'Không tìm thấy vận đơn.' });
       const order = orders[0];
-      const expectedDestinationId = order.status === 'at_origin_warehouse'
-        ? Number(order.origin_warehouse_id)
-        : order.status === 'at_central_warehouse'
-          ? Number(order.destination_warehouse_id)
-          : null;
       const expectedWarehouseId = Number(bag.destination_warehouse_id);
       const correctRoute = order.status === 'at_origin_warehouse'
-        ? Number(order.current_warehouse_id) === expectedDestinationId
-          && expectedWarehouseId !== expectedDestinationId
+        ? expectedWarehouseId !== Number(order.origin_warehouse_id)
         : order.status === 'at_central_warehouse'
-          ? Number(order.current_warehouse_id) === expectedDestinationId
-            && expectedWarehouseId === Number(order.destination_warehouse_id)
+          ? expectedWarehouseId === Number(order.destination_warehouse_id)
           : false;
-      if (Number(order.current_warehouse_id) !== Number(bag.source_warehouse_id) || !correctRoute) {
+      if (Number(order.current_warehouse_id) !== Number(bag.source_warehouse_id)) {
         return res.status(409).json({ success: false, message: 'Đơn không nằm tại kho nguồn hoặc không đi đúng tuyến của bao.' });
+      }
+      if (!correctRoute) {
+        return res.status(409).json({
+          success: false,
+          message: order.status === 'at_central_warehouse'
+            ? 'Kho đích của bao phải trùng với kho đích đã phân tuyến cho đơn.'
+            : 'Đơn không nằm tại kho nguồn hoặc không đi đúng tuyến của bao.'
+        });
       }
       db.query(
         `SELECT b.id FROM shipment_bag_orders bo

@@ -71,6 +71,7 @@ function LinehaulDriverApp() {
   const [trips, setTrips] = useState([]);
   const [selectedTripId, setSelectedTripId] = useState('');
   const [scanning, setScanning] = useState(false);
+  const [manualBagCode, setManualBagCode] = useState('');
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -125,12 +126,21 @@ function LinehaulDriverApp() {
       setNotice(data.message);
       await taiChuyenXe();
       if (data.trip_ready) setScanning(false);
+      return true;
     } catch (scanError) {
       setError(scanError.message || 'Không thể xác nhận bao.');
+      return false;
     } finally {
       setBusy(false);
     }
   }, [taiChuyenXe]);
+
+  const xacNhanMaBaoThuCong = async (event) => {
+    event.preventDefault();
+    const bagCode = manualBagCode.trim();
+    if (!bagCode || busy) return;
+    if (await xacNhanQuetBao(bagCode)) setManualBagCode('');
+  };
 
   useEffect(() => {
     if (!scanning) return undefined;
@@ -269,6 +279,13 @@ function LinehaulDriverApp() {
                 <div className="mt-3 space-y-2">{(activeTrip.bags || []).map((bag) => <div key={bag.bag_id} className="flex items-center justify-between gap-3 rounded-lg bg-white p-3 text-sm"><span><span className="font-mono font-bold">{bag.bag_code}</span><small className="mt-1 block text-slate-500">{bag.order_count} đơn · {Number(bag.weight_kg || 0).toLocaleString('vi-VN')} kg</small></span><span className={bag.driver_scanned_at ? 'shrink-0 font-bold text-emerald-700' : 'shrink-0 font-bold text-amber-700'}>{bag.driver_scanned_at ? 'Đã quét' : 'Chưa quét'}</span></div>)}</div>
               </div>
               {['planned', 'loading'].includes(activeTrip.status) && <>
+                <form onSubmit={xacNhanMaBaoThuCong} className="space-y-2">
+                  <label htmlFor="manual-linehaul-bag-code" className="block text-sm font-bold">Không quét được? Nhập mã bao</label>
+                  <div className="flex gap-2">
+                    <input id="manual-linehaul-bag-code" type="text" value={manualBagCode} onChange={(event) => setManualBagCode(event.target.value)} placeholder="Nhập mã bao" autoCapitalize="characters" autoComplete="off" className="min-w-0 flex-1 rounded-xl border border-slate-200 bg-white px-4 py-3 font-mono uppercase outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100" />
+                    <button type="submit" disabled={busy || !manualBagCode.trim() || Number(activeTrip.scanned_bag_count) >= Number(activeTrip.bag_count)} className="shrink-0 rounded-xl bg-slate-800 px-4 py-3 font-bold text-white disabled:cursor-not-allowed disabled:opacity-50">Xác nhận</button>
+                  </div>
+                </form>
                 <button type="button" disabled={busy || Number(activeTrip.scanned_bag_count) >= Number(activeTrip.bag_count)} onClick={() => { setNotice(''); setScanning(true); }} className="flex w-full items-center justify-center gap-2 rounded-xl bg-indigo-600 px-4 py-4 font-black text-white disabled:opacity-50"><ScanLine size={18} /> Quét bao lên xe</button>
                 <button type="button" disabled={busy || !Number(activeTrip.bag_count) || Number(activeTrip.scanned_bag_count) !== Number(activeTrip.bag_count)} onClick={batDauChuyen} className="w-full rounded-xl bg-emerald-600 px-4 py-4 font-black text-white disabled:cursor-not-allowed disabled:opacity-40">Bắt đầu khởi hành</button>
               </>}
