@@ -2,6 +2,32 @@
 @tailwind components;
 @tailwind utilities;
 
+@keyframes lost-package-wobble {
+	0%, 100% { transform: rotate(-2deg) translateY(0); }
+	50% { transform: rotate(2deg) translateY(-4px); }
+}
+
+@keyframes lost-truck-cross {
+	from { transform: translateX(-120%); }
+	to { transform: translateX(520%); }
+}
+
+.lost-package {
+	animation: lost-package-wobble 3s ease-in-out infinite;
+	transform-origin: center bottom;
+}
+
+.lost-truck {
+	animation: lost-truck-cross 12s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.lost-package,
+	.lost-truck {
+		animation: none;
+	}
+}
+
 /* Keep the html5-qrcode controls readable on the dark camera panel. */
 #camera-reader {
 	color: #e2e8f0;

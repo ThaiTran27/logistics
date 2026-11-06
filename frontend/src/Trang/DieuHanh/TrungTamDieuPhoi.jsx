@@ -1,15 +1,17 @@
-import { apiFetch as fetch } from '../../utils/apiFetch.js';
-import { useState, useEffect, useCallback } from 'react';
+import { API_URL, apiFetch as fetch } from '../../utils/apiFetch.js';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { io } from 'socket.io-client';
 import { MapContainer, TileLayer, Marker, Popup, useMap } from 'react-leaflet';
+import { GOVAP_MAP_CENTER, MAP_ATTRIBUTION, MAP_TILE_URL } from '../../utils/govapMap.js';
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
-import { Truck, MapPin, Navigation, Search, PackageSearch, CheckCircle, Clock, Map, FileText, Send, Zap, Users, Package, ShieldCheck, RotateCw, AlertCircle } from 'lucide-react';
+import { Truck, MapPin, Navigation, Search, CheckCircle, Clock, Map, FileText, Send, Zap, Users, Package, ShieldCheck, RotateCw, AlertCircle } from 'lucide-react';
+import { getOrderStatusLabel, isOrderWaitOverdue, OrderStatusBadge } from '../../utils/orderStatus.jsx';
+import DispatcherRouteBoard from './DispatcherRouteBoard.jsx';
 
 // Fix lỗi mất icon mặc định của Leaflet trong React
 import iconMarkerUrl from 'leaflet/dist/images/marker-icon.png';
 import iconShadowUrl from 'leaflet/dist/images/marker-shadow.png';
-const API_URL = (import.meta.env.VITE_API_URL || 'http://localhost:5000').replace(/\/+$/, '');
 const normalizeAreaText = (value) => String(value || '')
   .toLocaleLowerCase('vi')
   .normalize('NFD')
@@ -23,7 +25,7 @@ const shipperIcon = new L.Icon({
 });
 
 // Khởi tạo kết nối Socket.io tới Backend
-const socket = io('http://localhost:5000', {
+const socket = io(API_URL, {
   auth: { token: localStorage.getItem('access_token') }
 });
 
@@ -31,11 +33,17 @@ const socket = io('http://localhost:5000', {
 const UpdateMapSize = () => {
   const map = useMap();
   useEffect(() => {
-    // Đợi giao diện render xong (200ms) rồi ép bản đồ tính toán lại kích thước
-    const timer = setTimeout(() => {
-      map.invalidateSize();
-    }, 200);
-    return () => clearTimeout(timer);
+    const container = map.getContainer();
+    const invalidate = () => window.requestAnimationFrame(() => map.invalidateSize({ pan: false }));
+    const timer = setTimeout(invalidate, 200);
+    const observer = new ResizeObserver(invalidate);
+    observer.observe(container);
+    window.addEventListener('resize', invalidate);
+    return () => {
+      clearTimeout(timer);
+      observer.disconnect();
+      window.removeEventListener('resize', invalidate);
+    };
   }, [map]);
   return null;
 };
@@ -43,6 +51,9 @@ const UpdateMapSize = () => {
 export default function TrungTamDieuPhoi() {
   const [donHang, setDonHang] = useState([]);
   const [allOrders, setAllOrders] = useState([]);
+  const [dispatchLoading, setDispatchLoading] = useState(true);
+  const [dispatchError, setDispatchError] = useState('');
+  const ordersLoadedRef = useRef(false);
   const [taiXeList, setTaiXeList] = useState([]);
   const [driverProfiles, setDriverProfiles] = useState([]);
   const [profileDrafts, setProfileDrafts] = useState({});
@@ -65,6 +76,14 @@ export default function TrungTamDieuPhoi() {
   const [rmaReviewNotes, setRmaReviewNotes] = useState({});
   const [rmaError, setRmaError] = useState('');
   const [rmaMessage, setRmaMessage] = useState('');
+  const [incidents, setIncidents] = useState([]);
+  const [incidentLoading, setIncidentLoading] = useState(false);
+  const [incidentBusyId, setIncidentBusyId] = useState(null);
+  const [incidentDrafts, setIncidentDrafts] = useState({});
+  const [incidentError, setIncidentError] = useState('');
+  const [incidentMessage, setIncidentMessage] = useState('');
+  const [warehouseIncidentDraft, setWarehouseIncidentDraft] = useState({ incident_type: 'damaged_goods', order_id: '', description: '' });
+  const [warehouseIncidentBusy, setWarehouseIncidentBusy] = useState(false);
   const [fleetTrucks, setFleetTrucks] = useState([]);
   const [fleetWarehouses, setFleetWarehouses] = useState([]);
   const [linehaulDrivers, setLinehaulDrivers] = useState([]);
@@ -229,24 +248,32 @@ export default function TrungTamDieuPhoi() {
     };
   }, [tabHienTai, taiDuLieuFleet]);
 
-  const taiDuLieu = async () => {
+  const taiDuLieu = useCallback(async () => {
+    if (!ordersLoadedRef.current) setDispatchLoading(true);
+    setDispatchError('');
     try {
-      const res = await fetch('http://localhost:5000/api/orders');
+      const res = await fetch(`${API_URL}/api/orders`);
       const data = await res.json();
-      if (data.success && Array.isArray(data.data)) {
-        setAllOrders(data.data);
-        const donCanDieuPhoi = data.data.filter(d =>
-          (d?.status === 'pending' && !d?.pickup_shipper_id) ||
-          (d?.status === 'at_destination_warehouse' && !d?.delivery_shipper_id)
-        );
-        setDonHang(donCanDieuPhoi);
+      if (!res.ok || !data.success || !Array.isArray(data.data)) {
+        throw new Error(data.message || 'Không tải được hàng đợi đơn hàng.');
       }
+      setAllOrders(data.data);
+      const donCanDieuPhoi = data.data.filter(d =>
+        (d?.status === 'pending' && !d?.pickup_shipper_id) ||
+        (['at_central_warehouse', 'at_destination_warehouse'].includes(d?.status) && !d?.delivery_shipper_id) ||
+        (d?.status === 'return_pending' && !d?.return_shipper_id)
+      );
+      setDonHang(donCanDieuPhoi);
+      ordersLoadedRef.current = true;
     } catch (error) {
-      console.error("Lỗi tải đơn hàng:", error);
+      console.error('Lỗi tải đơn hàng:', error);
+      setDispatchError(error.message || 'Không tải được hàng đợi đơn hàng.');
+    } finally {
+      setDispatchLoading(false);
     }
-  };
+  }, []);
 
-  const taiDanhSachTaiXe = async (taskType = 'pickup') => {
+  const taiDanhSachTaiXe = useCallback(async (taskType = 'pickup') => {
     try {
       const res = await fetch(`http://localhost:5000/api/shippers?type=${taskType}`);
       const data = await res.json();
@@ -258,27 +285,29 @@ export default function TrungTamDieuPhoi() {
       console.error("Lỗi tải tài xế:", error);
     }
     return [];
-  };
+  }, []);
 
-  const taiHoSoTaiXe = async () => {
+  const taiHoSoTaiXe = useCallback(async () => {
     try {
       const response = await fetch(`${API_URL}/api/dispatcher/driver-profiles`);
       const result = await response.json();
       if (!response.ok || !result.success) throw new Error(result.message || 'Không tải được cấu hình tài xế.');
       setDriverProfiles(result.data || []);
-      setProfileDrafts(Object.fromEntries((result.data || []).map((profile) => [profile.id, {
+      setProfileDrafts((current) => Object.fromEntries((result.data || []).map((profile) => [profile.id, {
         max_active_orders: profile.max_active_orders,
         max_payload_kg: profile.max_payload_kg,
-        service_areas: profile.service_areas || ''
+        max_order_value: profile.max_order_value || 0,
+        service_areas: profile.service_areas || '',
+        ...(current[profile.id] || {})
       }])));
     } catch (error) {
       setAutoDispatchMessage(error.message || 'Không tải được cấu hình tài xế.');
     }
-  };
+  }, []);
 
-  const luuHoSoTaiXe = async (driverId) => {
+  const luuHoSoTaiXe = useCallback(async (driverId) => {
     const profile = profileDrafts[driverId];
-    if (!profile) return;
+    if (!profile) return { success: false, message: 'Không có thay đổi cấu hình để lưu.' };
     setSavingProfileId(driverId);
     setAutoDispatchMessage('');
     try {
@@ -291,12 +320,14 @@ export default function TrungTamDieuPhoi() {
       if (!response.ok || !result.success) throw new Error(result.message || 'Không lưu được cấu hình tài xế.');
       setAutoDispatchMessage(`${result.message} (${driverProfiles.find((item) => item.id === driverId)?.full_name || driverId})`);
       await taiHoSoTaiXe();
+      return { success: true, message: result.message || 'Đã lưu cấu hình tài xế.' };
     } catch (error) {
       setAutoDispatchMessage(error.message || 'Không lưu được cấu hình tài xế.');
+      return { success: false, message: error.message || 'Không lưu được cấu hình tài xế.' };
     } finally {
       setSavingProfileId(null);
     }
-  };
+  }, [driverProfiles, profileDrafts, taiHoSoTaiXe]);
 
   const taiYeuCauRma = async () => {
     setRmaLoading(true);
@@ -310,6 +341,79 @@ export default function TrungTamDieuPhoi() {
       setRmaError(error.message || 'Không tải được yêu cầu RMA.');
     } finally {
       setRmaLoading(false);
+    }
+  };
+
+  const taiSuCoTaiXe = async () => {
+    setIncidentLoading(true);
+    setIncidentError('');
+    try {
+      const response = await fetch(`${API_URL}/api/dispatcher/incidents`);
+      const result = await response.json();
+      if (!response.ok || !result.success) throw new Error(result.message || 'Không tải được báo cáo sự cố.');
+      setIncidents(result.data || []);
+      setIncidentDrafts(Object.fromEntries((result.data || []).map((incident) => [incident.id, {
+        status: incident.status === 'open' ? 'acknowledged' : incident.status,
+        fault_party: incident.fault_party || (incident.driver_id ? 'company' : 'company'),
+        customer_compensation_amount: incident.customer_compensation_amount || '0',
+        shop_compensation_amount: incident.shop_compensation_amount || '0',
+        driver_deduction_amount: incident.driver_deduction_amount || incident.claim_amount || '0',
+        salary_penalty_amount: incident.salary_penalty_amount || '0',
+        review_note: incident.review_note || ''
+      }])));
+    } catch (error) {
+      setIncidentError(error.message || 'Không tải được báo cáo sự cố.');
+    } finally {
+      setIncidentLoading(false);
+    }
+  };
+
+  const xuLySuCoTaiXe = async (incidentId) => {
+    const draft = incidentDrafts[incidentId];
+    if (!draft) return;
+    setIncidentBusyId(incidentId);
+    setIncidentError('');
+    setIncidentMessage('');
+    try {
+      const response = await fetch(`${API_URL}/api/dispatcher/incidents/${incidentId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(draft)
+      });
+      const result = await response.json();
+      if (!response.ok || !result.success) throw new Error(result.message || 'Không xử lý được sự cố.');
+      setIncidentMessage(result.message);
+      await taiSuCoTaiXe();
+    } catch (error) {
+      setIncidentError(error.message || 'Không xử lý được sự cố.');
+    } finally {
+      setIncidentBusyId(null);
+    }
+  };
+
+  const taoSuCoKhoTong = async (event) => {
+    event.preventDefault();
+    setWarehouseIncidentBusy(true);
+    setIncidentError('');
+    setIncidentMessage('');
+    try {
+      const response = await fetch(`${API_URL}/api/dispatcher/incidents`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...warehouseIncidentDraft,
+          order_id: warehouseIncidentDraft.order_id || null
+        })
+      });
+      const result = await response.json();
+      if (!response.ok || !result.success) throw new Error(result.message || 'Không tạo được sự cố kho tổng.');
+      setIncidentMessage(result.message);
+      setWarehouseIncidentDraft({ incident_type: 'damaged_goods', order_id: '', description: '' });
+      await taiSuCoTaiXe();
+    } catch (error) {
+      setIncidentError(error.message || 'Không tạo được sự cố kho tổng.');
+    } finally {
+      setWarehouseIncidentBusy(false);
     }
   };
 
@@ -345,9 +449,11 @@ export default function TrungTamDieuPhoi() {
   };
 
   useEffect(() => {
-    taiDuLieu();
-    taiDanhSachTaiXe();
-    taiHoSoTaiXe();
+    const initialLoadTimer = window.setTimeout(() => {
+      void taiDuLieu();
+      void taiDanhSachTaiXe();
+      void taiHoSoTaiXe();
+    }, 0);
     fetch('http://localhost:5000/api/driver/live')
       .then((response) => response.json())
       .then((data) => {
@@ -375,22 +481,30 @@ export default function TrungTamDieuPhoi() {
         }
       }));
     });
-    socket.on('order_status_changed', taiDuLieu);
+    const refreshDispatchData = () => {
+      void taiDuLieu();
+      void taiHoSoTaiXe();
+      void taiDanhSachTaiXe();
+    };
+    socket.on('order_status_changed', refreshDispatchData);
 
     return () => {
+      window.clearTimeout(initialLoadTimer);
       socket.off('driver_location_changed');
-      socket.off('order_status_changed', taiDuLieu);
+      socket.off('order_status_changed', refreshDispatchData);
     };
-  }, []);
+  }, [taiDanhSachTaiXe, taiDuLieu, taiHoSoTaiXe]);
 
   const moModalPhanCong = async (don) => {
     const taskTypeByStatus = {
       pending: 'pickup',
-      at_destination_warehouse: 'delivery'
+      at_central_warehouse: 'delivery',
+      at_destination_warehouse: 'delivery',
+      return_pending: 'return'
     };
     const taskType = taskTypeByStatus[don?.status];
     if (!taskType) return;
-    const driverGroup = taskType === 'delivery' ? 'delivery' : 'pickup';
+    const driverGroup = taskType === 'pickup' ? 'pickup' : 'delivery';
     const taiXeTheoNhiemVu = await taiDanhSachTaiXe(driverGroup);
     setDonDangChon(don);
     setLoaiNhiemVu(taskType);
@@ -426,6 +540,20 @@ export default function TrungTamDieuPhoi() {
     } catch {
       alert("Lỗi kết nối đến máy chủ! Vui lòng kiểm tra lại mạng.");
     }
+  };
+
+  const phanCongDonNhanh = async (order, driverId, taskType) => {
+    const response = await fetch(`${API_URL}/api/orders/${order.id}/assign`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ shipper_id: Number(driverId), task_type: taskType })
+    });
+    const result = await response.json();
+    if (!response.ok || !result.success) {
+      throw new Error(result.message || 'Không thể phân công đơn hàng.');
+    }
+    await Promise.all([taiDuLieu(), taiHoSoTaiXe()]);
+    return result;
   };
 
   const guiBaoCao = async (e) => {
@@ -471,6 +599,11 @@ export default function TrungTamDieuPhoi() {
   const safeTaiXeList = Array.isArray(taiXeList) ? taiXeList : [];
 
   const donChoGom = allOrders.filter((order) => order.status === 'pending' && !order.pickup_shipper_id);
+  const donThatBaiCanXuLy = allOrders.filter((order) => ['pickup_failed', 'delivery_failed'].includes(order.status));
+  const donQuaSla = allOrders.filter((order) => (
+    ['pending', 'picked_up', 'at_central_warehouse', 'pickup_failed', 'delivery_failed', 'return_pending'].includes(order.status)
+    && isOrderWaitOverdue(order)
+  ));
   const donDaLoc = safeDonHang.filter(d => {
     if (d.status === 'pending') return false;
     const kw = tuKhoa.toLowerCase();
@@ -478,7 +611,8 @@ export default function TrungTamDieuPhoi() {
   });
   const soDonTaiXeDangGiu = (driverId) => allOrders.filter((order) => (
     String(order.pickup_shipper_id) === String(driverId) && ['picking', 'picked_up'].includes(order.status)
-    || String(order.delivery_shipper_id) === String(driverId) && ['at_destination_warehouse', 'delivering'].includes(order.status)
+    || String(order.delivery_shipper_id) === String(driverId) && ['at_central_warehouse', 'at_destination_warehouse', 'delivering'].includes(order.status)
+    || String(order.return_shipper_id) === String(driverId) && order.status === 'returning'
   )).length;
   const tinhKhoangCachKm = (lat1, lng1, lat2, lng2) => {
     const toRad = (value) => value * Math.PI / 180;
@@ -499,11 +633,12 @@ export default function TrungTamDieuPhoi() {
   const driverNearest = danhSachTaiXeHienThi.find((driver) => driverDistance(driver) !== null);
 
   const donChoLay = safeDonHang.filter(d => d.status === 'pending').length;
-  const donChoGiao = safeDonHang.filter(d => d.status === 'at_destination_warehouse').length;
+  const donChoGiao = safeDonHang.filter(d => ['at_central_warehouse', 'at_destination_warehouse'].includes(d.status)).length;
   const taoKeHoachTuDong = () => {
     const candidates = allOrders.filter((order) => (
       driverTaskTab === 'pickup' && order.status === 'pending' && !order.pickup_shipper_id
-      || driverTaskTab === 'delivery' && order.status === 'at_destination_warehouse' && !order.delivery_shipper_id
+      || driverTaskTab === 'delivery' && ['at_central_warehouse', 'at_destination_warehouse'].includes(order.status) && !order.delivery_shipper_id
+      || driverTaskTab === 'return' && order.status === 'return_pending' && !order.return_shipper_id
     )).sort((first, second) => Number(second.weight_kg || 0) - Number(first.weight_kg || 0));
     const driverRole = driverTaskTab === 'delivery' ? 'delivery_driver' : 'pickup_driver';
     const loads = new Map(driverProfiles.filter((profile) => profile.role === driverRole).map((profile) => [profile.id, {
@@ -512,8 +647,8 @@ export default function TrungTamDieuPhoi() {
     }]));
     const plan = candidates.map((order) => {
       const taskType = order.status === 'pending' ? 'pickup'
-        : 'delivery';
-      const isPickupTask = taskType === 'pickup';
+        : order.status === 'return_pending' ? 'return' : 'delivery';
+      const isPickupTask = taskType !== 'delivery';
       const areaText = normalizeAreaText(isPickupTask
         ? `${order.shop_address || ''} ${order.shop_province || ''}`
         : `${order.receiver_address || ''} ${order.destination_province || ''}`);
@@ -532,6 +667,14 @@ export default function TrungTamDieuPhoi() {
         if (profile.role !== driverRole) return false;
         const load = loads.get(profile.id) || { count: 0, weight: 0 };
         if (load.count >= Number(profile.max_active_orders) || load.weight + weight > Number(profile.max_payload_kg)) return false;
+        if (taskType === 'delivery') {
+          const itemValue = Number(order.item_value || 0);
+          const amountToCollect = Number(order.cod_amount || 0)
+            + (order.fee_payer === 'receiver' ? Number(order.shipping_fee || 0) : 0);
+          const riskAmount = Math.max(itemValue, amountToCollect);
+          if (Number(profile.max_order_value || 0) > 0 && itemValue > Number(profile.max_order_value)) return false;
+          if (riskAmount > Number(profile.available_deposit || 0)) return false;
+        }
         const zones = String(profile.service_areas || '').split(',').map((area) => normalizeAreaText(area.trim())).filter(Boolean);
         return !zones.length || zones.some((zone) => areaText.includes(zone));
       }).sort((first, second) => {
@@ -587,25 +730,26 @@ export default function TrungTamDieuPhoi() {
     <div className="flex h-screen overflow-hidden bg-[#F8FAFC] font-sans text-slate-700">
       
       {/* SIDEBAR */}
-      <div className="sticky top-0 z-10 flex h-screen w-72 shrink-0 flex-col justify-between border-r border-slate-200 bg-white shadow-sm">
+      <div className="sticky top-0 z-10 flex h-screen w-16 shrink-0 flex-col justify-between border-r border-slate-200 bg-white shadow-sm lg:w-72">
         <div className="min-h-0 flex-1 overflow-y-auto">
-          <div className="p-8 border-b border-slate-100 flex items-center gap-3">
+          <div className="flex items-center gap-3 border-b border-slate-100 p-2 lg:p-8">
             <div className="bg-gradient-to-tr from-emerald-500 to-teal-400 p-2.5 rounded-xl shadow-lg shadow-emerald-200">
               <Navigation className="text-white" size={24} />
             </div>
-            <div>
+            <div className="hidden lg:block">
               <h2 className="text-xl font-black text-slate-800 tracking-tight">Điều Hành</h2>
               <p className="text-xs font-bold text-emerald-500 uppercase tracking-wider mt-0.5">Trung tâm Điều Phối</p>
               <p className="mt-1 max-w-40 truncate text-sm font-bold text-slate-700" title={userName}>{userName}</p>
             </div>
           </div>
           
-          <div className="p-5 mt-2 space-y-3">
-            <button onClick={() => setTabHienTai('dieuphoan')} className={`w-full px-5 py-4 rounded-2xl font-bold flex items-center gap-4 transition-all ${tabHienTai === 'dieuphoan' ? 'bg-emerald-50 text-emerald-600 border border-emerald-100' : 'text-slate-500 hover:bg-slate-50'}`}><MapPin size={20} /> Phân Tuyến Tài Xế</button>
-            <button onClick={() => { setTabHienTai('rma'); taiYeuCauRma(); }} className={`w-full px-5 py-4 rounded-2xl font-bold flex items-center gap-4 transition-all ${tabHienTai === 'rma' ? 'bg-orange-50 text-orange-600 border border-orange-100' : 'text-slate-500 hover:bg-slate-50'}`}><RotateCw size={20} /> Yêu Cầu Giao Lại <span className="ml-auto rounded-full bg-orange-100 px-2 py-0.5 text-xs font-black text-orange-700">{rmaRequests.filter((request) => request.status === 'pending').length}</span></button>
-            <button onClick={() => setTabHienTai('fleet')} className={`w-full px-5 py-4 rounded-2xl font-bold flex items-center gap-4 transition-all ${tabHienTai === 'fleet' ? 'bg-blue-50 text-blue-600 border border-blue-100' : 'text-slate-500 hover:bg-slate-50'}`}><Truck size={20} /> Quản Lý Vận Tải</button>
-            <button onClick={() => setTabHienTai('bandogiamsat')} className={`w-full px-5 py-4 rounded-2xl font-bold flex items-center gap-4 transition-all ${tabHienTai === 'bandogiamsat' ? 'bg-emerald-50 text-emerald-600 border border-emerald-100' : 'text-slate-500 hover:bg-slate-50'}`}><Map size={20} /> Giám Sát Bản Đồ GPS</button>
-            <button onClick={() => setTabHienTai('baocao')} className={`w-full px-5 py-4 rounded-2xl font-bold flex items-center gap-4 transition-all ${tabHienTai === 'baocao' ? 'bg-emerald-50 text-emerald-600 border border-emerald-100' : 'text-slate-500 hover:bg-slate-50'}`}><FileText size={20} /> Báo Cáo Giám Đốc</button>
+          <div className="mt-2 space-y-2 p-2 lg:space-y-3 lg:p-5">
+            <button title="Phân tuyến tài xế" onClick={() => setTabHienTai('dieuphoan')} className={`flex w-full items-center gap-4 rounded-2xl p-3 font-bold transition-all lg:px-5 lg:py-4 ${tabHienTai === 'dieuphoan' ? 'bg-emerald-50 text-emerald-800 border border-emerald-200' : 'text-slate-700 hover:bg-slate-50'}`}><MapPin size={20} /> <span className="hidden lg:inline">Phân Tuyến Tài Xế</span></button>
+            <button title="Yêu cầu giao lại" onClick={() => { setTabHienTai('rma'); taiYeuCauRma(); }} className={`flex w-full items-center gap-4 rounded-2xl p-3 font-bold transition-all lg:px-5 lg:py-4 ${tabHienTai === 'rma' ? 'bg-orange-50 text-orange-800 border border-orange-200' : 'text-slate-700 hover:bg-slate-50'}`}><RotateCw size={20} /> <span className="hidden lg:inline">Yêu Cầu Giao Lại</span> <span className="hidden rounded-full bg-orange-100 px-2 py-0.5 text-xs font-black text-orange-900 lg:ml-auto lg:inline">{rmaRequests.filter((request) => request.status === 'pending').length}</span></button>
+            <button title="Sự cố tài xế" onClick={() => { setTabHienTai('incidents'); taiSuCoTaiXe(); }} className={`flex w-full items-center gap-4 rounded-2xl p-3 font-bold transition-all lg:px-5 lg:py-4 ${tabHienTai === 'incidents' ? 'bg-red-50 text-red-800 border border-red-200' : 'text-slate-700 hover:bg-slate-50'}`}><AlertCircle size={20} /> <span className="hidden lg:inline">Sự Cố Tài Xế</span> <span className="hidden rounded-full bg-red-100 px-2 py-0.5 text-xs font-black text-red-900 lg:ml-auto lg:inline">{incidents.filter((incident) => incident.status === 'open').length}</span></button>
+            <button title="Giám sát bản đồ GPS" onClick={() => setTabHienTai('bandogiamsat')} className={`flex w-full items-center gap-4 rounded-2xl p-3 font-bold transition-all lg:px-5 lg:py-4 ${tabHienTai === 'bandogiamsat' ? 'bg-emerald-50 text-emerald-800 border border-emerald-200' : 'text-slate-700 hover:bg-slate-50'}`}><Map size={20} /> <span className="hidden lg:inline">Giám Sát Bản Đồ GPS</span></button>
+            <button title="Báo cáo giám đốc" onClick={() => setTabHienTai('baocao')} className={`flex w-full items-center gap-4 rounded-2xl p-3 font-bold transition-all lg:px-5 lg:py-4 ${tabHienTai === 'baocao' ? 'bg-emerald-50 text-emerald-800 border border-emerald-200' : 'text-slate-700 hover:bg-slate-50'}`}><FileText size={20} /> <span className="hidden lg:inline">Báo Cáo Giám Đốc</span></button>
+            <a href="/cham-cong" title="Chấm công" className="flex w-full items-center gap-4 rounded-2xl p-3 font-bold text-slate-700 hover:bg-slate-50 lg:px-5 lg:py-4"><Clock size={20} /> <span className="hidden lg:inline">Chấm công</span></a>
           </div>
         </div>
 
@@ -615,7 +759,7 @@ export default function TrungTamDieuPhoi() {
       </div>
 
       {/* MAIN CONTENT */}
-      <div className="min-w-0 flex-1 overflow-y-auto p-10 flex flex-col">
+      <div className="min-w-0 flex-1 overflow-y-auto p-4 lg:p-10 flex flex-col">
 
         {tabHienTai === 'fleet' && (
           <div className="space-y-6">
@@ -719,9 +863,9 @@ export default function TrungTamDieuPhoi() {
               </div>
               <div className="space-y-3 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
                 <div className="flex items-center justify-between"><h2 className="font-black">GPS xe tải đang chạy</h2><button type="button" onClick={taiDuLieuFleet} className="rounded-lg bg-slate-100 p-2" aria-label="Làm mới vị trí"><RotateCw size={16} /></button></div>
-                <div className="h-64 overflow-hidden rounded-xl">
-                  <MapContainer center={[10.762622, 106.660172]} zoom={10} style={{ width: '100%', height: '100%' }}>
-                    <UpdateMapSize /><TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" attribution="&copy; OpenStreetMap" />
+                <div className="relative z-0 isolate h-64 overflow-hidden rounded-xl">
+                  <MapContainer center={GOVAP_MAP_CENTER} zoom={13} style={{ width: '100%', height: '100%' }} className="relative z-0 isolate">
+                    <UpdateMapSize /><TileLayer url={MAP_TILE_URL} attribution={MAP_ATTRIBUTION} />
                     {linehaulPositions.map((position) => <Marker key={position.trip_id} position={[Number(position.lat), Number(position.lng)]} icon={shipperIcon}><Popup><strong>{position.trip_code} · {position.vehicle_plate}</strong><br />{position.driver_name}<br />{position.source_warehouse_name} → {position.destination_warehouse_name}</Popup></Marker>)}
                   </MapContainer>
                 </div>
@@ -732,6 +876,24 @@ export default function TrungTamDieuPhoi() {
         )}
 
         {tabHienTai === 'dieuphoan' && (
+          <DispatcherRouteBoard
+            orders={allOrders}
+            drivers={driverProfiles}
+            positions={viTriTaiXeMap}
+            loading={dispatchLoading}
+            error={dispatchError}
+            profileDrafts={profileDrafts}
+            savingProfileId={savingProfileId}
+            onRetry={() => Promise.all([taiDuLieu(), taiHoSoTaiXe(), taiDanhSachTaiXe()])}
+            onAssign={phanCongDonNhanh}
+            onSaveProfile={luuHoSoTaiXe}
+            onProfileDraftChange={(driverId, draft) => {
+              setProfileDrafts((current) => ({ ...current, [driverId]: draft }));
+            }}
+          />
+        )}
+
+        {tabHienTai === 'dieuphoan_legacy' && (
           <div className="animate-in fade-in duration-300 flex-1 flex flex-col">
             <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8 animate-in fade-in slide-in-from-top-4">
               <div className="bg-white p-6 rounded-[24px] shadow-sm border border-slate-100 flex items-center gap-4">
@@ -757,6 +919,47 @@ export default function TrungTamDieuPhoi() {
               </div>
             </div>
 
+            {donQuaSla.length > 0 && (
+              <section role="alert" className="mb-8 rounded-[24px] border border-rose-200 bg-rose-50 p-5">
+                <h2 className="font-black text-rose-900">Cảnh báo đơn quá SLA · {donQuaSla.length}</h2>
+                <p className="mt-1 text-sm text-rose-800">Đơn đang chờ đã không được cập nhật ít nhất 24 giờ. Vui lòng kiểm tra và xử lý ưu tiên.</p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {donQuaSla.slice(0, 10).map((order) => (
+                    <span key={order.id} className="inline-flex items-center gap-2 rounded-lg border border-rose-200 bg-white px-3 py-2 text-xs font-bold text-rose-900">
+                      {order.tracking_code}<OrderStatusBadge status={order.status} />
+                    </span>
+                  ))}
+                </div>
+              </section>
+            )}
+
+            {donThatBaiCanXuLy.length > 0 && (
+              <section className="mb-8 overflow-hidden rounded-[24px] border border-red-200 bg-white shadow-sm">
+                <div className="border-b border-red-100 bg-red-50 px-6 py-4">
+                  <h2 className="font-black text-red-900">Đơn thất bại cần xử lý · {donThatBaiCanXuLy.length}</h2>
+                  <p className="mt-1 text-sm text-red-800">Duyệt yêu cầu giao lại tại mục “Yêu Cầu Giao Lại”; các trường hợp lấy thất bại cần liên hệ Shop để thống nhất hướng xử lý.</p>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full min-w-[760px] text-left text-sm">
+                    <thead className="bg-slate-50 text-xs uppercase text-slate-500">
+                      <tr><th className="p-4">Mã vận đơn</th><th className="p-4">Trạng thái</th><th className="p-4">Lý do</th><th className="p-4">Lượt lấy / giao</th><th className="p-4">Cập nhật</th></tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {donThatBaiCanXuLy.map((order) => (
+                        <tr key={order.id}>
+                          <td className="p-4 font-mono font-black">{order.tracking_code}</td>
+                          <td className="p-4"><OrderStatusBadge status={order.status} /></td>
+                          <td className="p-4">{order.fail_reason || 'Chưa có ghi chú'}</td>
+                          <td className="p-4">{Number(order.pickup_attempts || 0)} / {Number(order.delivery_attempts || 0)}</td>
+                          <td className="p-4">{order.updated_at ? new Date(order.updated_at).toLocaleString('vi-VN') : '—'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            )}
+
             <section className="mb-8 overflow-hidden rounded-[24px] border-2 border-amber-300 bg-amber-50 shadow-sm">
               <div className="flex items-center justify-between border-b border-amber-200 px-6 py-4">
                 <div><p className="text-xs font-black uppercase tracking-widest text-amber-700">Ưu tiên gom hàng</p><h2 className="mt-1 text-xl font-black text-slate-800">Đơn hàng chờ gom · {donChoGom.length}</h2></div>
@@ -778,9 +981,9 @@ export default function TrungTamDieuPhoi() {
               <div className="mb-4 flex flex-wrap gap-2">
                 {[
                   { id: 'pickup', label: 'Xe máy lấy hàng' },
-                  { id: 'linehaul', label: 'Xe tải trung chuyển liên kho' },
-                  { id: 'delivery', label: 'Xe máy giao hàng' }
-                ].map((task) => <button key={task.id} onClick={async () => { setDriverTaskTab(task.id); await taiDanhSachTaiXe(task.id); }} className={`rounded-lg px-4 py-2 text-sm font-bold ${driverTaskTab === task.id ? 'bg-emerald-600 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>{task.label}</button>)}
+                  { id: 'delivery', label: 'Xe máy giao hàng' },
+                  { id: 'return', label: 'Xe máy hoàn hàng' }
+                ].map((task) => <button key={task.id} onClick={async () => { setDriverTaskTab(task.id); await taiDanhSachTaiXe(task.id === 'pickup' ? 'pickup' : 'delivery'); }} className={`rounded-lg px-4 py-2 text-sm font-bold ${driverTaskTab === task.id ? 'bg-emerald-600 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>{task.label}</button>)}
               </div>
               <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
                 {safeTaiXeList.map((driver) => {
@@ -805,11 +1008,12 @@ export default function TrungTamDieuPhoi() {
                     return (
                       <form key={profile.id} onSubmit={(event) => { event.preventDefault(); luuHoSoTaiXe(profile.id); }} className="rounded-xl border border-slate-200 bg-white p-4">
                         <div className="mb-3 flex justify-between gap-2"><strong>{profile.full_name}</strong><span className="text-xs text-slate-500">{profile.role === 'delivery_driver' ? 'Giao hàng' : profile.role === 'linehaul_driver' ? 'Trung chuyển liên kho' : 'Lấy hàng Shop'}</span></div>
-                        <p className="mb-3 text-xs text-slate-500">Đang giữ {profile.active_count} đơn · {Number(profile.active_weight_kg || 0).toLocaleString()} kg</p>
+                        <p className="mb-3 text-xs text-slate-500">Đang giữ {profile.active_count} đơn · {Number(profile.active_weight_kg || 0).toLocaleString()} kg · Ký quỹ khả dụng {Number(profile.available_deposit || 0).toLocaleString()} đ</p>
                         <div className="grid grid-cols-2 gap-2">
                           <label className="text-xs font-bold text-slate-600">Số đơn tối đa<input type="number" min="1" max="100" required value={draft.max_active_orders} onChange={(event) => setProfileDrafts((current) => ({ ...current, [profile.id]: { ...draft, max_active_orders: event.target.value } }))} className="mt-1 w-full rounded-lg border border-slate-200 p-2 text-sm" /></label>
                           <label className="text-xs font-bold text-slate-600">Tải trọng tối đa (kg)<input type="number" min="0.1" max="100000" step="0.1" required value={draft.max_payload_kg} onChange={(event) => setProfileDrafts((current) => ({ ...current, [profile.id]: { ...draft, max_payload_kg: event.target.value } }))} className="mt-1 w-full rounded-lg border border-slate-200 p-2 text-sm" /></label>
-                          <label className="col-span-2 text-xs font-bold text-slate-600">Khu vực phụ trách, phân cách bằng dấu phẩy<input value={draft.service_areas || ''} maxLength={500} onChange={(event) => setProfileDrafts((current) => ({ ...current, [profile.id]: { ...draft, service_areas: event.target.value } }))} placeholder="Quận 1, Bình Thạnh · để trống nếu nhận mọi khu vực" className="mt-1 w-full rounded-lg border border-slate-200 p-2 text-sm" /></label>
+                          <label className="col-span-2 text-xs font-bold text-slate-600">Giá trị tối đa mỗi đơn (đ, 0 = theo số dư ký quỹ)<input type="number" min="0" max="10000000000" step="100000" value={draft.max_order_value ?? 0} onChange={(event) => setProfileDrafts((current) => ({ ...current, [profile.id]: { ...draft, max_order_value: event.target.value } }))} className="mt-1 w-full rounded-lg border border-slate-200 p-2 text-sm" /></label>
+                          <label className="col-span-2 text-xs font-bold text-slate-600">Phường phụ trách, phân cách bằng dấu phẩy<input value={draft.service_areas || ''} maxLength={500} onChange={(event) => setProfileDrafts((current) => ({ ...current, [profile.id]: { ...draft, service_areas: event.target.value } }))} placeholder="An Hội Đông, An Hội Tây, An Nhơn, Gò Vấp, Hạnh Thông, Thông Tây Hội" className="mt-1 w-full rounded-lg border border-slate-200 p-2 text-sm" /></label>
                         </div>
                         <button type="submit" disabled={savingProfileId === profile.id} className="mt-3 rounded-lg bg-slate-800 px-3 py-2 text-xs font-black text-white disabled:opacity-50">{savingProfileId === profile.id ? 'Đang lưu...' : 'Lưu cấu hình tài xế'}</button>
                       </form>
@@ -866,14 +1070,7 @@ export default function TrungTamDieuPhoi() {
                   <div key={don.id} className="bg-white rounded-[24px] shadow-sm border border-slate-100 hover:shadow-md transition-all overflow-hidden flex flex-col">
                     <div className="p-5 border-b border-slate-50 flex justify-between items-center bg-slate-50/50">
                       <span className="font-black text-slate-700 tracking-wide">{don?.tracking_code}</span>
-                      <span className={`px-3 py-1.5 rounded-lg text-xs font-bold uppercase flex items-center gap-1.5 ${
-                        don.status === 'pending' ? 'bg-amber-100 text-amber-700' : 'bg-purple-100 text-purple-700'
-                      }`}>
-                        {don.status === 'pending' ? <><Clock size={14}/> Shop → Kho con</> :
-                          don.status === 'at_origin_warehouse' ? <><PackageSearch size={14}/> Chờ đóng bao Kho con → Kho tổng</> :
-                          don.status === 'at_central_warehouse' ? <><PackageSearch size={14}/> Chờ đóng bao Kho tổng → Kho con đích</> :
-                          <><PackageSearch size={14}/> Kho con → Người nhận</>}
-                      </span>
+                      <OrderStatusBadge status={don.status} />
                     </div>
                     
                     <div className="p-6 flex-1 space-y-4">
@@ -906,12 +1103,65 @@ export default function TrungTamDieuPhoi() {
           </div>
         )}
 
+        {tabHienTai === 'incidents' && (
+          <div className="space-y-5">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div><h2 className="text-2xl font-black text-slate-900">Báo cáo sự cố tài xế</h2><p className="text-sm text-slate-500">Tiếp nhận sự cố và ghi nhận khấu trừ ký quỹ cho hàng mất hoặc hư hỏng.</p></div>
+              <button type="button" onClick={taiSuCoTaiXe} disabled={incidentLoading} className="rounded-xl border border-slate-200 bg-white px-4 py-2 font-bold text-slate-700 disabled:opacity-50">Làm mới</button>
+            </div>
+            {incidentError && <p role="alert" className="rounded-xl bg-red-50 p-3 text-sm font-bold text-red-700">{incidentError}</p>}
+            {incidentMessage && <p role="status" className="rounded-xl bg-emerald-50 p-3 text-sm font-bold text-emerald-700">{incidentMessage}</p>}
+            <form onSubmit={taoSuCoKhoTong} className="grid gap-3 rounded-2xl border border-amber-200 bg-amber-50 p-4 md:grid-cols-[1fr_1fr_2fr_auto]">
+              <select aria-label="Loại sự cố kho tổng" value={warehouseIncidentDraft.incident_type} onChange={(event) => setWarehouseIncidentDraft((current) => ({ ...current, incident_type: event.target.value }))} className="rounded-lg border border-amber-200 bg-white p-2">
+                <option value="damaged_goods">Hư hỏng tại kho tổng</option><option value="lost_goods">Thất lạc tại kho tổng</option>
+              </select>
+              <input type="number" min="1" value={warehouseIncidentDraft.order_id} onChange={(event) => setWarehouseIncidentDraft((current) => ({ ...current, order_id: event.target.value }))} placeholder="Mã đơn (không bắt buộc)" className="rounded-lg border border-amber-200 p-2" />
+              <input required maxLength={2000} value={warehouseIncidentDraft.description} onChange={(event) => setWarehouseIncidentDraft((current) => ({ ...current, description: event.target.value }))} placeholder="Mô tả sự cố; hệ thống ghi lỗi công ty, không gắn tài xế" className="rounded-lg border border-amber-200 p-2" />
+              <button disabled={warehouseIncidentBusy} className="rounded-lg bg-amber-700 px-4 py-2 font-bold text-white disabled:opacity-50">{warehouseIncidentBusy ? 'Đang ghi...' : 'Ghi nhận sự cố kho'}</button>
+            </form>
+            {incidentLoading ? <p className="rounded-2xl bg-white p-6 text-slate-500">Đang tải sự cố...</p> : incidents.length ? incidents.map((incident) => {
+              const draft = incidentDrafts[incident.id] || {};
+              return (
+                <article key={incident.id} className="space-y-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <h3 className="font-black text-slate-900">{incident.driver_name} · {incident.incident_type.replaceAll('_', ' ')}</h3>
+                      <p className="mt-1 text-sm text-slate-500">{incident.created_at ? new Date(incident.created_at).toLocaleString('vi-VN') : ''} · {incident.tracking_code || (incident.order_id ? `Đơn #${incident.order_id}` : 'Không gắn đơn hàng')}</p>
+                      <p className="mt-1 text-xs font-bold text-slate-500">Lý do: {incident.reason_code || 'Chưa gán'} · Bên chịu trách nhiệm: {incident.fault_party || 'company'} · Giá khai: {String(incident.declared_value || '0')} đ</p>
+                      <p className="mt-3 whitespace-pre-wrap text-sm text-slate-700">{incident.description}</p>
+                      {incident.evidence_url && <a className="mt-2 inline-block font-bold text-blue-700 underline" href={`${API_URL}${incident.evidence_url}`} target="_blank" rel="noreferrer">Xem ảnh minh chứng</a>}
+                      {incident.review_note && <p className="mt-2 text-sm text-slate-500">Ghi chú xử lý: {incident.review_note}</p>}
+                    </div>
+                    <span className={`rounded-full px-3 py-1 text-xs font-black ${incident.status === 'resolved' ? 'bg-emerald-100 text-emerald-700' : incident.status === 'acknowledged' ? 'bg-amber-100 text-amber-700' : 'bg-red-100 text-red-700'}`}>{incident.status === 'resolved' ? 'Đã giải quyết' : incident.status === 'acknowledged' ? 'Đã tiếp nhận' : 'Mới'}</span>
+                  </div>
+                  {incident.status !== 'resolved' && (
+                    <div className="grid gap-3 border-t border-slate-100 pt-4 md:grid-cols-2 xl:grid-cols-4">
+                      <select aria-label="Trạng thái xử lý" value={draft.status || 'acknowledged'} onChange={(event) => setIncidentDrafts((current) => ({ ...current, [incident.id]: { ...current[incident.id], status: event.target.value } }))} className="rounded-lg border border-slate-200 p-2">
+                        <option value="acknowledged">Tiếp nhận</option><option value="resolved">Giải quyết</option>
+                      </select>
+                      <select aria-label="Bên chịu trách nhiệm" value={draft.fault_party || 'company'} onChange={(event) => setIncidentDrafts((current) => ({ ...current, [incident.id]: { ...current[incident.id], fault_party: event.target.value } }))} className="rounded-lg border border-slate-200 p-2">
+                        <option value="customer">Khách hàng</option><option value="shop">Shop</option><option value="driver">Tài xế</option><option value="company">Công ty</option><option value="force_majeure">Bất khả kháng</option>
+                      </select>
+                      <input type="number" min="0" step="1" value={draft.customer_compensation_amount || '0'} onChange={(event) => setIncidentDrafts((current) => ({ ...current, [incident.id]: { ...current[incident.id], customer_compensation_amount: event.target.value } }))} placeholder="Bồi thường khách (đ)" className="rounded-lg border border-slate-200 p-2" />
+                      <input type="number" min="0" step="1" value={draft.shop_compensation_amount || '0'} onChange={(event) => setIncidentDrafts((current) => ({ ...current, [incident.id]: { ...current[incident.id], shop_compensation_amount: event.target.value } }))} placeholder="Bồi thường Shop (đ)" className="rounded-lg border border-slate-200 p-2" />
+                      <input type="number" min="0" step="1" value={draft.driver_deduction_amount || '0'} onChange={(event) => setIncidentDrafts((current) => ({ ...current, [incident.id]: { ...current[incident.id], driver_deduction_amount: event.target.value } }))} placeholder="Khấu trừ ký quỹ tài xế (đ)" className="rounded-lg border border-slate-200 p-2" />
+                      <input type="number" min="0" step="1" value={draft.salary_penalty_amount || '0'} onChange={(event) => setIncidentDrafts((current) => ({ ...current, [incident.id]: { ...current[incident.id], salary_penalty_amount: event.target.value } }))} placeholder="Phạt lương (đ)" className="rounded-lg border border-slate-200 p-2" />
+                      <input value={draft.review_note || ''} onChange={(event) => setIncidentDrafts((current) => ({ ...current, [incident.id]: { ...current[incident.id], review_note: event.target.value } }))} placeholder="Ghi chú xử lý (tối thiểu 5 ký tự khi giải quyết)" className="rounded-lg border border-slate-200 p-2 xl:col-span-2" />
+                      <button type="button" onClick={() => xuLySuCoTaiXe(incident.id)} disabled={incidentBusyId === incident.id} className="rounded-lg bg-slate-900 px-4 py-2 font-bold text-white disabled:opacity-50">{incidentBusyId === incident.id ? 'Đang lưu...' : 'Lưu xử lý'}</button>
+                    </div>
+                  )}
+                  {incident.status === 'resolved' && <p className="text-sm font-bold text-orange-700">Bồi thường khách: {String(incident.customer_compensation_amount || '0')} đ · Shop: {String(incident.shop_compensation_amount || '0')} đ · Khấu trừ ký quỹ: {String(incident.driver_deduction_amount || incident.claim_amount || '0')} đ · Phạt lương: {String(incident.salary_penalty_amount || '0')} đ</p>}
+                </article>
+              );
+            }) : <p className="rounded-2xl bg-white p-6 text-slate-500">Chưa có báo cáo sự cố.</p>}
+          </div>
+        )}
         {tabHienTai === 'rma' && (
           <section className="animate-in fade-in duration-300 flex-1">
             <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
               <div>
                 <h1 className="text-3xl font-black text-slate-800 tracking-tight">Duyệt yêu cầu giao lại</h1>
-                <p className="mt-2 font-medium text-slate-500">Kiểm tra xác nhận của Shop và bằng chứng trước khi quyết định. Duyệt không tự phân tài xế.</p>
+                <p className="mt-2 font-medium text-slate-500">Khi duyệt, đơn được chuyển về kho tổng để điều phối phân công lượt giao mới. Khi từ chối, cần ghi rõ lý do.</p>
               </div>
               <button type="button" onClick={taiYeuCauRma} disabled={rmaLoading} className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-50">
                 <RotateCw size={16} className={rmaLoading ? 'animate-spin' : ''} /> Làm mới
@@ -951,6 +1201,8 @@ export default function TrungTamDieuPhoi() {
                           <p><strong>Khách nhận:</strong> {request.receiver_name} · {request.receiver_phone}</p>
                           <p className="mt-1"><strong>Địa chỉ:</strong> {request.receiver_address}</p>
                           <p className="mt-1"><strong>COD:</strong> {Number(request.cod_amount || 0).toLocaleString('vi-VN')} đ</p>
+                          <p className="mt-1 flex flex-wrap items-center gap-2"><strong>Trạng thái đơn:</strong><OrderStatusBadge status={request.order_status} /></p>
+                          <p className="mt-1"><strong>Lượt giao:</strong> {Number(request.delivery_attempts || 0)}</p>
                         </div>
                         <div className="rounded-xl border border-rose-100 bg-rose-50 p-4">
                           <p className="flex items-center gap-2 text-sm font-black text-rose-800"><AlertCircle size={16} /> Lý do giao thất bại</p>
@@ -971,6 +1223,11 @@ export default function TrungTamDieuPhoi() {
                         {request.review_note && <p className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700"><strong>Ghi chú xử lý:</strong> {request.review_note}</p>}
                         {request.status === 'pending' && (
                           <div className="space-y-3 rounded-xl border border-slate-200 p-4">
+                            {request.order_status !== 'returning' && (
+                              <p role="alert" className="rounded-lg bg-rose-50 p-3 text-sm font-semibold text-rose-700">
+                                Không thể duyệt: đơn hiện ở trạng thái {getOrderStatusLabel(request.order_status)}. Tải lại danh sách để kiểm tra trạng thái mới nhất.
+                              </p>
+                            )}
                             <label htmlFor={`rma-review-${request.order_id}`} className="block text-sm font-black text-slate-700">Ghi chú duyệt / lý do từ chối</label>
                             <textarea
                               id={`rma-review-${request.order_id}`}
@@ -979,10 +1236,10 @@ export default function TrungTamDieuPhoi() {
                               value={rmaReviewNotes[request.order_id] || ''}
                               onChange={(event) => setRmaReviewNotes((current) => ({ ...current, [request.order_id]: event.target.value }))}
                               className="w-full rounded-lg border border-slate-300 p-3 text-sm"
-                              placeholder="Khi từ chối, ghi rõ lý do (tối thiểu 5 ký tự)."
+                              placeholder="Ghi chú duyệt (nếu có); bắt buộc ghi lý do từ chối (tối thiểu 5 ký tự)."
                             />
                             <div className="flex flex-wrap gap-2">
-                              <button type="button" disabled={rmaBusyOrderId === request.order_id} onClick={() => xuLyYeuCauRma(request, 'approved')} className="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-black text-white hover:bg-emerald-700 disabled:opacity-50"><CheckCircle size={16} /> Duyệt yêu cầu</button>
+                              <button type="button" disabled={rmaBusyOrderId === request.order_id || request.order_status !== 'returning'} onClick={() => xuLyYeuCauRma(request, 'approved')} className="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-black text-white hover:bg-emerald-700 disabled:opacity-50"><CheckCircle size={16} /> Duyệt · đưa về kho tổng</button>
                               <button type="button" disabled={rmaBusyOrderId === request.order_id} onClick={() => xuLyYeuCauRma(request, 'rejected')} className="inline-flex items-center gap-2 rounded-lg bg-rose-600 px-4 py-2.5 text-sm font-black text-white hover:bg-rose-700 disabled:opacity-50"><AlertCircle size={16} /> Từ chối</button>
                               {rmaBusyOrderId === request.order_id && <span role="status" className="self-center text-xs font-semibold text-slate-500">Đang lưu...</span>}
                             </div>
@@ -1004,15 +1261,11 @@ export default function TrungTamDieuPhoi() {
               <h1 className="text-3xl font-black text-slate-800 tracking-tight">Bản Đồ Giám Sát Tài Xế</h1>
               <p className="text-slate-500 mt-1 font-medium">Theo dõi vị trí thời gian thực của các tài xế đang thực hiện đơn hàng.</p>
             </div>
-            <div className="flex-1 w-full bg-white rounded-[24px] shadow-sm border border-slate-200 overflow-hidden relative z-0">
-              <MapContainer center={[10.762622, 106.660172]} zoom={13} style={{ width: '100%', height: '100%' }}>
+            <div className="relative z-0 isolate flex-1 w-full bg-white rounded-[24px] shadow-sm border border-slate-200 overflow-hidden">
+              <MapContainer center={GOVAP_MAP_CENTER} zoom={13} style={{ width: '100%', height: '100%' }} className="relative z-0 isolate">
                 {/* Thành phần bắt buộc để fix lỗi xám khung hình */}
                 <UpdateMapSize /> 
-                {/* Nâng cấp giao diện với Google Maps */}
-                <TileLayer 
-                  url="https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}" 
-                  attribution='&copy; Google Maps' 
-                />
+                <TileLayer url={MAP_TILE_URL} attribution={MAP_ATTRIBUTION} />
                 {Object.entries(viTriTaiXeMap || {}).map(([orderId, pos]) => (
                   <Marker key={orderId} position={[pos.lat, pos.lng]} icon={shipperIcon}>
                     <Popup>

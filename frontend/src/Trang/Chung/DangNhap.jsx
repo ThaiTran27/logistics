@@ -1,75 +1,37 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Mail, Lock, LogIn, ArrowLeft, Package, ShieldCheck, AlertCircle } from 'lucide-react';
+import {
+  Mail, Lock, LogIn, ArrowLeft, Package, ShieldCheck, AlertCircle,
+  User, Phone, MapPin, UserPlus
+} from 'lucide-react';
 import { apiFetch as fetch } from '../../utils/apiFetch.js';
-
-const normalizeRole = (value) => {
-  const role = String(value || '').trim().toLowerCase();
-  const aliases = {
-    hr: 'hr_manager',
-    human_resources: 'hr_manager',
-    nhan_su: 'hr_manager',
-    fleet: 'fleet_manager',
-    dispatcher: 'fleet_manager',
-    dieu_hanh: 'fleet_manager',
-    coordinator: 'fleet_manager',
-    shipper: 'driver',
-    driver: 'driver',
-    pickup_driver: 'pickup_driver',
-    delivery_driver: 'delivery_driver',
-    admin: 'director',
-    warehouse: 'warehouse_manager',
-    kho: 'warehouse_manager',
-    content: 'content_manager',
-    content_manager: 'content_manager',
-    cskh: 'customer_service',
-    customer_service: 'customer_service',
-    customer_support: 'customer_service',
-    support: 'customer_service',
-    content_team: 'content_manager',
-    phong_ban_noi_dung: 'content_manager',
-    marketing: 'content_manager',
-    shop: 'shop',
-    accountant: 'accountant',
-    director: 'director',
-    warehouse_manager: 'warehouse_manager',
-    fleet_manager: 'fleet_manager',
-    hr_manager: 'hr_manager',
-    customer: 'customer'
-  };
-
-  return aliases[role] || role;
-};
+import { useLocation } from 'react-router-dom';
+import { getWorkspacePath, normalizeRole } from '../../utils/workspaceRoutes.js';
 
 export default function DangNhap() {
+  const location = useLocation();
+  const [cheDoDangKy, setCheDoDangKy] = useState(() => location.state?.registration === true);
+  const [fullName, setFullName] = useState('');
+  const [phone, setPhone] = useState('');
+  const [shopAddress, setShopAddress] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [loi, setLoi] = useState('');
+  const [loi, setLoi] = useState(() => {
+    if (sessionStorage.getItem('auth_expired_notice') !== '1') return '';
+    sessionStorage.removeItem('auth_expired_notice');
+    return 'Phiên đăng nhập đã hết hạn';
+  });
   const [dangXuLy, setDangXuLy] = useState(false);
   
   const navigate = useNavigate();
 
   useEffect(() => {
+    if (location.state?.registration === true) return;
     const rawRole = localStorage.getItem('role') || localStorage.getItem('user_role');
     const role = normalizeRole(rawRole);
     if (!role) return;
-
-    const roleMap = {
-      shop: '/cua-hang',
-      driver: '/tai-xe',
-      pickup_driver: '/tai-xe',
-      delivery_driver: '/tai-xe',
-      linehaul_driver: '/tai-xe',
-      warehouse_manager: '/kho',
-      fleet_manager: '/dieu-hanh',
-      accountant: '/ke-toan',
-      director: '/admin',
-      hr_manager: '/nhan-su',
-      content_manager: '/phong-ban-noi-dung'
-    };
-
-    navigate(roleMap[role] || '/', { replace: true });
-  }, [navigate]);
+    navigate(getWorkspacePath(role), { replace: true });
+  }, [location.state, navigate]);
 
   const xuLyDangNhap = async (e) => {
     e.preventDefault();
@@ -77,10 +39,12 @@ export default function DangNhap() {
     setDangXuLy(true);
 
     try {
-      const res = await fetch('http://localhost:5000/api/login', {
+      const res = await fetch(`http://localhost:5000/api/${cheDoDangKy ? 'register' : 'login'}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password })
+        body: JSON.stringify(cheDoDangKy
+          ? { full_name: fullName, phone, shop_address: shopAddress, email, password }
+          : { email, password })
       });
       const data = await res.json();
 
@@ -88,32 +52,7 @@ export default function DangNhap() {
         const role = String(data.user.role || '').trim().toLowerCase();
         
         // [ĐÃ FIX] Thêm 'coordinator' vào từ điển để hệ thống nhận diện
-        const roleAliases = {
-          hr: 'hr_manager',
-          human_resources: 'hr_manager',
-          nhan_su: 'hr_manager',
-          fleet: 'fleet_manager',
-          dispatcher: 'fleet_manager',
-          dieu_hanh: 'fleet_manager',
-          coordinator: 'fleet_manager',
-          shipper: 'driver',
-          pickup_driver: 'pickup_driver',
-          delivery_driver: 'delivery_driver',
-          linehaul_driver: 'linehaul_driver',
-          admin: 'director',
-          warehouse: 'warehouse_manager',
-          kho: 'warehouse_manager',
-          content: 'content_manager',
-          content_manager: 'content_manager',
-          cskh: 'customer_service',
-          customer_service: 'customer_service',
-          customer_support: 'customer_service',
-          support: 'customer_service',
-          content_team: 'content_manager',
-          phong_ban_noi_dung: 'content_manager',
-          marketing: 'content_manager'
-        };
-        const normalizedRole = roleAliases[role] || role;
+        const normalizedRole = normalizeRole(role);
 
         localStorage.setItem('user_id', data.user.id);
         localStorage.setItem('access_token', data.token);
@@ -125,22 +64,7 @@ export default function DangNhap() {
         if (data.user.warehouse_type) localStorage.setItem('warehouse_type', data.user.warehouse_type);
         else localStorage.removeItem('warehouse_type');
 
-        switch (normalizedRole) {
-          case 'shop': navigate('/cua-hang'); break;
-          case 'driver': navigate('/tai-xe'); break;
-          case 'pickup_driver': navigate('/tai-xe'); break;
-          case 'delivery_driver': navigate('/tai-xe'); break;
-          case 'linehaul_driver': navigate('/tai-xe'); break;
-          case 'warehouse_manager': navigate('/kho'); break;
-          case 'fleet_manager': navigate('/dieu-hanh'); break;
-          case 'accountant': navigate('/ke-toan'); break;
-          case 'director': navigate('/admin'); break;
-          case 'hr_manager': navigate('/nhan-su'); break;
-          case 'content_manager': navigate('/phong-ban-noi-dung'); break;
-          case 'customer_service': navigate('/ho-tro'); break;
-          default: 
-            setLoi(`Hệ thống không nhận diện được chức vụ: "${role}". Hãy kiểm tra lại Database.`);
-        }
+        navigate(getWorkspacePath(normalizedRole));
       } else {
         setLoi(data.message || 'Email hoặc mật khẩu không chính xác!');
       }
@@ -171,11 +95,67 @@ export default function DangNhap() {
             <div className="inline-flex items-center justify-center w-14 h-14 bg-blue-50 text-blue-600 rounded-2xl mb-6 shadow-inner">
               <Package size={28} />
             </div>
-            <h2 className="text-3xl sm:text-4xl font-black text-slate-800 mb-3 tracking-tight">Đăng Nhập</h2>
-            <p className="text-slate-500 font-medium text-base">Hệ thống quản trị trung tâm Smart Logistics.</p>
+            <h2 className="text-3xl sm:text-4xl font-black text-slate-800 mb-3 tracking-tight">
+              {cheDoDangKy ? 'Đăng Ký Shop' : 'Đăng Nhập'}
+            </h2>
+            <p className="text-slate-500 font-medium text-base">
+              {cheDoDangKy
+                ? 'Tạo tài khoản Shop để quản lý đơn hàng và đối soát.'
+                : 'Hệ thống quản trị trung tâm Smart Logistics.'}
+            </p>
           </div>
 
           <form onSubmit={xuLyDangNhap} className="space-y-6">
+            {cheDoDangKy && (
+              <>
+                <div>
+                  <label className="block text-sm font-black text-slate-700 mb-2 tracking-wide">TÊN SHOP / NGƯỜI ĐẠI DIỆN</label>
+                  <div className="relative group">
+                    <User className="absolute left-5 top-1/2 -translate-y-1/2 text-slate-400 group-focus-within:text-blue-500 transition-colors" size={20} />
+                    <input
+                      type="text"
+                      required
+                      maxLength={255}
+                      autoComplete="name"
+                      placeholder="Tên cửa hàng hoặc người đại diện"
+                      className="w-full pl-14 pr-5 py-4 bg-[#F8FAFC] border-2 border-transparent rounded-2xl outline-none focus:bg-white focus:border-blue-400 transition-all font-medium text-slate-700 placeholder:text-slate-400"
+                      value={fullName}
+                      onChange={(e) => setFullName(e.target.value)}
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-sm font-black text-slate-700 mb-2 tracking-wide">SỐ ĐIỆN THOẠI</label>
+                  <div className="relative group">
+                    <Phone className="absolute left-5 top-1/2 -translate-y-1/2 text-slate-400 group-focus-within:text-blue-500 transition-colors" size={20} />
+                    <input
+                      type="tel"
+                      required
+                      autoComplete="tel"
+                      placeholder="0901234567"
+                      className="w-full pl-14 pr-5 py-4 bg-[#F8FAFC] border-2 border-transparent rounded-2xl outline-none focus:bg-white focus:border-blue-400 transition-all font-medium text-slate-700 placeholder:text-slate-400"
+                      value={phone}
+                      onChange={(e) => setPhone(e.target.value)}
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-sm font-black text-slate-700 mb-2 tracking-wide">ĐỊA CHỈ SHOP (KHÔNG BẮT BUỘC)</label>
+                  <div className="relative group">
+                    <MapPin className="absolute left-5 top-5 text-slate-400 group-focus-within:text-blue-500 transition-colors" size={20} />
+                    <input
+                      type="text"
+                      maxLength={1000}
+                      autoComplete="street-address"
+                      placeholder="Địa chỉ lấy hàng"
+                      className="w-full pl-14 pr-5 py-4 bg-[#F8FAFC] border-2 border-transparent rounded-2xl outline-none focus:bg-white focus:border-blue-400 transition-all font-medium text-slate-700 placeholder:text-slate-400"
+                      value={shopAddress}
+                      onChange={(e) => setShopAddress(e.target.value)}
+                    />
+                  </div>
+                </div>
+              </>
+            )}
             <div>
               <label className="block text-sm font-black text-slate-700 mb-2 tracking-wide">ĐỊA CHỈ EMAIL</label>
               <div className="relative group">
@@ -183,7 +163,8 @@ export default function DangNhap() {
                 <input 
                   type="email" 
                   required
-                  placeholder="admin@smartlogistics.vn"
+                  placeholder="email@example.com"
+                  autoComplete="email"
                   className="w-full pl-14 pr-5 py-4 bg-[#F8FAFC] border-2 border-transparent rounded-2xl outline-none focus:bg-white focus:border-blue-400 focus:shadow-[0_0_0_4px_rgba(59,130,246,0.1)] transition-all font-medium text-slate-700 placeholder:text-slate-400"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
@@ -198,6 +179,9 @@ export default function DangNhap() {
                 <input 
                   type="password" 
                   required
+                  minLength={cheDoDangKy ? 8 : undefined}
+                  maxLength={128}
+                  autoComplete={cheDoDangKy ? 'new-password' : 'current-password'}
                   placeholder="••••••••"
                   className="w-full pl-14 pr-5 py-4 bg-[#F8FAFC] border-2 border-transparent rounded-2xl outline-none focus:bg-white focus:border-blue-400 focus:shadow-[0_0_0_4px_rgba(59,130,246,0.1)] transition-all font-medium text-slate-700 placeholder:text-slate-400"
                   value={password}
@@ -218,8 +202,26 @@ export default function DangNhap() {
               disabled={dangXuLy}
               className="w-full bg-blue-600 hover:bg-blue-700 active:scale-[0.98] text-white font-black py-4.5 rounded-2xl shadow-[0_8px_20px_rgba(37,99,235,0.25)] transition-all flex items-center justify-center gap-2 mt-8 disabled:opacity-70 disabled:cursor-not-allowed text-lg"
             >
-              {dangXuLy ? 'Đang xác thực...' : <><LogIn size={22}/> Truy Cập Hệ Thống</>}
+              {dangXuLy
+                ? (cheDoDangKy ? 'Đang tạo tài khoản...' : 'Đang xác thực...')
+                : cheDoDangKy
+                  ? <><UserPlus size={22}/> Tạo tài khoản Shop</>
+                  : <><LogIn size={22}/> Truy Cập Hệ Thống</>}
             </button>
+            <p className="text-center text-sm font-medium text-slate-500">
+              {cheDoDangKy ? 'Đã có tài khoản?' : 'Chưa có tài khoản Shop?'}
+              {' '}
+              <button
+                type="button"
+                className="font-black text-blue-600 hover:text-blue-800"
+                onClick={() => {
+                  setCheDoDangKy(!cheDoDangKy);
+                  setLoi('');
+                }}
+              >
+                {cheDoDangKy ? 'Đăng nhập' : 'Đăng ký Shop'}
+              </button>
+            </p>
           </form>
         </div>
 

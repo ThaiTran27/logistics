@@ -3,6 +3,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { ScanLine, Barcode, LogOut, Box, ArrowRightLeft, CheckCircle, AlertCircle, PackageSearch, Camera, ImagePlus, X, MapPin, Save, Plus, Truck } from 'lucide-react';
 import { Html5Qrcode, Html5QrcodeScanner, Html5QrcodeSupportedFormats } from 'html5-qrcode';
 import BarcodeLabel from 'react-barcode';
+import { isOrderWaitOverdue, OrderStatusBadge } from '../../utils/orderStatus.jsx';
 
 const supportedBarcodeFormats = [
   Html5QrcodeSupportedFormats.QR_CODE,
@@ -27,7 +28,7 @@ export default function QuetMaVach() {
   const [maVuaDoc, setMaVuaDoc] = useState('');
   const [trangThaiCamera, setTrangThaiCamera] = useState('');
   const [dangXuLy, setDangXuLy] = useState(false);
-  const [tabKho, setTabKho] = useState(() => localStorage.getItem('warehouse_type') === 'central' ? 'overview' : 'scan');
+  const [tabKho, setTabKho] = useState(() => localStorage.getItem('role') === 'warehouse_manager' ? 'overview' : 'scan');
   const [wrongWarehouseAlarm, setWrongWarehouseAlarm] = useState(false);
   const [danhSachKho, setDanhSachKho] = useState([]);
   const [khoDrafts, setKhoDrafts] = useState({});
@@ -38,7 +39,6 @@ export default function QuetMaVach() {
   const [warehouseId, setWarehouseId] = useState(() => localStorage.getItem('warehouse_id') || '');
   const [binLocations, setBinLocations] = useState([]);
   const [selectedBinCode, setSelectedBinCode] = useState('');
-  const [crossDockMode, setCrossDockMode] = useState(false);
   const [binCodeDraft, setBinCodeDraft] = useState('');
   const [binNameDraft, setBinNameDraft] = useState('');
   const [creatingBin, setCreatingBin] = useState(false);
@@ -47,6 +47,9 @@ export default function QuetMaVach() {
   const [auditScannedCount, setAuditScannedCount] = useState(0);
   const [auditBusy, setAuditBusy] = useState(false);
   const [auditReport, setAuditReport] = useState(null);
+  const [warehouseReasonCodes, setWarehouseReasonCodes] = useState([]);
+  const [auditReasonDraft, setAuditReasonDraft] = useState({ missing: {}, extra: {} });
+  const [auditReasonsSaved, setAuditReasonsSaved] = useState(false);
   const [bags, setBags] = useState([]);
   const [bagDestinationId, setBagDestinationId] = useState('');
   const [selectedBagId, setSelectedBagId] = useState('');
@@ -85,8 +88,14 @@ export default function QuetMaVach() {
     : localStorage.getItem('warehouse_type') === 'central';
   const canRunInventoryAudit = !isWarehouseManager || isCentralWarehouse;
   const pendingDeliveryOrders = (Array.isArray(tonKho) ? tonKho : []).filter((order) => (
-    order.status === 'at_destination_warehouse' && !order.delivery_shipper_id
+    order.status === 'at_central_warehouse' && !order.delivery_shipper_id
   ));
+  const overdueWarehouseOrders = (Array.isArray(tonKho) ? tonKho : []).filter(isOrderWaitOverdue);
+  const missingReasonOptions = warehouseReasonCodes.filter((reason) => ['WH_SHORT', 'WH_LOST'].includes(reason.code));
+  const extraReasonOptions = warehouseReasonCodes.filter((reason) => reason.code === 'WH_OVER');
+  const auditReasonsComplete = auditReport
+    && auditReport.missing.every((item) => auditReasonDraft.missing[String(item.order_id)] || item.reason_code)
+    && auditReport.extra.every((item) => auditReasonDraft.extra[item.scan_code] || item.reason_code);
   const availableOutboundBags = bags.filter((bag) => Number(bag.source_warehouse_id) === Number(warehouseId)
     && bag.status === 'sealed' && !Number(bag.is_assigned_to_trip));
   const isLinehaulDriverAssigned = (driver) => linehaulTrips.some((trip) =>
@@ -112,26 +121,20 @@ export default function QuetMaVach() {
       const warehousesResponse = await fetch('http://localhost:5000/api/warehouses');
       const warehousesData = await warehousesResponse.json();
       if (!warehousesResponse.ok || !warehousesData.success) throw new Error(warehousesData.message || 'Không tải được danh sách kho.');
-      const warehouseRows = warehousesData.data || [];
-      if (isWarehouseManager && assignedWarehouseId) {
-        const routesResponse = await fetch(`http://localhost:5000/api/warehouse/routes?warehouse_id=${assignedWarehouseId}`);
-        const routesData = await routesResponse.json();
-        if (!routesResponse.ok || !routesData.success) throw new Error(routesData.message || 'Không tải được các kho trên tuyến.');
-        const availableWarehouses = [...warehouseRows, ...(routesData.data || [])];
-        setDanhSachKho(availableWarehouses);
-        setWarehouseId(assignedWarehouseId);
-        const assignedWarehouse = availableWarehouses.find((warehouse) => String(warehouse.id) === String(assignedWarehouseId));
-        if (assignedWarehouse?.warehouse_type) localStorage.setItem('warehouse_type', assignedWarehouse.warehouse_type);
-      } else {
-        setDanhSachKho(warehouseRows);
-        const activeWarehouses = warehouseRows.filter((warehouse) => warehouse.is_configured && warehouse.is_active);
-        setWarehouseId((current) => {
-          const nextWarehouseId = current || (activeWarehouses.length === 1 ? String(activeWarehouses[0].id) : '');
-          const activeWarehouse = activeWarehouses.find((warehouse) => String(warehouse.id) === String(nextWarehouseId));
-          if (activeWarehouse?.warehouse_type) localStorage.setItem('warehouse_type', activeWarehouse.warehouse_type);
-          return nextWarehouseId;
-        });
+      const activeWarehouses = (warehousesData.data || []).filter((warehouse) => (
+        warehouse.warehouse_type === 'central' && warehouse.is_configured && warehouse.is_active
+      ));
+      if (activeWarehouses.length !== 1) throw new Error('Hệ thống cần đúng một kho tổng Gò Vấp đang hoạt động.');
+      const centralWarehouse = activeWarehouses[0];
+      setDanhSachKho([centralWarehouse]);
+      setWarehouseId(String(centralWarehouse.id));
+      localStorage.setItem('warehouse_type', 'central');
+      if (assignedWarehouseId && String(assignedWarehouseId) !== String(centralWarehouse.id) && isWarehouseManager) {
+        localStorage.setItem('warehouse_id', String(centralWarehouse.id));
       }
+      setTabKho((current) => ['linehaul', 'warehouses', 'delivery'].includes(current)
+        ? isWarehouseManager ? 'overview' : 'scan'
+        : current);
     } catch (error) {
       console.error('Lỗi tải danh mục kho:', error);
       setThongBao({ loai: 'loi', thongDiep: error.message || 'Không tải được danh sách kho.' });
@@ -165,6 +168,20 @@ export default function QuetMaVach() {
     taiViTriKe(warehouseId);
   }, [warehouseId]);
 
+  useEffect(() => {
+    const taiMaLyDoKho = async () => {
+      try {
+        const response = await fetch('http://localhost:5000/api/reason-codes?group_type=WAREHOUSE');
+        const data = await response.json();
+        if (!response.ok || !data.success) throw new Error(data.message || 'Không tải được mã lý do kho.');
+        setWarehouseReasonCodes(data.data || []);
+      } catch (error) {
+        setThongBao({ loai: 'loi', thongDiep: error.message || 'Không tải được mã lý do kho.' });
+      }
+    };
+    taiMaLyDoKho();
+  }, []);
+
   const taiDonChoGiao = useCallback(async () => {
     if (!warehouseId) return;
     setDeliveryOrdersLoading(true);
@@ -196,7 +213,7 @@ export default function QuetMaVach() {
   }, [warehouseId]);
 
   useEffect(() => {
-    if (tabKho === 'delivery' && !isCentralWarehouse) taiDonChoGiao();
+    if (['delivery', 'overview'].includes(tabKho) && isCentralWarehouse) taiDonChoGiao();
   }, [tabKho, isCentralWarehouse, taiDonChoGiao]);
 
   const taoViTriKe = async (event) => {
@@ -237,6 +254,8 @@ export default function QuetMaVach() {
       setAuditId(data.data.id);
       setAuditScannedCount(0);
       setAuditReport(null);
+      setAuditReasonDraft({ missing: {}, extra: {} });
+      setAuditReasonsSaved(false);
       setThongBao({ loai: 'thanhcong', thongDiep: data.message });
     } catch (error) {
       setThongBao({ loai: 'loi', thongDiep: error.message || 'Không thể mở phiếu kiểm kê.' });
@@ -276,10 +295,58 @@ export default function QuetMaVach() {
       const data = await response.json();
       if (!response.ok || !data.success) throw new Error(data.message || 'Không thể chốt phiếu kiểm kê.');
       setAuditReport(data.data);
+      setAuditReasonDraft({
+        missing: Object.fromEntries(data.data.missing.map((item) => [String(item.order_id), item.reason_code || ''])),
+        extra: Object.fromEntries(data.data.extra.map((item) => [item.scan_code, item.reason_code || '']))
+      });
+      setAuditReasonsSaved(!data.data.missing.length && !data.data.extra.length);
       setAuditId(null);
       setThongBao({ loai: 'thanhcong', thongDiep: 'Đã chốt phiếu và đối chiếu tồn kho.' });
     } catch (error) {
       setThongBao({ loai: 'loi', thongDiep: error.message || 'Không thể chốt phiếu kiểm kê.' });
+    } finally {
+      setAuditBusy(false);
+    }
+  };
+
+  const luuLyDoChenhLech = async () => {
+    if (!auditReport || auditBusy) return;
+    const missing = auditReport.missing.map((item) => ({
+      order_id: Number(item.order_id),
+      reason_code: auditReasonDraft.missing[String(item.order_id)] || item.reason_code || ''
+    }));
+    const extra = auditReport.extra.map((item) => ({
+      scan_code: item.scan_code,
+      reason_code: auditReasonDraft.extra[item.scan_code] || item.reason_code || ''
+    }));
+    if ([...missing, ...extra].some((item) => !item.reason_code)) {
+      setThongBao({ loai: 'loi', thongDiep: 'Hãy chọn mã lý do cho từng kiện thiếu và mã dư trước khi lưu.' });
+      return;
+    }
+    setAuditBusy(true);
+    try {
+      const response = await fetch(`http://localhost:5000/api/warehouse/inventory-audits/${auditReport.id}/discrepancies`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ missing, extra })
+      });
+      const data = await response.json();
+      if (!response.ok || !data.success) throw new Error(data.message || 'Không lưu được mã lý do kiểm kê.');
+      setAuditReport((report) => ({
+        ...report,
+        missing: report.missing.map((item) => ({
+          ...item,
+          reason_code: auditReasonDraft.missing[String(item.order_id)] || item.reason_code
+        })),
+        extra: report.extra.map((item) => ({
+          ...item,
+          reason_code: auditReasonDraft.extra[item.scan_code] || item.reason_code
+        }))
+      }));
+      setAuditReasonsSaved(true);
+      setThongBao({ loai: 'thanhcong', thongDiep: data.message });
+    } catch (error) {
+      setThongBao({ loai: 'loi', thongDiep: error.message || 'Không lưu được mã lý do kiểm kê.' });
     } finally {
       setAuditBusy(false);
     }
@@ -320,7 +387,7 @@ export default function QuetMaVach() {
   };
 
   useEffect(() => {
-    if (!['linehaul', 'overview'].includes(tabKho) || !warehouseId) return undefined;
+    if (tabKho !== 'linehaul' || !warehouseId) return undefined;
     taiDuLieuLinehaul();
     const refreshOnFocus = () => {
       if (document.visibilityState === 'visible') taiDuLieuLinehaul();
@@ -414,7 +481,7 @@ export default function QuetMaVach() {
   const phanCongDonTrongBao = async () => {
     if (!receivedBag || !deliveryDriverId || assigningReceivedBag) return;
     const eligibleOrders = (receivedBag.orders || []).filter((order) => (
-      order.status === 'at_destination_warehouse' && !order.delivery_shipper_id
+      order.status === 'at_central_warehouse' && !order.delivery_shipper_id
     ));
     if (!eligibleOrders.length) {
       setThongBao({ loai: 'loi', thongDiep: 'Bao này không có đơn nào đang chờ phân tài xế giao tại kho hiện tại.' });
@@ -596,26 +663,24 @@ export default function QuetMaVach() {
     setThongBao({ loai: '', thongDiep: '' });
 
     try {
-      if (!crossDockMode) {
-        const lookupParams = new URLSearchParams({ warehouse_id: warehouseId, bin_code: maCanXuly });
-        const binResponse = await fetch(`http://localhost:5000/api/warehouse/bin-locations/lookup?${lookupParams}`);
-        const binData = await binResponse.json();
-        if (!binResponse.ok || !binData.success) throw new Error(binData.message || 'Không thể xác thực mã kệ.');
-        if (binData.matched) {
-          setSelectedBinCode(binData.data.bin_code);
-          setMaVuaDoc(binData.data.bin_code);
-          setThongBao({ loai: 'thanhcong', thongDiep: `Đã nhận diện kệ ${binData.data.bin_code} · ${binData.data.bin_name}. Bây giờ quét mã vận đơn.` });
-          return;
-        }
+      const lookupParams = new URLSearchParams({ warehouse_id: warehouseId, bin_code: maCanXuly });
+      const binResponse = await fetch(`http://localhost:5000/api/warehouse/bin-locations/lookup?${lookupParams}`);
+      const binData = await binResponse.json();
+      if (!binResponse.ok || !binData.success) throw new Error(binData.message || 'Không thể xác thực mã kệ.');
+      if (binData.matched) {
+        setSelectedBinCode(binData.data.bin_code);
+        setMaVuaDoc(binData.data.bin_code);
+        setThongBao({ loai: 'thanhcong', thongDiep: `Đã nhận diện kệ ${binData.data.bin_code} · ${binData.data.bin_name}. Bây giờ quét mã vận đơn.` });
+        return;
       }
-      if (!crossDockMode && !selectedBinCode) {
+      if (!selectedBinCode) {
         setThongBao({ loai: 'loi', thongDiep: 'Quét mã vạch vị trí kệ trước, sau đó mới quét mã vận đơn.' });
         return;
       }
       const res = await fetch('http://localhost:5000/api/warehouse/scan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tracking_code: maCanXuly, warehouse_id: Number(warehouseId), bin_code: selectedBinCode, cross_dock: crossDockMode })
+        body: JSON.stringify({ tracking_code: maCanXuly, warehouse_id: Number(warehouseId), bin_code: selectedBinCode, cross_dock: false })
       });
       const data = await res.json();
 
@@ -763,11 +828,11 @@ export default function QuetMaVach() {
   const anToanTonKho = Array.isArray(tonKho) ? tonKho : [];
 
   return (
-    <div className={`flex min-h-screen font-sans text-slate-800 transition-colors ${wrongWarehouseAlarm ? 'bg-red-100' : 'bg-[#F1F5F9]'}`}>
+    <div className={`flex min-h-screen flex-col font-sans text-slate-800 transition-colors md:flex-row ${wrongWarehouseAlarm ? 'bg-red-100' : 'bg-[#F1F5F9]'}`}>
       <div id="barcode-image-reader" className="fixed left-[-10000px] top-0 h-px w-px overflow-hidden" aria-hidden="true" />
       
       {/* SIDEBAR */}
-      <div className="w-72 bg-slate-900 border-r border-slate-800 shadow-xl flex flex-col z-10 justify-between text-slate-300">
+      <div className="w-full shrink-0 bg-slate-900 border-r border-slate-800 shadow-xl flex flex-col z-10 justify-between text-slate-300 md:w-72">
         <div>
           <div className="p-8 border-b border-slate-800 flex items-center gap-3 bg-slate-950/50">
             <div className="bg-gradient-to-tr from-indigo-500 to-purple-500 p-2.5 rounded-xl shadow-lg shadow-indigo-500/20">
@@ -788,18 +853,12 @@ export default function QuetMaVach() {
             <button onClick={() => setTabKho('scan')} className={`w-full px-5 py-4 rounded-2xl font-bold flex items-center gap-4 transition-all ${tabKho === 'scan' ? 'bg-indigo-500/10 text-indigo-400 border border-indigo-500/20' : 'text-slate-500 hover:bg-slate-800 hover:text-slate-300'}`}>
               <ScanLine size={20} /> Máy Quét Mã Vạch
             </button>
-            <button onClick={() => setTabKho('linehaul')} className={`w-full px-5 py-4 rounded-2xl font-bold flex items-center gap-4 transition-all ${tabKho === 'linehaul' ? 'bg-indigo-500/10 text-indigo-400 border border-indigo-500/20' : 'text-slate-500 hover:bg-slate-800 hover:text-slate-300'}`}>
-              <ArrowRightLeft size={20} /> Nhập / Xuất Bao Liên Kho
-            </button>
-            {!isCentralWarehouse && <button onClick={() => setTabKho('delivery')} className={`w-full px-5 py-4 rounded-2xl font-bold flex items-center gap-4 transition-all ${tabKho === 'delivery' ? 'bg-indigo-500/10 text-indigo-400 border border-indigo-500/20' : 'text-slate-500 hover:bg-slate-800 hover:text-slate-300'}`}>
+            {isCentralWarehouse && <button onClick={() => setTabKho('delivery')} className={`w-full px-5 py-4 rounded-2xl font-bold flex items-center gap-4 transition-all ${tabKho === 'delivery' ? 'bg-indigo-500/10 text-indigo-400 border border-indigo-500/20' : 'text-slate-500 hover:bg-slate-800 hover:text-slate-300'}`}>
               <Truck size={20} /> Phân Tài Xế Giao Hàng
               {pendingDeliveryOrders.length > 0 && <span className="ml-auto rounded-full bg-amber-500 px-2 py-0.5 text-xs font-black text-white">{pendingDeliveryOrders.length}</span>}
             </button>}
             {canRunInventoryAudit && <button onClick={() => setTabKho('kiem-ke')} className={`w-full px-5 py-4 rounded-2xl font-bold flex items-center gap-4 transition-all ${tabKho === 'kiem-ke' ? 'bg-indigo-500/10 text-indigo-400 border border-indigo-500/20' : 'text-slate-500 hover:bg-slate-800 hover:text-slate-300'}`}>
               <Box size={20} /> Kiểm Kê Định Kỳ
-            </button>}
-            {(!isWarehouseManager || (isWarehouseManager && isCentralWarehouse)) && <button onClick={() => setTabKho('warehouses')} className={`w-full px-5 py-4 rounded-2xl font-bold flex items-center gap-4 transition-all ${tabKho === 'warehouses' ? 'bg-indigo-500/10 text-indigo-400 border border-indigo-500/20' : 'text-slate-500 hover:bg-slate-800 hover:text-slate-300'}`}>
-              <MapPin size={20} /> Danh Mục Kho
             </button>}
           </div>
         </div>
@@ -818,14 +877,13 @@ export default function QuetMaVach() {
             <header className="mb-8">
               <p className="text-xs font-black uppercase tracking-[0.22em] text-indigo-600">Trung tâm Hub · Điều hành kho</p>
               <h1 className="mt-3 text-3xl font-black text-slate-800">Quản lý Kho Tổng</h1>
-              <p className="mt-2 text-sm text-slate-500">{selectedWarehouse?.name || 'Kho tổng Smart Logistics'} · Nhận bao từ kho con, phân loại tồn và đóng bao theo kho đích.</p>
+              <p className="mt-2 text-sm text-slate-500">{selectedWarehouse?.name || 'Kho tổng Gò Vấp'} · Nhận hàng, sắp xếp tồn kho và phân công tài xế giao trong khu vực.</p>
             </header>
             <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
               {[
                 { label: 'Đơn đang lưu tại kho tổng', value: anToanTonKho.length, tone: 'text-indigo-700 bg-indigo-50' },
-                { label: 'Bao đang trên đường về Hub', value: bags.filter((bag) => Number(bag.destination_warehouse_id) === Number(warehouseId) && bag.status === 'in_transit').length, tone: 'text-blue-700 bg-blue-50' },
-                { label: 'Bao đã nhập, sẵn sàng phân loại', value: bags.filter((bag) => Number(bag.destination_warehouse_id) === Number(warehouseId) && bag.status === 'received').length, tone: 'text-emerald-700 bg-emerald-50' },
-                { label: 'Bao chờ chuyển về kho con', value: bags.filter((bag) => Number(bag.source_warehouse_id) === Number(warehouseId) && bag.status === 'sealed').length, tone: 'text-amber-700 bg-amber-50' }
+                { label: 'Đơn chờ phân tài xế giao', value: pendingDeliveryOrders.length, tone: 'text-amber-700 bg-amber-50' },
+                { label: 'Đơn đang lưu tại kho', value: anToanTonKho.length, tone: 'text-emerald-700 bg-emerald-50' }
               ].map((item) => (
                 <article key={item.label} className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
                   <p className="text-sm font-bold text-slate-500">{item.label}</p>
@@ -833,21 +891,24 @@ export default function QuetMaVach() {
                 </article>
               ))}
             </section>
-            <section className="mt-8 grid gap-5 lg:grid-cols-3">
-              <button onClick={() => setTabKho('linehaul')} className="rounded-2xl border border-indigo-200 bg-white p-6 text-left shadow-sm transition hover:border-indigo-400 hover:shadow-md">
-                <ArrowRightLeft className="text-indigo-600" size={26} />
-                <h2 className="mt-4 font-black text-slate-800">Nhận bao & phân loại</h2>
-                <p className="mt-2 text-sm leading-6 text-slate-500">Quét nhận bao từ kho nguồn, cập nhật đơn vào tồn Hub, rồi đóng bao mới theo kho đích.</p>
-              </button>
+            {overdueWarehouseOrders.length > 0 && (
+              <section role="alert" className="mt-5 rounded-2xl border border-rose-200 bg-rose-50 p-5">
+                <h2 className="font-black text-rose-900">Cảnh báo quá thời gian chờ · {overdueWarehouseOrders.length} đơn</h2>
+                <p className="mt-1 text-sm text-rose-800">Đơn tại kho đã không được cập nhật trong ít nhất 24 giờ. Hãy ưu tiên phân tuyến hoặc kiểm tra kiện.</p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {overdueWarehouseOrders.slice(0, 8).map((order) => (
+                    <span key={order.id} className="inline-flex items-center gap-2 rounded-lg border border-rose-200 bg-white px-3 py-2 text-xs font-bold text-rose-900">
+                      {order.tracking_code}<OrderStatusBadge status={order.status} />
+                    </span>
+                  ))}
+                </div>
+              </section>
+            )}
+            <section className="mt-8 grid gap-5 lg:grid-cols-2">
               <button onClick={() => setTabKho('scan')} className="rounded-2xl border border-slate-200 bg-white p-6 text-left shadow-sm transition hover:border-indigo-400 hover:shadow-md">
                 <ScanLine className="text-indigo-600" size={26} />
                 <h2 className="mt-4 font-black text-slate-800">Quét và xử lý đơn lẻ</h2>
-                <p className="mt-2 text-sm leading-6 text-slate-500">Tra cứu mã vận đơn, xác nhận kiện và vị trí lưu kho theo quy trình hiện tại.</p>
-              </button>
-              <button onClick={() => setTabKho('warehouses')} className="rounded-2xl border border-slate-200 bg-white p-6 text-left shadow-sm transition hover:border-indigo-400 hover:shadow-md">
-                <MapPin className="text-indigo-600" size={26} />
-                <h2 className="mt-4 font-black text-slate-800">Tạo và quản lý kho con</h2>
-                <p className="mt-2 text-sm leading-6 text-slate-500">Khai báo kho con mới cùng địa chỉ và tọa độ để có thể điều phối chuyến đến kho.</p>
+                <p className="mt-2 text-sm leading-6 text-slate-500">Quét nhận đơn vào kho tổng Gò Vấp và sắp xếp vị trí lưu kho.</p>
               </button>
               <button onClick={() => setTabKho('kiem-ke')} className="rounded-2xl border border-slate-200 bg-white p-6 text-left shadow-sm transition hover:border-indigo-400 hover:shadow-md">
                 <Box className="text-indigo-600" size={26} />
@@ -905,12 +966,12 @@ export default function QuetMaVach() {
               {danhSachKho.filter((warehouse) => warehouse.warehouse_type === 'ward').length === 0 && <p className="rounded-xl border border-dashed border-slate-300 p-8 text-center text-sm text-slate-500">Chưa tạo kho con nào. Thêm từng phường và nhập vị trí thật để kích hoạt.</p>}
             </div>
           </div>
-        ) : tabKho === 'delivery' && !isCentralWarehouse ? (
+        ) : tabKho === 'delivery' && isCentralWarehouse ? (
           <div className="flex-1 space-y-6 overflow-y-auto p-6 md:p-10">
             <header>
-              <p className="text-xs font-black uppercase tracking-[0.22em] text-indigo-600">Kho con · Giao hàng chặng cuối</p>
+              <p className="text-xs font-black uppercase tracking-[0.22em] text-indigo-600">Kho tổng Gò Vấp · Giao hàng chặng cuối</p>
               <h1 className="mt-3 text-3xl font-black text-slate-800">Phân tài xế giao hàng</h1>
-              <p className="mt-2 text-sm text-slate-500">Các đơn đã nhập kho đích và chưa có tài xế được hiển thị riêng tại đây. Chọn tài xế cho từng đơn rồi bấm phân công.</p>
+              <p className="mt-2 text-sm text-slate-500">Các đơn đã nhập kho tổng Gò Vấp và chưa có tài xế được hiển thị tại đây. Chọn tài xế giao hàng rồi bấm phân công.</p>
             </header>
             <section className="space-y-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
               <div className="flex flex-wrap items-center justify-between gap-3">
@@ -1102,7 +1163,7 @@ export default function QuetMaVach() {
                         <h2 className="font-black text-slate-800">Các đơn vừa nhận trong bao {receivedBag.bag_code}</h2>
                         <p className="mt-1 text-sm text-slate-500">{receivedBag.orders?.length || 0} đơn đã nhập vào {selectedWarehouse?.name}.</p>
                       </div>
-                      {!isCentralWarehouse && receivedBag.orders?.some((order) => order.status === 'at_destination_warehouse' && !order.delivery_shipper_id) && (
+                      {!isCentralWarehouse && receivedBag.orders?.some((order) => order.status === 'at_central_warehouse' && !order.delivery_shipper_id) && (
                         <div className="flex flex-wrap items-center gap-2">
                           <select value={deliveryDriverId} onChange={(event) => setDeliveryDriverId(event.target.value)} className="rounded-lg border border-slate-200 bg-white p-3 text-sm">
                             <option value="">Chọn tài xế giao</option>
@@ -1119,7 +1180,7 @@ export default function QuetMaVach() {
                         <div key={order.id} className="flex items-center justify-between gap-3 rounded-lg bg-slate-50 p-3">
                           <span className="font-mono text-sm font-bold">{order.tracking_code}</span>
                           <span className={`text-xs font-bold ${order.delivery_shipper_id ? 'text-emerald-700' : 'text-slate-500'}`}>
-                            {order.delivery_shipper_id ? 'Đã phân tài xế' : order.status === 'at_destination_warehouse' ? 'Chờ giao' : 'Chờ trung chuyển'}
+                            {order.delivery_shipper_id ? 'Đã phân tài xế' : <OrderStatusBadge status={order.status} />}
                           </span>
                         </div>
                       ))}
@@ -1156,10 +1217,7 @@ export default function QuetMaVach() {
             </div>
             <section className="max-w-4xl rounded-[28px] border border-slate-200 bg-white p-6 shadow-sm">
               <label className="block text-sm font-bold text-slate-700">Kho kiểm kê
-                <select value={warehouseId} onChange={(event) => setWarehouseId(event.target.value)} disabled={isWarehouseManager || Boolean(auditId)} className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
-                  <option value="">-- Chọn kho --</option>
-                  {danhSachKho.filter((warehouse) => warehouse.is_configured && warehouse.is_active).map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}
-                </select>
+                <span className="mt-2 block rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">{selectedWarehouse?.name || 'Kho tổng Gò Vấp'}</span>
               </label>
               {!auditId && !auditReport && <button type="button" onClick={batDauKiemKe} disabled={!warehouseId || auditBusy} className="mt-5 rounded-xl bg-indigo-600 px-5 py-3 font-black text-white disabled:opacity-50">{auditBusy ? 'Đang mở phiếu...' : 'Bắt đầu kiểm kê mù'}</button>}
               {auditId && (
@@ -1183,10 +1241,69 @@ export default function QuetMaVach() {
                     <p className="rounded-xl bg-red-50 p-4 text-sm text-red-800">Thiếu: <strong>{auditReport.missing_count}</strong> · Dư: <strong>{auditReport.extra_count}</strong></p>
                   </div>
                   <div className="grid gap-5 md:grid-cols-2">
-                    <div><h3 className="mb-2 font-black text-red-700">Kiện thiếu</h3>{auditReport.missing.length ? auditReport.missing.map((item) => <p key={item.order_id} className="border-b border-slate-100 py-2 font-mono text-sm">{item.tracking_code}</p>) : <p className="text-sm text-slate-500">Không thiếu kiện.</p>}</div>
-                    <div><h3 className="mb-2 font-black text-amber-700">Mã dư / không thuộc tồn đầu kỳ</h3>{auditReport.extra.length ? auditReport.extra.map((item) => <p key={item.scan_code} className="border-b border-slate-100 py-2 font-mono text-sm">{item.scan_code}</p>) : <p className="text-sm text-slate-500">Không có mã dư.</p>}</div>
+                    <div>
+                      <h3 className="mb-2 font-black text-red-700">Kiện thiếu</h3>
+                      {auditReport.missing.length ? auditReport.missing.map((item) => (
+                        <div key={item.order_id} className="flex flex-col gap-2 border-b border-slate-100 py-3 sm:flex-row sm:items-center sm:justify-between">
+                          <span className="font-mono text-sm">{item.tracking_code}</span>
+                          <select
+                            value={auditReasonDraft.missing[String(item.order_id)] || item.reason_code || ''}
+                            onChange={(event) => {
+                              setAuditReasonsSaved(false);
+                              setAuditReasonDraft((current) => ({
+                                ...current,
+                                missing: { ...current.missing, [String(item.order_id)]: event.target.value }
+                              }));
+                            }}
+                            className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm"
+                          >
+                            <option value="">-- Chọn lý do --</option>
+                            {missingReasonOptions.map((reason) => <option key={reason.code} value={reason.code}>{reason.code} · {reason.description}</option>)}
+                          </select>
+                        </div>
+                      )) : <p className="text-sm text-slate-500">Không thiếu kiện.</p>}
+                    </div>
+                    <div>
+                      <h3 className="mb-2 font-black text-amber-700">Mã dư / không thuộc tồn đầu kỳ</h3>
+                      {auditReport.extra.length ? auditReport.extra.map((item) => (
+                        <div key={item.scan_code} className="flex flex-col gap-2 border-b border-slate-100 py-3 sm:flex-row sm:items-center sm:justify-between">
+                          <span className="font-mono text-sm">{item.scan_code}</span>
+                          <select
+                            value={auditReasonDraft.extra[item.scan_code] || item.reason_code || ''}
+                            onChange={(event) => {
+                              setAuditReasonsSaved(false);
+                              setAuditReasonDraft((current) => ({
+                                ...current,
+                                extra: { ...current.extra, [item.scan_code]: event.target.value }
+                              }));
+                            }}
+                            className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm"
+                          >
+                            <option value="">-- Chọn lý do --</option>
+                            {extraReasonOptions.map((reason) => <option key={reason.code} value={reason.code}>{reason.code} · {reason.description}</option>)}
+                          </select>
+                        </div>
+                      )) : <p className="text-sm text-slate-500">Không có mã dư.</p>}
+                    </div>
                   </div>
-                  <button type="button" onClick={() => { setAuditReport(null); setAuditScannedCount(0); }} className="rounded-xl bg-indigo-600 px-5 py-3 font-black text-white">Mở phiếu kiểm kê khác</button>
+                  {(auditReport.missing.length > 0 || auditReport.extra.length > 0) && (
+                    <button
+                      type="button"
+                      onClick={luuLyDoChenhLech}
+                      disabled={auditBusy || !auditReasonsComplete || !warehouseReasonCodes.length}
+                      className="rounded-xl bg-emerald-600 px-5 py-3 font-black text-white disabled:opacity-50"
+                    >
+                      {auditBusy ? 'Đang lưu...' : auditReasonsSaved ? 'Lưu thay đổi mã lý do' : 'Lưu mã lý do chênh lệch'}
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => { setAuditReport(null); setAuditScannedCount(0); setAuditReasonDraft({ missing: {}, extra: {} }); setAuditReasonsSaved(false); }}
+                    disabled={!auditReasonsSaved}
+                    className="rounded-xl bg-indigo-600 px-5 py-3 font-black text-white disabled:opacity-50"
+                  >
+                    Mở phiếu kiểm kê khác
+                  </button>
                 </div>
               )}
               <button onClick={() => setTabKho('scan')} className="ml-3 mt-5 rounded-xl bg-slate-100 px-4 py-3 text-sm font-bold text-slate-700 hover:bg-slate-200">Quay lại quét kho</button>
@@ -1194,7 +1311,7 @@ export default function QuetMaVach() {
             </section>
           </div>
         ) : (
-          <div className="flex-1 p-10 overflow-y-auto flex flex-col xl:flex-row gap-8">
+          <div className="min-w-0 flex-1 overflow-y-auto overflow-x-hidden p-4 sm:p-6 md:p-10 flex flex-col xl:flex-row gap-8">
             
             {/* CỘT TRÁI: MÁY QUÉT */}
             <div className="xl:w-1/3 flex flex-col gap-6">
@@ -1205,22 +1322,19 @@ export default function QuetMaVach() {
               <ScanLine size={36} />
             </div>
             <h2 className="text-2xl font-black text-slate-800 mb-2">Quét Mã Vận Đơn</h2>
-            <p className="text-slate-500 text-sm mb-6 font-medium">Đưa trọn mã vạch vào khung quét. Có thể dùng ảnh mã rõ nét, súng quét hoặc nhập mã tay.</p>
+            <p className="text-slate-500 text-sm mb-3 font-medium">Đưa trọn mã vạch vào khung quét. Có thể dùng camera, súng quét hoặc nhập mã tay.</p>
+            <div className="mb-6 space-y-2 rounded-xl border border-indigo-100 bg-indigo-50 p-3 text-left text-xs text-indigo-900">
+              <p><strong>Nhận hàng lấy:</strong> quét đơn ở trạng thái “Chờ kho tổng nhận”; hệ thống chuyển vào kho tổng Gò Vấp.</p>
+              <p><strong>Nhận hàng hoàn:</strong> quét đơn tài xế hoàn về; hệ thống ghi nhận đã hoàn về kho tổng và chờ Shop nhận lại.</p>
+              <p>Quy trình chọn đúng nhánh theo trạng thái đơn trên máy chủ.</p>
+            </div>
 
-            <label className="mb-5 block text-left text-sm font-bold text-slate-700">Kho đang thao tác
-              <select value={warehouseId} onChange={(event) => { setSelectedBinCode(''); setWarehouseId(event.target.value); }} disabled={isWarehouseManager} className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 outline-none focus:border-indigo-400 disabled:cursor-not-allowed disabled:opacity-75">
-                <option value="">-- Chọn kho thực tế --</option>
-                {danhSachKho.filter((warehouse) => warehouse.is_configured && warehouse.is_active).map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}
-              </select>
-            </label>
+            <div className="mb-5 rounded-xl border border-indigo-100 bg-indigo-50 p-3 text-left text-sm">
+              <p className="text-xs font-bold uppercase text-indigo-700">Kho đang thao tác</p>
+              <p className="mt-1 font-black text-indigo-950">{selectedWarehouse?.name || 'Kho tổng Gò Vấp'}</p>
+            </div>
             {warehouseId && (
               <div className="mb-5 space-y-3 text-left">
-                {(!isWarehouseManager || isCentralWarehouse) && <label className="flex cursor-pointer items-start gap-2 rounded-xl border border-indigo-200 bg-indigo-50 p-3 text-xs text-indigo-900">
-                  <input type="checkbox" checked={crossDockMode} onChange={(event) => setCrossDockMode(event.target.checked)} className="mt-0.5 accent-indigo-600" />
-                  <span><strong>Chuyển tải nhanh (cross-docking)</strong><br />Bỏ qua kệ, chuyển kiện thẳng đến khu xuất để Điều phối gán xe.</span>
-                </label>}
-                {!crossDockMode && (
-                <>
                 <div className={`rounded-xl border p-3 ${selectedBinCode ? 'border-emerald-200 bg-emerald-50' : 'border-amber-200 bg-amber-50'}`}>
                   <p className="text-xs font-black uppercase text-slate-600">Vị trí lưu kho</p>
                   {selectedBinCode ? (
@@ -1238,8 +1352,6 @@ export default function QuetMaVach() {
                   <input required maxLength={120} value={binNameDraft} onChange={(event) => setBinNameDraft(event.target.value)} placeholder="Tên vị trí" className="min-w-0 rounded-lg border border-slate-200 p-2 text-sm" />
                   <button type="submit" disabled={creatingBin} className="col-span-2 flex items-center justify-center gap-2 rounded-lg bg-slate-800 px-3 py-2 text-xs font-black text-white disabled:opacity-50"><Plus size={14} /> {creatingBin ? 'Đang tạo...' : 'Tạo mã và nhãn mã vạch'}</button>
                 </form>
-                </>
-                )}
               </div>
             )}
 
@@ -1341,7 +1453,7 @@ export default function QuetMaVach() {
 
         {/* CỘT PHẢI: LƯỚI TỒN KHO */}
         <div className="xl:w-2/3 flex flex-col">
-          <div className="bg-white rounded-[32px] shadow-sm border border-slate-200 flex-1 overflow-hidden flex flex-col">
+          <div className="min-w-0 bg-white rounded-[32px] shadow-sm border border-slate-200 flex-1 overflow-hidden flex flex-col">
             <div className="p-8 border-b border-slate-100 flex justify-between items-center bg-[#F8FAFC]">
               <h3 className="font-black text-slate-800 text-xl flex items-center gap-3">
                 <Box className="text-indigo-600" size={24} /> 
@@ -1350,7 +1462,7 @@ export default function QuetMaVach() {
             </div>
 
             <div className="flex-1 overflow-auto p-2">
-              <table className="w-full text-left border-collapse">
+              <table className="w-full min-w-[620px] text-left border-collapse">
                 <thead className="bg-white sticky top-0 z-10">
                   <tr>
                     <th className="p-5 text-xs font-black text-slate-400 uppercase tracking-wider border-b border-slate-100">Mã Vận Đơn</th>

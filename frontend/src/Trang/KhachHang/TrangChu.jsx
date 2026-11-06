@@ -1,13 +1,15 @@
-import { apiFetch as fetch, resolveApiAssetUrl } from '../../utils/apiFetch.js';
+import { API_URL, apiFetch as fetch, resolveApiAssetUrl } from '../../utils/apiFetch.js';
 import { useEffect, useState } from 'react';
 import { io } from 'socket.io-client';
 import { MapContainer, Marker, Popup, TileLayer, useMap } from 'react-leaflet';
+import { GOVAP_MAP_CENTER, MAP_ATTRIBUTION, MAP_TILE_URL } from '../../utils/govapMap.js';
+import { OrderStatusBadge, getOrderStatusLabel } from '../../utils/orderStatus.jsx';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import { Search, Package, MapPin, Truck, CheckCircle, Clock, User, Phone, XCircle, AlertCircle, Box, Camera, Navigation, Calculator, Store, Globe, Headphones, ChevronRight, FileText, Download, Play, MessageCircle, Users, ShieldCheck, PackageSearch } from 'lucide-react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 
-const trackingSocket = io('http://localhost:5000');
+const trackingSocket = io(API_URL);
 const movingTruckIcon = L.divIcon({
   className: 'live-tracking-truck',
   html: '<span style="display:block;font-size:28px;line-height:32px">🚚</span>',
@@ -24,7 +26,8 @@ function FollowDriver({ location }) {
 }
 
 export default function TraCuuHanhTrinh() {
-  const [maVanDon, setMaVanDon] = useState('');
+  const location = useLocation();
+  const [maVanDon, setMaVanDon] = useState(() => String(location.state?.trackingCode || '').trim().toUpperCase());
   const [thongTinDon, setThongTinDon] = useState(null);
   const [loi, setLoi] = useState('');
   const [dangTim, setDangTim] = useState(false);
@@ -115,6 +118,11 @@ export default function TraCuuHanhTrinh() {
 
       if (data.success) {
         setThongTinDon(data.data);
+        const trackingCode = String(data.data.tracking_code || maVanDon.trim()).toUpperCase();
+        localStorage.setItem('last_tracking_code', trackingCode);
+        window.dispatchEvent(new CustomEvent('order-tracking-found', {
+          detail: { tracking_code: trackingCode }
+        }));
       } else {
         setLoi(data.message || 'Không tìm thấy đơn hàng. Vui lòng kiểm tra lại mã!');
       }
@@ -126,28 +134,26 @@ export default function TraCuuHanhTrinh() {
   };
 
   const cacBuocHanhTrinh = [
-    { id: 'pending', ten: 'Chờ Lấy Hàng', desc: 'Đơn hàng đã được Shop tạo và đang chờ hệ thống AI phân tuyến.', icon: Clock },
-    { id: 'picking', ten: 'Lộ Trình Lấy Hàng', desc: 'Tài xế đã nhận đơn và đang di chuyển đến địa chỉ Shop để lấy hàng.', icon: Truck },
-    { id: 'picked_up', ten: 'Đã Lấy Hàng', desc: 'Tài xế đang bàn giao kiện hàng cho kho.', icon: PackageSearch },
-    { id: 'at_origin_warehouse', ten: 'Đã Về Kho Con Nguồn', desc: 'Kho con tại phường lấy đã nhận kiện hàng.', icon: Box },
-    { id: 'transferring_to_central', ten: 'Đang Về Kho Tổng', desc: 'Hàng đang được trung chuyển về kho tổng TP.HCM.', icon: Truck },
-    { id: 'at_central_warehouse', ten: 'Đang Phân Luồng', desc: 'Kho tổng tổng hợp hàng và phân về kho con đích.', icon: Box },
-    { id: 'transferring_to_destination', ten: 'Đang Về Kho Con Đích', desc: 'Hàng đang được chuyển tới kho con gần người nhận.', icon: Truck },
-    { id: 'at_destination_warehouse', ten: 'Đã Tới Kho Con Đích', desc: 'Đơn chờ tài xế giao tại phường nhận hàng.', icon: Box },
-    { id: 'delivering', ten: 'Đang Giao Hàng', desc: 'Tài xế đang trên đường đi giao hàng đến địa chỉ của bạn.', icon: Navigation },
+    { id: 'pending', ten: 'Chờ Lấy Hàng', desc: 'Shop đã tạo đơn và đang chờ phân công tài xế lấy hàng.', icon: Clock },
+    { id: 'picking', ten: 'Đang Lấy Hàng', desc: 'Tài xế đang đến Shop để nhận kiện hàng.', icon: Truck },
+    { id: 'picked_up', ten: 'Đã Lấy Hàng', desc: 'Kiện hàng đang được đưa về kho tổng Gò Vấp.', icon: PackageSearch },
+    { id: 'at_central_warehouse', ten: 'Đang Xử Lý Tại Kho Tổng', desc: 'Kho tổng Gò Vấp đã nhận kiện hàng và chuẩn bị giao.', icon: Box },
+    { id: 'delivering', ten: 'Đang Giao Hàng', desc: 'Tài xế đang trên đường giao hàng đến địa chỉ của bạn.', icon: Navigation },
     { id: 'completed', ten: 'Giao Thành Công', desc: 'Đơn hàng đã được giao tận tay người nhận.', icon: CheckCircle }
   ];
 
   const mapTarget = thongTinDon?.driver_location;
   const mapCenter = mapTarget
     ? [Number(mapTarget.lat), Number(mapTarget.lng)]
-    : [10.762622, 106.660172];
+    : GOVAP_MAP_CENTER;
 
   const layTrangThaiBuoc = (trangThaiHienTai, idBuoc) => {
     const thuTu = cacBuocHanhTrinh.map((step) => step.id);
-    if (trangThaiHienTai === 'cancelled' || trangThaiHienTai === 'returning') return 'that-bai';
+    if (['pickup_failed', 'delivery_failed', 'return_pending', 'returning', 'returned', 'cancelled'].includes(trangThaiHienTai)) return 'that-bai';
     
-    const viTriHienTai = thuTu.indexOf(trangThaiHienTai);
+    const canonicalStatus = ['at_origin_warehouse', 'transferring_to_central', 'transferring_to_destination', 'at_destination_warehouse'].includes(trangThaiHienTai)
+      ? 'at_central_warehouse' : trangThaiHienTai;
+    const viTriHienTai = thuTu.indexOf(canonicalStatus);
     const viTriBuoc = thuTu.indexOf(idBuoc);
 
     if (viTriBuoc < viTriHienTai) return 'da-qua';
@@ -396,7 +402,7 @@ export default function TraCuuHanhTrinh() {
             <div className="p-6 md:p-8 border-b border-slate-200 bg-slate-50/50">
               <div className="mb-8 h-72 rounded-2xl overflow-hidden border border-slate-200 bg-slate-100">
                 <MapContainer center={mapCenter} zoom={mapTarget ? 14 : 11} className="h-full w-full">
-                  <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
+                  <TileLayer url={MAP_TILE_URL} attribution={MAP_ATTRIBUTION} />
                   <FollowDriver location={mapTarget} />
                   {mapTarget && (
                     <Marker position={mapCenter} icon={movingTruckIcon}>
@@ -410,26 +416,7 @@ export default function TraCuuHanhTrinh() {
                   <p className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-1">Mã Phiếu Gửi</p>
                   <h3 className="text-3xl font-black text-blue-600 tracking-tight">{thongTinDon.tracking_code}</h3>
                 </div>
-                <div className={`px-5 py-2.5 rounded-lg text-sm font-bold flex items-center gap-2 border shadow-sm ${
-                  thongTinDon.status === 'completed' ? 'bg-emerald-50 text-emerald-600 border-emerald-200' :
-                  (thongTinDon.status === 'cancelled' || thongTinDon.status === 'returning') ? 'bg-red-50 text-red-600 border-red-200' :
-                  'bg-sky-50 text-sky-600 border-sky-200'
-                }`}>
-                  {thongTinDon.status === 'completed' ? <CheckCircle size={18} /> :
-                    (thongTinDon.status === 'cancelled' || thongTinDon.status === 'returning') ? <XCircle size={18} /> : <Truck size={18} />}
-
-                  {thongTinDon.status === 'pending' ? 'Chờ Lấy Hàng' :
-                    thongTinDon.status === 'picking' ? 'Lộ Trình Lấy Hàng' :
-                    thongTinDon.status === 'picked_up' ? 'Đã Lấy, Chờ Nhập Kho' :
-                    thongTinDon.status === 'at_origin_warehouse' ? 'Đã Về Kho Con Nguồn' :
-                    thongTinDon.status === 'transferring_to_central' ? 'Đang Về Kho Tổng' :
-                    thongTinDon.status === 'at_central_warehouse' ? 'Đang Phân Luồng Tại Kho Tổng' :
-                    thongTinDon.status === 'transferring_to_destination' ? 'Đang Về Kho Con Đích' :
-                    thongTinDon.status === 'at_destination_warehouse' ? 'Đã Tới Kho Con Đích' :
-                    thongTinDon.status === 'delivering' ? 'Đang Giao Hàng' :
-                    thongTinDon.status === 'completed' ? 'Giao Thành Công' :
-                    thongTinDon.status === 'returning' ? 'Đang Hoàn Hàng' : 'Đã Hủy'}
-                </div>
+                <OrderStatusBadge status={thongTinDon.status} />
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -445,7 +432,9 @@ export default function TraCuuHanhTrinh() {
                   <div className="text-slate-400 shrink-0 mt-0.5"><MapPin size={22} /></div>
                   <div>
                     <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1">Địa Chỉ Nhận</p>
-                    <p className="font-medium text-slate-700 text-xs leading-relaxed">{thongTinDon.receiver_address}</p>
+                    <p className="font-medium text-slate-700 text-xs leading-relaxed">
+                      {thongTinDon.receiver_address || 'Địa chỉ chi tiết được ẩn trên tra cứu công khai.'}
+                    </p>
                   </div>
                 </div>
               </div>
@@ -467,6 +456,19 @@ export default function TraCuuHanhTrinh() {
                     </span>
                   </div>
                 )}
+                {thongTinDon.delivery_driver_name
+                  && ['at_central_warehouse', 'at_destination_warehouse', 'delivering', 'completed'].includes(thongTinDon.status)
+                  && (
+                    <button
+                      type="button"
+                      onClick={() => window.dispatchEvent(new CustomEvent('open-driver-chat', {
+                        detail: { tracking_code: thongTinDon.tracking_code }
+                      }))}
+                      className="inline-flex items-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-5 py-2.5 text-sm font-bold text-blue-700 hover:bg-blue-100"
+                    >
+                      <MessageCircle size={16} /> Chat với tài xế giao hàng
+                    </button>
+                  )}
               </div>
             </div>
 
@@ -500,17 +502,17 @@ export default function TraCuuHanhTrinh() {
               </h4>
 
               <div className="relative pl-2">
-                {(thongTinDon.status !== 'cancelled' && thongTinDon.status !== 'returning') && (
+                {(!['cancelled', 'pickup_failed', 'delivery_failed', 'return_pending', 'returning', 'returned'].includes(thongTinDon.status)) && (
                   <div className="absolute left-[29px] top-4 bottom-8 w-0.5 bg-slate-200 -z-10"></div>
                 )}
 
-                {(thongTinDon.status === 'cancelled' || thongTinDon.status === 'returning') ? (
+                {(['cancelled', 'pickup_failed', 'delivery_failed', 'return_pending', 'returning', 'returned'].includes(thongTinDon.status)) ? (
                   <div className="flex gap-6 items-start relative pb-8">
                     <div className="w-10 h-10 rounded-full flex items-center justify-center shrink-0 bg-red-100 text-red-600 shadow-sm border-2 border-white">
                       <XCircle size={20} />
                     </div>
                     <div className="pt-1">
-                      <p className="font-bold text-red-600 text-base">Phát Thất Bại</p>
+                      <p className="font-bold text-red-600 text-base">{thongTinDon.status === 'cancelled' ? 'Đơn đã hủy' : 'Đơn giao thất bại · đang xử lý hoàn'}</p>
                       <p className="text-sm text-slate-500 mt-1">Lý do: <span className="font-medium text-red-600">{thongTinDon.fail_reason || 'Khách hàng từ chối nhận.'}</span></p>
                     </div>
                   </div>
@@ -574,21 +576,7 @@ export default function TraCuuHanhTrinh() {
                         <span className="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-emerald-500" />
                         <div>
                           <p className="font-bold text-slate-700">
-                            {{
-                              pending: 'Đã tạo đơn',
-                              picking: 'Tài xế lấy hàng đang đến Shop',
-                              picked_up: 'Đã lấy hàng, chờ nhập kho',
-                              at_origin_warehouse: 'Đã nhập kho con nguồn',
-                              transferring_to_central: 'Đang trung chuyển về kho tổng',
-                              at_central_warehouse: 'Đang phân luồng tại kho tổng',
-                              transferring_to_destination: 'Đang trung chuyển về kho con đích',
-                              at_destination_warehouse: 'Đã nhập kho con đích',
-                              in_warehouse: 'Đã nhập kho',
-                              delivering: 'Bắt đầu giao hàng',
-                              completed: 'Giao thành công',
-                              returning: 'Giao thất bại, đang hoàn hàng',
-                              cancelled: 'Đã nhận hàng hoàn tại kho'
-                            }[event.to_status] || event.to_status}
+                            {getOrderStatusLabel(event.to_status)}
                           </p>
                           {event.note && <p className="mt-0.5 text-slate-500">{event.note}</p>}
                           <time className="mt-1 block text-xs text-slate-400">

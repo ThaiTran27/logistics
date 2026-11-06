@@ -1,5 +1,6 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Routes, Route } from 'react-router-dom';
+import { apiFetch as fetch } from '../utils/apiFetch.js';
 
 import PublicLayout from '../Layouts/PublicLayout';
 import TrangChu from '../Trang/KhachHang/TrangChu';
@@ -20,26 +21,48 @@ import BanGiamDoc from '../Trang/Admin/BanGiamDoc';
 import HoSoNhanVien from '../Trang/NhanSu/HoSoNhanVien';
 import ChamCong from '../Trang/NhanSu/ChamCong';
 import TrungTamHoTro from '../Trang/HoTro/TrungTamHoTro';
+import KhongTimThay from '../Trang/KhongTimThay.jsx';
 import { Link, useLocation } from 'react-router-dom';
 import { CalendarCheck } from 'lucide-react';
+import { normalizeRole } from '../utils/workspaceRoutes.js';
 
 import BaoVeTuyenDuong from './BaoVeTuyenDuong';
+import RouteErrorBoundary from './RouteErrorBoundary';
 
 function UocTinhCuocPhi() {
   const [trongLuong, setTrongLuong] = useState(2.5);
   const [khoangCach, setKhoangCach] = useState(35);
   const [loaiDichVu, setLoaiDichVu] = useState('standard');
   const [hangDeVo, setHangDeVo] = useState(false);
-  const [khuVuc, setKhuVuc] = useState('mien-nam');
+  const [ketQua, setKetQua] = useState(null);
+  const [loiCuocPhi, setLoiCuocPhi] = useState('');
 
-  const ketQua = (() => {
-    const giaCoBan = Number(trongLuong) * 15000 + Number(khoangCach) * 1800;
-    const heSoDichVu = loaiDichVu === 'express' ? 1.45 : loaiDichVu === 'economy' ? 0.85 : 1.1;
-    const heSoKhuVuc = khuVuc === 'mien-bac' ? 1.1 : khuVuc === 'mien-trung' ? 1.05 : 1.0;
-    const heSoHang = hangDeVo ? 1.18 : 1;
-    const tong = Math.round(giaCoBan * heSoDichVu * heSoKhuVuc * heSoHang);
-    return { tong, phanTram: Math.round((tong / 250000) * 100) };
-  })();
+  useEffect(() => {
+    let active = true;
+    const params = new URLSearchParams({
+      weight_kg: String(trongLuong),
+      distance_km: String(khoangCach),
+      service_type: loaiDichVu,
+      fragile: String(hangDeVo)
+    });
+    fetch(`http://localhost:5000/api/pricing/estimate?${params}`)
+      .then(async (response) => {
+        const result = await response.json();
+        if (!response.ok || !result.success) throw new Error(result.message || 'Không tải được bảng giá hiện hành.');
+        if (active) {
+          const total = Number(result.data.shipping_fee);
+          setKetQua({ tong: total, phanTram: Math.round((total / 250000) * 100) });
+          setLoiCuocPhi('');
+        }
+      })
+      .catch((error) => {
+        if (active) {
+          setKetQua(null);
+          setLoiCuocPhi(error.message || 'Không tải được bảng giá hiện hành.');
+        }
+      });
+    return () => { active = false; };
+  }, [trongLuong, khoangCach, loaiDichVu, hangDeVo]);
 
   return (
     <div className="mx-auto max-w-5xl px-4 py-12">
@@ -73,12 +96,8 @@ function UocTinhCuocPhi() {
             </label>
 
             <label className="block text-sm font-bold text-slate-700">
-              Khu vực giao hàng
-              <select value={khuVuc} onChange={(e) => setKhuVuc(e.target.value)} className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-50 p-3 outline-none focus:border-blue-400 focus:bg-white">
-                <option value="mien-nam">Miền Nam</option>
-                <option value="mien-trung">Miền Trung</option>
-                <option value="mien-bac">Miền Bắc</option>
-              </select>
+              Khu vực phục vụ
+              <div className="mt-2 rounded-xl border border-slate-200 bg-slate-50 p-3">Gò Vấp, TP. Hồ Chí Minh</div>
             </label>
           </div>
 
@@ -90,8 +109,8 @@ function UocTinhCuocPhi() {
 
         <div className="rounded-[28px] border border-blue-100 bg-gradient-to-br from-blue-600 to-indigo-700 p-6 text-white shadow-lg shadow-blue-200">
           <p className="text-xs font-black uppercase tracking-[0.22em] text-blue-100">Dự kiến</p>
-          <h2 className="mt-4 text-4xl font-black">{ketQua.tong.toLocaleString()} đ</h2>
-          <p className="mt-3 text-sm text-blue-100">Tương đương khoảng {ketQua.phanTram}% giá trị đối với gói vận chuyển tiêu chuẩn</p>
+          <h2 className="mt-4 text-4xl font-black">{ketQua ? `${ketQua.tong.toLocaleString()} đ` : '—'}</h2>
+          <p className="mt-3 text-sm text-blue-100">{loiCuocPhi || (ketQua ? `Tương đương khoảng ${ketQua.phanTram}% giá trị đối với gói vận chuyển tiêu chuẩn` : 'Đang tính theo bảng giá hiện hành...')}</p>
 
           <div className="mt-6 space-y-3 rounded-2xl bg-white/10 p-4 text-sm backdrop-blur-sm">
             <div className="flex justify-between"><span>Trọng lượng</span><strong>{trongLuong} kg</strong></div>
@@ -168,13 +187,28 @@ export default function DieuHuongChinh() {
   const isPublicCustomerPage = location.pathname === '/'
     || ['/dich-vu', '/bang-gia', '/tin-tuc', '/tuyen-dung', '/uoc-tinh-cuoc', '/tim-buu-cuc'].includes(location.pathname)
     || location.pathname.startsWith('/tin-tuc/');
+  const allowedRolesByPath = {
+    '/phong-ban-noi-dung': ['content_manager', 'director'],
+    '/cua-hang': ['shop'],
+    '/tai-xe': ['driver', 'pickup_driver', 'delivery_driver', 'linehaul_driver'],
+    '/kho': ['warehouse_manager', 'fleet_manager', 'director'],
+    '/quan-ly-kho': ['director'],
+    '/dieu-hanh': ['fleet_manager', 'director'],
+    '/ke-toan': ['accountant', 'director'],
+    '/nhan-su': ['hr_manager', 'director'],
+    '/cham-cong': ['pickup_driver', 'delivery_driver', 'warehouse_manager', 'fleet_manager', 'linehaul_driver', 'accountant', 'hr_manager', 'director', 'shop', 'content_manager', 'customer_service'],
+    '/admin': ['director'],
+    '/ho-tro': ['director', 'customer_service', 'fleet_manager']
+  };
+  const normalizedUserRole = normalizeRole(userRole);
   const showAttendanceShortcut = userRole
-    && !['customer', 'shop'].includes(userRole)
+    && allowedRolesByPath[location.pathname]?.includes(normalizedUserRole)
     && !isPublicCustomerPage
     && location.pathname !== '/cham-cong';
 
   return (
     <>
+    <RouteErrorBoundary key={location.pathname}>
     <Routes>
       <Route element={<PublicLayout />}>
         <Route path="/" element={<TrangChu />} />
@@ -188,7 +222,7 @@ export default function DieuHuongChinh() {
       </Route>
 
       <Route path="/phong-ban-noi-dung" element={
-        <BaoVeTuyenDuong allowedRoles={['content_manager']}><QuanLyTinTuc /></BaoVeTuyenDuong>
+        <BaoVeTuyenDuong allowedRoles={['content_manager', 'director']}><QuanLyTinTuc /></BaoVeTuyenDuong>
       } />
       <Route path="/dang-nhap" element={<DangNhap />} />
 
@@ -201,7 +235,7 @@ export default function DieuHuongChinh() {
       } />
 
       <Route path="/kho" element={
-        <BaoVeTuyenDuong allowedRoles={['warehouse_manager']}><QuetMaVach /></BaoVeTuyenDuong>
+        <BaoVeTuyenDuong allowedRoles={['warehouse_manager', 'fleet_manager', 'director']}><QuetMaVach /></BaoVeTuyenDuong>
       } />
 
       <Route path="/quan-ly-kho" element={
@@ -209,30 +243,32 @@ export default function DieuHuongChinh() {
       } />
 
       <Route path="/dieu-hanh" element={
-        <BaoVeTuyenDuong allowedRoles={['fleet_manager']}><TrungTamDieuPhoi /></BaoVeTuyenDuong>
+        <BaoVeTuyenDuong allowedRoles={['fleet_manager', 'director']}><TrungTamDieuPhoi /></BaoVeTuyenDuong>
       } />
 
       <Route path="/ke-toan" element={
-        <BaoVeTuyenDuong allowedRoles={['accountant']}><DoiSoatCOD /></BaoVeTuyenDuong>
+        <BaoVeTuyenDuong allowedRoles={['accountant', 'director']}><DoiSoatCOD /></BaoVeTuyenDuong>
       } />
 
       <Route path="/nhan-su" element={
-        <BaoVeTuyenDuong allowedRoles={['hr_manager']}><HoSoNhanVien /></BaoVeTuyenDuong>
+        <BaoVeTuyenDuong allowedRoles={['hr_manager', 'director']}><HoSoNhanVien /></BaoVeTuyenDuong>
       } />
 
       <Route path="/cham-cong" element={
-        <BaoVeTuyenDuong allowedRoles={['driver', 'pickup_driver', 'delivery_driver', 'warehouse_manager', 'fleet_manager', 'accountant', 'hr_manager', 'director', 'content_manager']}><ChamCong /></BaoVeTuyenDuong>
+        <BaoVeTuyenDuong allowedRoles={['pickup_driver', 'delivery_driver', 'warehouse_manager', 'fleet_manager', 'linehaul_driver', 'accountant', 'hr_manager', 'director', 'shop', 'content_manager', 'customer_service']}><ChamCong /></BaoVeTuyenDuong>
       } />
 
       <Route path="/admin" element={
         <BaoVeTuyenDuong allowedRoles={['director']}><BanGiamDoc /></BaoVeTuyenDuong>
       } />
       <Route path="/ho-tro" element={
-        <BaoVeTuyenDuong allowedRoles={['admin', 'director', 'customer_service', 'cskh', 'fleet_manager', 'coordinator']}><TrungTamHoTro /></BaoVeTuyenDuong>
+        <BaoVeTuyenDuong allowedRoles={['admin', 'director', 'customer_service', 'customer_support', 'cskh', 'support', 'fleet_manager', 'fleet', 'coordinator', 'dispatcher', 'dieu_hanh']}><TrungTamHoTro /></BaoVeTuyenDuong>
       } />
+      <Route path="*" element={<KhongTimThay />} />
     </Routes>
+    </RouteErrorBoundary>
     {showAttendanceShortcut && (
-      <Link to="/cham-cong" title="Mở chấm công" className="fixed bottom-5 right-5 z-[60] flex items-center gap-2 bg-emerald-700 px-4 py-3 text-sm font-bold text-white shadow-lg hover:bg-emerald-800">
+      <Link to="/cham-cong" title="Mở chấm công" className="fixed bottom-[calc(4rem+env(safe-area-inset-bottom)+12px)] right-5 z-40 flex items-center gap-2 bg-emerald-700 px-4 py-3 text-sm font-bold text-white shadow-lg hover:bg-emerald-800">
         <CalendarCheck size={18} /> Chấm công
       </Link>
     )}

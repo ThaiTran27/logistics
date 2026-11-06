@@ -1,9 +1,7 @@
-import { apiFetch as fetch } from '../../utils/apiFetch.js';
+import { API_URL, apiFetch as fetch } from '../../utils/apiFetch.js';
 import { useEffect, useRef, useState } from 'react';
 import { ArrowLeft, Camera, CalendarCheck, Clock3, LogIn, LogOut, RefreshCw, X, MapPin, Users } from 'lucide-react';
 import { Link } from 'react-router-dom';
-
-const API_URL = (import.meta.env.VITE_API_URL || 'http://localhost:5000').replace(/\/+$/, '');
 
 const thangHienTai = () => {
   const now = new Date();
@@ -350,7 +348,7 @@ export default function ChamCong() {
                         </td>
                         <td className="py-3">
                           {hasCoordinates(record.check_in_lat, record.check_in_lng)
-                            ? <a href={`https://www.google.com/maps/search/?api=1&query=${record.check_in_lat},${record.check_in_lng}`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 font-bold text-blue-700"><MapPin size={14} /> Xem bản đồ</a>
+                            ? <span className="inline-flex items-center gap-1 font-bold text-slate-600"><MapPin size={14} /> {Number(record.check_in_lat).toFixed(5)}, {Number(record.check_in_lng).toFixed(5)}</span>
                             : <span className="text-slate-400">Chưa có</span>}
                         </td>
                         <td className="py-3">
@@ -360,7 +358,7 @@ export default function ChamCong() {
                         </td>
                         <td className="py-3">
                           {hasCoordinates(record.check_out_lat, record.check_out_lng)
-                            ? <a href={`https://www.google.com/maps/search/?api=1&query=${record.check_out_lat},${record.check_out_lng}`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 font-bold text-blue-700"><MapPin size={14} /> Xem bản đồ</a>
+                            ? <span className="inline-flex items-center gap-1 font-bold text-slate-600"><MapPin size={14} /> {Number(record.check_out_lat).toFixed(5)}, {Number(record.check_out_lng).toFixed(5)}</span>
                             : <span className="text-slate-400">Chưa có</span>}
                         </td>
                       </>}

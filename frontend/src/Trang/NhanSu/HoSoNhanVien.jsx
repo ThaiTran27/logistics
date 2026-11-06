@@ -1,4 +1,4 @@
-import { apiFetch as fetch } from '../../utils/apiFetch.js';
+import { API_URL, apiFetch as fetch } from '../../utils/apiFetch.js';
 import { useState, useEffect } from 'react';
 import {
   Users,
@@ -24,7 +24,7 @@ import {
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 
-const API_URL = 'http://localhost:5000';
+const formatVnd = (value) => BigInt(String(value ?? '0')).toLocaleString('vi-VN');
 
 const defaultForm = {
   full_name: '',
@@ -50,10 +50,19 @@ export default function HoSoNhanVien() {
   const [editingId, setEditingId] = useState(null);
   const [submitting, setSubmitting] = useState(false);
   const [thangXem, setThangXem] = useState(() => new Date().toISOString().slice(0, 7));
+  const [ngayHieuLucLuong, setNgayHieuLucLuong] = useState(() => new Date().toISOString().slice(0, 10));
   const [chamCongList, setChamCongList] = useState([]);
   const [bangLuong, setBangLuong] = useState([]);
+  const [periodInfo, setPeriodInfo] = useState({ status: 'open' });
+  const [lockingPeriod, setLockingPeriod] = useState(false);
   const [luongChinhSua, setLuongChinhSua] = useState({});
   const [anhChamCongDangXem, setAnhChamCongDangXem] = useState(null);
+  const [boLocBangLuong, setBoLocBangLuong] = useState({
+    keyword: '',
+    role: '',
+    minimumSalary: '',
+    maximumSalary: ''
+  });
 
   const hrName = localStorage.getItem('full_name') || 'Phòng Nhân Sự';
 
@@ -83,14 +92,9 @@ export default function HoSoNhanVien() {
           </button>
         ) : <span className="text-xs text-slate-400">Chưa có ảnh</span>}
         {hasCoordinates ? (
-          <a
-            href={`https://maps.google.com/?q=${encodeURIComponent(`${Number(lat)},${Number(lng)}`)}`}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-flex items-center gap-1 text-xs font-bold text-blue-700 hover:underline"
-          >
-            <MapPin size={14} /> Bản đồ
-          </a>
+          <span className="inline-flex items-center gap-1 text-xs font-bold text-slate-600">
+            <MapPin size={14} /> GPS: {Number(lat).toFixed(5)}, {Number(lng).toFixed(5)}
+          </span>
         ) : <span className="text-xs text-slate-400">Chưa có GPS</span>}
       </div>
     );
@@ -149,10 +153,13 @@ export default function HoSoNhanVien() {
         .catch((error) => console.error('Lỗi tải bảng chấm công:', error));
     }
     if (tabHienTai === 'bang-luong') {
-      fetch(`http://localhost:5000/api/hr/payroll?month=${thangXem}`)
-        .then((response) => response.json())
-        .then((data) => { if (data.success) setBangLuong(data.data || []); })
-        .catch((error) => console.error('Lỗi tải bảng lương:', error));
+      Promise.all([
+        fetch(`${API_URL}/api/hr/payroll?month=${thangXem}`).then((response) => response.json()),
+        fetch(`${API_URL}/api/hr/payroll/period/${thangXem}`).then((response) => response.json())
+      ]).then(([payroll, period]) => {
+        if (payroll.success) setBangLuong(payroll.data || []);
+        if (period.success) setPeriodInfo(period.data);
+      }).catch((error) => console.error('Lỗi tải bảng lương:', error));
     }
   }, [tabHienTai, thangXem]);
 
@@ -170,19 +177,20 @@ export default function HoSoNhanVien() {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          monthly_salary: draft.monthly_salary ?? person.monthly_salary,
-          allowance: draft.allowance ?? person.allowance,
-          bonus_per_delivery: draft.bonus_per_delivery ?? person.bonus_per_delivery ?? 0,
+          monthly_salary: String(draft.monthly_salary ?? person.monthly_salary),
+          allowance: String(draft.allowance ?? person.allowance ?? 0),
+          bonus_per_delivery: String(draft.bonus_per_delivery ?? person.bonus_per_delivery ?? 0),
+          commission_rate: draft.commission_rate ?? person.commission_rate ?? 0,
+          tenure_raise_percent: draft.tenure_raise_percent ?? person.tenure_raise_percent ?? 0,
+          effective_from: ngayHieuLucLuong,
         }),
       });
       const data = await response.json();
       if (!response.ok || !data.success) throw new Error(data.message || 'Không thể lưu mức lương.');
-      setBangLuong((current) => current.map((item) => item.id === person.id ? {
-        ...item,
-        monthly_salary: draft.monthly_salary ?? item.monthly_salary,
-        allowance: draft.allowance ?? item.allowance,
-        bonus_per_delivery: draft.bonus_per_delivery ?? item.bonus_per_delivery,
-      } : item));
+      const refresh = await fetch(`http://localhost:5000/api/hr/payroll?month=${thangXem}`);
+      const payroll = await refresh.json();
+      if (!refresh.ok || !payroll.success) throw new Error(payroll.message || 'Đã lưu nhưng không thể tải lại bảng lương.');
+      setBangLuong(payroll.data || []);
       setLuongChinhSua((current) => { const next = { ...current }; delete next[person.id]; return next; });
     } catch (error) {
       alert(error.message || 'Lỗi kết nối máy chủ.');
@@ -190,10 +198,10 @@ export default function HoSoNhanVien() {
   };
 
   const ghiDieuChinhLuong = async (person, adjustmentType) => {
-    const amountInput = window.prompt(`Nhập số tiền ${adjustmentType === 'bonus' ? 'thưởng' : 'khấu trừ'} cho ${person.full_name}:`);
+    const amountInput = window.prompt(`Nhập số nguyên VND (không dấu phân cách) để ${adjustmentType === 'bonus' ? 'thưởng' : 'khấu trừ'} cho ${person.full_name}:`);
     if (amountInput === null) return;
-    const amount = Number(amountInput);
-    if (!Number.isFinite(amount) || amount <= 0) return alert('Số tiền phải lớn hơn 0.');
+    const amount = amountInput.trim();
+    if (!/^[1-9]\d*$/.test(amount)) return alert('Số tiền phải là số nguyên VND lớn hơn 0.');
     const reason = window.prompt('Nhập lý do điều chỉnh:');
     if (!reason?.trim()) return alert('Cần nhập lý do điều chỉnh.');
     try {
@@ -213,23 +221,152 @@ export default function HoSoNhanVien() {
     }
   };
 
+  const taiBangLuong = async () => {
+    const [payrollResponse, periodResponse] = await Promise.all([
+      fetch(`${API_URL}/api/hr/payroll?month=${thangXem}`),
+      fetch(`${API_URL}/api/hr/payroll/period/${thangXem}`)
+    ]);
+    const [payroll, period] = await Promise.all([payrollResponse.json(), periodResponse.json()]);
+    if (!payrollResponse.ok || !payroll.success) throw new Error(payroll.message || 'Không tải được bảng lương.');
+    if (!periodResponse.ok || !period.success) throw new Error(period.message || 'Không tải được trạng thái kỳ lương.');
+    setBangLuong(payroll.data || []);
+    setPeriodInfo(period.data);
+  };
+
+  const chotKyLuong = async () => {
+    if (!window.confirm(`Chốt kỳ lương ${thangXem}? Sau khi chốt, chỉ được thay đổi bằng điều chỉnh có audit.`)) return;
+    setLockingPeriod(true);
+    try {
+      const response = await fetch(`${API_URL}/api/hr/payroll/period/${thangXem}/lock`, { method: 'POST' });
+      const data = await response.json();
+      if (!response.ok || !data.success) throw new Error(data.message || 'Không thể chốt kỳ lương.');
+      await taiBangLuong();
+      alert(data.message);
+    } catch (error) {
+      alert(error.message || 'Lỗi kết nối máy chủ.');
+    } finally {
+      setLockingPeriod(false);
+    }
+  };
+
+  const themKhauTru = async (person, deductionType) => {
+    const amount = window.prompt(
+      `Nhập số nguyên VND ${deductionType === 'advance' ? 'khoản tạm ứng' : 'khoản ký quỹ'} của ${person.full_name}:`
+    );
+    if (amount === null) return;
+    if (!/^[1-9]\d*$/.test(amount.trim())) return alert('Số tiền phải là số nguyên VND lớn hơn 0.');
+    const reason = window.prompt('Nhập lý do:');
+    if (!reason?.trim()) return alert('Cần nhập lý do.');
+    try {
+      const response = await fetch(`${API_URL}/api/hr/payroll/${person.id}/deductions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          month: thangXem,
+          deduction_type: deductionType,
+          amount: amount.trim(),
+          reason: reason.trim()
+        })
+      });
+      const data = await response.json();
+      if (!response.ok || !data.success) throw new Error(data.message || 'Không lưu được khoản khấu trừ.');
+      alert(data.message);
+    } catch (error) {
+      alert(error.message || 'Lỗi kết nối máy chủ.');
+    }
+  };
+
+  const taiPhieuLuong = async (person, format) => {
+    try {
+      if (format === 'pdf') {
+        const response = await fetch(`${API_URL}/api/hr/payroll/payslips/${person.id}/pdf?month=${thangXem}`);
+        if (!response.ok) {
+          const error = await response.json();
+          throw new Error(error.message || 'Không tải được PDF phiếu lương.');
+        }
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `phieu-luong-${thangXem}-${person.id}.pdf`;
+        link.click();
+        URL.revokeObjectURL(url);
+        return;
+      }
+      const response = await fetch(`${API_URL}/api/hr/payroll/payslips/${person.id}?month=${thangXem}`);
+      const data = await response.json();
+      if (!response.ok || !data.success) throw new Error(data.message || 'Không tải được chi tiết phiếu lương.');
+      const slip = data.data;
+      const summaryRows = [
+        { 'Khoản': 'Nhân viên', 'Giá trị': slip.full_name },
+        { 'Khoản': 'Kỳ lương', 'Giá trị': slip.payroll_month },
+        { 'Khoản': 'Tổng thu nhập (VND)', 'Giá trị': String(slip.gross_amount) },
+        { 'Khoản': 'Tổng khấu trừ (VND)', 'Giá trị': String(slip.deduction_amount) },
+        { 'Khoản': 'Thực nhận (VND)', 'Giá trị': String(slip.net_amount) }
+      ];
+      const lineRows = slip.lines.map((line) => ({
+        Loại: line.line_type,
+        Nội_dung: line.description,
+        'Số tiền (VND)': String(line.amount),
+        'Mã đơn': line.order_id || '',
+        'Nguồn': line.source_type || '',
+        'Mã quy tắc': line.rule_id || ''
+      }));
+      const workbook = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(summaryRows), 'Tong hop');
+      XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(lineRows), 'Chi tiet');
+      XLSX.writeFile(workbook, `phieu-luong-${thangXem}-${person.id}.xlsx`);
+    } catch (error) {
+      alert(error.message || 'Không thể xuất phiếu lương.');
+    }
+  };
+
+  const tinhLuongDuKien = (person) => {
+    if (periodInfo.status === 'locked') {
+      return Number(person.net_amount || person.estimated_salary || 0);
+    }
+    const draft = luongChinhSua[person.id] || {};
+    const salary = Number(draft.monthly_salary ?? person.monthly_salary ?? 0);
+    const allowance = Number(draft.allowance ?? person.allowance ?? 0);
+    const bonusPerDelivery = Number(draft.bonus_per_delivery ?? person.bonus_per_delivery ?? 0);
+    const tenureRaisePercent = Number(draft.tenure_raise_percent ?? person.tenure_raise_percent ?? 0);
+    const tenureBonus = salary * tenureRaisePercent * Number(person.tenure_years || 0) / 100;
+    return salary + tenureBonus + allowance
+      + bonusPerDelivery * Number(person.completed_deliveries || 0)
+      + Number(person.commission_amount || 0)
+      + Number(person.event_rule_earnings || 0)
+      + Number(person.manual_bonus || 0)
+      - Number(person.deductions || 0);
+  };
+  const vaiTroBangLuong = [...new Set(bangLuong.map((person) => person.role).filter(Boolean))].sort();
+  const bangLuongDaLoc = bangLuong.filter((person) => {
+    const keyword = boLocBangLuong.keyword.trim().toLocaleLowerCase('vi');
+    const name = String(person.full_name || '').toLocaleLowerCase('vi');
+    const email = String(person.email || '').toLocaleLowerCase('vi');
+    const estimatedSalary = tinhLuongDuKien(person);
+    return (!keyword || name.includes(keyword) || email.includes(keyword))
+      && (!boLocBangLuong.role || person.role === boLocBangLuong.role)
+      && (boLocBangLuong.minimumSalary === '' || estimatedSalary >= Number(boLocBangLuong.minimumSalary))
+      && (boLocBangLuong.maximumSalary === '' || estimatedSalary <= Number(boLocBangLuong.maximumSalary));
+  });
+
   const xuatBangLuong = () => {
-    const rows = bangLuong.map((person) => ({
+    const rows = bangLuongDaLoc.map((person) => ({
       'Nhân viên': person.full_name,
       Email: person.email,
       'Chức vụ': dichTenChucVu(person.role),
       'Ngày công': Number(person.attendance_days || 0),
       'Đơn giao thành công': Number(person.completed_deliveries || 0),
       'Lương tháng': Number(person.monthly_salary || 0),
+      'Số năm thâm niên': Number(person.tenure_years || 0),
+      'Phụ trội thâm niên': Number(person.tenure_bonus_amount || 0),
       'Phụ cấp': Number(person.allowance || 0),
       'Thưởng giao hàng': Number(person.completed_deliveries || 0) * Number(person.bonus_per_delivery || 0),
+      'Hoa hồng theo giá trị đơn': Number(person.commission_amount || 0),
+      'Thưởng theo quy tắc sự kiện': Number(person.event_rule_earnings || 0),
       'Thưởng bổ sung': Number(person.manual_bonus || 0),
       'Khấu trừ': Number(person.deductions || 0),
-      'Lương dự kiến': Number(person.monthly_salary || 0)
-        + Number(person.allowance || 0)
-        + Number(person.completed_deliveries || 0) * Number(person.bonus_per_delivery || 0)
-        + Number(person.manual_bonus || 0)
-        - Number(person.deductions || 0)
+      'Lương dự kiến': tinhLuongDuKien(person)
     }));
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(rows), 'Bang luong');
@@ -398,6 +535,8 @@ export default function HoSoNhanVien() {
     const roles = {
       shop: 'Cửa Hàng',
       driver: 'Tài Xế',
+      pickup_driver: 'Tài Xế Lấy Hàng',
+      delivery_driver: 'Tài Xế Giao Hàng',
       linehaul_driver: 'Tài Xế Xe Tải',
       warehouse_manager: 'Thủ Kho',
       fleet_manager: 'Điều Phối Viên',
@@ -405,6 +544,7 @@ export default function HoSoNhanVien() {
       hr_manager: 'Nhân Sự',
       director: 'Giám Đốc',
       content_manager: 'Phòng Nội Dung',
+      customer_service: 'Chăm Sóc Khách Hàng',
     };
     return roles[String(role || '').toLowerCase()] || role;
   };
@@ -838,38 +978,63 @@ export default function HoSoNhanVien() {
         {tabHienTai === 'bang-luong' && (
           <section className="overflow-hidden border border-rose-100 bg-white shadow-sm">
             <div className="flex flex-wrap items-center justify-between gap-4 border-b border-rose-100 p-5">
-              <div><h2 className="font-black text-slate-800">Bảng lương tháng</h2><p className="mt-1 text-sm text-slate-500">Lương + phụ cấp + thưởng theo đơn + thưởng bổ sung − khấu trừ.</p></div>
-              <div className="flex flex-wrap items-center gap-3"><input type="month" value={thangXem} onChange={(event) => setThangXem(event.target.value)} className="border border-slate-200 bg-white p-2 font-bold text-slate-700" /><button type="button" onClick={xuatBangLuong} className="rounded-lg bg-emerald-600 px-4 py-2 font-bold text-white">Xuất Excel</button></div>
+              <div><h2 className="font-black text-slate-800">Bảng lương tháng</h2><p className="mt-1 text-sm text-slate-500">Lương theo ngày công + sự kiện + thưởng − khấu trừ. Quy tắc và khoản thưởng được lưu cùng snapshot khi chốt.</p><p className={`mt-2 text-xs font-black uppercase ${periodInfo.status === 'locked' ? 'text-emerald-700' : 'text-amber-700'}`}>{periodInfo.status === 'locked' ? `ĐÃ CHỐT${periodInfo.locked_at ? ` · ${new Date(periodInfo.locked_at).toLocaleString('vi-VN')}` : ''}` : 'ĐANG MỞ · CÒN CÓ THỂ ĐIỀU CHỈNH'}</p></div>
+              <div className="flex flex-wrap items-center gap-3"><label className="text-xs font-bold text-slate-500">Tháng xem<input type="month" value={thangXem} onChange={(event) => setThangXem(event.target.value)} className="ml-2 border border-slate-200 bg-white p-2 font-bold text-slate-700" /></label>{periodInfo.status === 'open' && <label className="text-xs font-bold text-slate-500">Ngày hiệu lực khi lưu<input type="date" value={ngayHieuLucLuong} onChange={(event) => setNgayHieuLucLuong(event.target.value)} className="ml-2 border border-slate-200 bg-white p-2 font-bold text-slate-700" /></label>}<button type="button" onClick={xuatBangLuong} className="rounded-lg bg-emerald-600 px-4 py-2 font-bold text-white">Xuất Excel</button>{periodInfo.status === 'open' && <button type="button" disabled={lockingPeriod} onClick={chotKyLuong} className="rounded-lg bg-indigo-700 px-4 py-2 font-bold text-white disabled:opacity-50">{lockingPeriod ? 'Đang chốt…' : 'Chốt kỳ lương'}</button>}</div>
+            </div>
+            <aside className="border-b border-sky-100 bg-sky-50 p-5 text-sm text-sky-950">
+              <h3 className="font-black">Cách đọc bảng lương</h3>
+              <p className="mt-1"><strong>Lương tháng</strong> là mức lương cấu hình; <strong>ngày công</strong> và <strong>đơn thành công</strong> là số liệu thực tế trong tháng.</p>
+              <p className="mt-1"><strong>Tổng dự kiến</strong> cộng lương tháng, thâm niên, phụ cấp, thưởng theo đơn, hoa hồng, thưởng quy tắc và thưởng thêm; sau đó trừ các khoản khấu trừ. Khi kỳ đã chốt, bảng hiển thị số thực nhận từ snapshot.</p>
+              <p className="mt-1 text-xs text-sky-800">Đơn giá và quy tắc áp dụng lấy từ cấu hình có hiệu lực trong hệ thống. COD thu hộ không phải tiền lương. Dùng PDF/Excel chi tiết để xem các khoản của phiếu đã chốt.</p>
+            </aside>
+            <div className="grid gap-3 border-b border-rose-100 bg-white p-5 sm:grid-cols-2 xl:grid-cols-[minmax(200px,1.2fr)_minmax(160px,0.8fr)_minmax(160px,0.8fr)_minmax(160px,0.8fr)_auto]">
+              <label className="text-xs font-bold text-slate-600">Tìm nhân viên
+                <input type="search" value={boLocBangLuong.keyword} onChange={(event) => setBoLocBangLuong((current) => ({ ...current, keyword: event.target.value }))} placeholder="Tên hoặc email" className="mt-1 block w-full rounded-lg border border-slate-200 bg-white p-2 text-sm font-medium" />
+              </label>
+              <label className="text-xs font-bold text-slate-600">Chức vụ
+                <select value={boLocBangLuong.role} onChange={(event) => setBoLocBangLuong((current) => ({ ...current, role: event.target.value }))} className="mt-1 block w-full rounded-lg border border-slate-200 bg-white p-2 text-sm font-medium">
+                  <option value="">Tất cả chức vụ</option>
+                  {vaiTroBangLuong.map((role) => <option key={role} value={role}>{dichTenChucVu(role)}</option>)}
+                </select>
+              </label>
+              <label className="text-xs font-bold text-slate-600">Tổng dự kiến từ (đ)
+                <input type="number" min="0" step="1" value={boLocBangLuong.minimumSalary} onChange={(event) => setBoLocBangLuong((current) => ({ ...current, minimumSalary: event.target.value }))} className="mt-1 block w-full rounded-lg border border-slate-200 bg-white p-2 text-sm font-medium" />
+              </label>
+              <label className="text-xs font-bold text-slate-600">Tổng dự kiến đến (đ)
+                <input type="number" min="0" step="1" value={boLocBangLuong.maximumSalary} onChange={(event) => setBoLocBangLuong((current) => ({ ...current, maximumSalary: event.target.value }))} className="mt-1 block w-full rounded-lg border border-slate-200 bg-white p-2 text-sm font-medium" />
+              </label>
+              <button type="button" onClick={() => setBoLocBangLuong({ keyword: '', role: '', minimumSalary: '', maximumSalary: '' })} className="self-end rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-100">Xóa lọc</button>
+              <p className="text-xs font-semibold text-slate-500 sm:col-span-2 xl:col-span-5">Đang hiển thị {bangLuongDaLoc.length} / {bangLuong.length} nhân viên</p>
             </div>
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[900px] text-left">
-                <thead className="bg-[#FFF5F6] text-xs uppercase text-rose-500"><tr><th className="p-4">Nhân viên</th><th className="p-4">Chức vụ</th><th className="p-4">Ngày công</th><th className="p-4">Đơn thành công</th><th className="p-4">Lương tháng</th><th className="p-4">Phụ cấp</th><th className="p-4">Thưởng / đơn</th><th className="p-4">Thưởng thêm</th><th className="p-4">Khấu trừ</th><th className="p-4">Tổng dự kiến</th><th className="p-4">Lưu</th></tr></thead>
+              <table className="w-full min-w-[1400px] text-left">
+                <thead className="bg-[#FFF5F6] text-xs uppercase text-rose-500"><tr><th className="p-4">Nhân viên</th><th className="p-4">Chức vụ</th><th className="p-4">Ngày công</th><th className="p-4">Đơn thành công</th><th className="p-4">Lương tháng</th><th className="p-4">Tăng thâm niên %/năm</th><th className="p-4">Hoa hồng %</th><th className="p-4">Phụ cấp</th><th className="p-4">Thưởng / đơn</th><th className="p-4">Thưởng quy tắc</th><th className="p-4">Thưởng thêm</th><th className="p-4">Khấu trừ</th><th className="p-4">Tổng dự kiến</th><th className="p-4">Lưu</th></tr></thead>
                 <tbody className="divide-y divide-rose-50">
-                  {bangLuong.length ? bangLuong.map((person) => {
+                  {bangLuongDaLoc.length ? bangLuongDaLoc.map((person) => {
                     const draft = luongChinhSua[person.id] || {};
+                    const estimatedSalary = tinhLuongDuKien(person);
                     const salary = Number(draft.monthly_salary ?? person.monthly_salary ?? 0);
-                    const allowance = Number(draft.allowance ?? person.allowance ?? 0);
-                    const bonusPerDelivery = Number(draft.bonus_per_delivery ?? person.bonus_per_delivery ?? 0);
-                    const estimatedSalary = salary + allowance
-                      + bonusPerDelivery * Number(person.completed_deliveries || 0)
-                      + Number(person.manual_bonus || 0)
-                      - Number(person.deductions || 0);
+                    const tenureRaisePercent = Number(draft.tenure_raise_percent ?? person.tenure_raise_percent ?? 0);
+                    const tenureBonus = salary * tenureRaisePercent * Number(person.tenure_years || 0) / 100;
                     return (
                       <tr key={person.id}>
                         <td className="p-4"><p className="font-bold">{person.full_name}</p><p className="text-xs text-slate-500">{person.email}</p></td>
                         <td className="p-4">{dichTenChucVu(person.role)}</td>
                         <td className="p-4">{person.attendance_days}</td>
                         <td className="p-4">{person.completed_deliveries}</td>
-                        <td className="p-4"><input type="number" min="0" step="1000" aria-label={`Lương tháng ${person.full_name}`} value={draft.monthly_salary ?? person.monthly_salary} onChange={(event) => capNhatLuongNhap(person.id, 'monthly_salary', event.target.value)} className="w-36 border border-slate-200 p-2" /></td>
-                        <td className="p-4"><input type="number" min="0" step="1000" aria-label={`Phụ cấp ${person.full_name}`} value={draft.allowance ?? person.allowance} onChange={(event) => capNhatLuongNhap(person.id, 'allowance', event.target.value)} className="w-32 border border-slate-200 p-2" /></td>
-                        <td className="p-4"><input type="number" min="0" step="1000" aria-label={`Thưởng trên đơn ${person.full_name}`} value={draft.bonus_per_delivery ?? person.bonus_per_delivery ?? 0} onChange={(event) => capNhatLuongNhap(person.id, 'bonus_per_delivery', event.target.value)} className="w-32 border border-slate-200 p-2" /></td>
+                        <td className="p-4"><input type="number" min="0" step="1000" disabled={periodInfo.status === 'locked'} aria-label={`Lương tháng ${person.full_name}`} value={draft.monthly_salary ?? person.monthly_salary} onChange={(event) => capNhatLuongNhap(person.id, 'monthly_salary', event.target.value)} className="w-36 border border-slate-200 p-2 disabled:bg-slate-100" /></td>
+                        <td className="p-4"><div className="flex flex-col gap-1"><input type="number" min="0" max="100" step="0.1" disabled={periodInfo.status === 'locked'} aria-label={`Tăng lương thâm niên mỗi năm ${person.full_name}`} value={draft.tenure_raise_percent ?? person.tenure_raise_percent ?? 0} onChange={(event) => capNhatLuongNhap(person.id, 'tenure_raise_percent', event.target.value)} className="w-28 border border-slate-200 p-2 disabled:bg-slate-100" /><span className="text-xs text-slate-500">{person.tenure_years || 0} năm · +{tenureBonus.toLocaleString('vi-VN')} đ</span></div></td>
+                        <td className="p-4"><div className="flex flex-col gap-1"><input type="number" min="0" max="100" step="0.1" disabled={periodInfo.status === 'locked'} aria-label={`Hoa hồng theo đơn ${person.full_name}`} value={draft.commission_rate ?? person.commission_rate ?? 0} onChange={(event) => capNhatLuongNhap(person.id, 'commission_rate', event.target.value)} className="w-24 border border-slate-200 p-2 disabled:bg-slate-100" /><span className="text-xs text-slate-500">+{Number(person.commission_amount || 0).toLocaleString('vi-VN')} đ</span></div></td>
+                        <td className="p-4"><input type="number" min="0" step="1000" disabled={periodInfo.status === 'locked'} aria-label={`Phụ cấp ${person.full_name}`} value={draft.allowance ?? person.allowance} onChange={(event) => capNhatLuongNhap(person.id, 'allowance', event.target.value)} className="w-32 border border-slate-200 p-2 disabled:bg-slate-100" /></td>
+                        <td className="p-4"><input type="number" min="0" step="1000" disabled={periodInfo.status === 'locked'} aria-label={`Thưởng trên đơn ${person.full_name}`} value={draft.bonus_per_delivery ?? person.bonus_per_delivery ?? 0} onChange={(event) => capNhatLuongNhap(person.id, 'bonus_per_delivery', event.target.value)} className="w-32 border border-slate-200 p-2 disabled:bg-slate-100" /></td>
+                        <td className="p-4">{Number(person.event_rule_earnings || 0).toLocaleString('vi-VN')} đ</td>
                         <td className="p-4">{Number(person.manual_bonus || 0).toLocaleString('vi-VN')} đ<button type="button" onClick={() => ghiDieuChinhLuong(person, 'bonus')} className="ml-2 rounded bg-emerald-50 px-2 py-1 text-xs font-bold text-emerald-800">+</button></td>
-                        <td className="p-4">{Number(person.deductions || 0).toLocaleString('vi-VN')} đ<button type="button" onClick={() => ghiDieuChinhLuong(person, 'deduction')} className="ml-2 rounded bg-red-50 px-2 py-1 text-xs font-bold text-red-700">−</button></td>
-                        <td className="p-4 font-black text-emerald-700">{estimatedSalary.toLocaleString('vi-VN')} đ</td>
-                        <td className="p-4"><button onClick={() => luuLuong(person)} title="Lưu mức lương" className="bg-emerald-50 p-2.5 text-emerald-700 hover:bg-emerald-100"><Save size={17} /></button></td>
+                        <td className="p-4">{periodInfo.status === 'locked' ? formatVnd(person.deduction_amount || person.deductions) : Number(person.deductions || 0).toLocaleString('vi-VN')} đ<button type="button" onClick={() => ghiDieuChinhLuong(person, 'deduction')} className="ml-2 rounded bg-red-50 px-2 py-1 text-xs font-bold text-red-700">−</button>{periodInfo.status === 'open' && ['pickup_driver', 'delivery_driver'].includes(person.role) && <div className="mt-2 flex flex-col gap-1"><button type="button" onClick={() => themKhauTru(person, 'security_deposit')} className="rounded bg-indigo-50 px-2 py-1 text-left text-[10px] font-bold text-indigo-700">+ Ký quỹ</button><button type="button" onClick={() => themKhauTru(person, 'advance')} className="rounded bg-amber-50 px-2 py-1 text-left text-[10px] font-bold text-amber-700">+ Tạm ứng</button></div>}</td>
+                        <td className="p-4 font-black text-emerald-700">{periodInfo.status === 'locked' ? formatVnd(estimatedSalary) : estimatedSalary.toLocaleString('vi-VN')} đ</td>
+                        <td className="p-4">{periodInfo.status === 'locked' ? <div className="flex flex-col gap-1"><button type="button" onClick={() => taiPhieuLuong(person, 'pdf')} className="rounded bg-red-50 px-2 py-1 text-xs font-bold text-red-700">PDF</button><button type="button" onClick={() => taiPhieuLuong(person, 'excel')} className="rounded bg-emerald-50 px-2 py-1 text-xs font-bold text-emerald-700">Excel chi tiết</button></div> : <button onClick={() => luuLuong(person)} title="Lưu mức lương" className="bg-emerald-50 p-2.5 text-emerald-700 hover:bg-emerald-100"><Save size={17} /></button>}</td>
                       </tr>
                     );
-                  }) : <tr><td colSpan="11" className="p-12 text-center text-slate-400">Chưa có nhân sự để hiển thị.</td></tr>}
+                  }) : <tr><td colSpan="14" className="p-12 text-center text-slate-400">{bangLuong.length ? 'Không có nhân viên phù hợp với bộ lọc.' : 'Chưa có nhân sự để hiển thị.'}</td></tr>}
                 </tbody>
               </table>
             </div>

@@ -4,6 +4,7 @@ import {
   Search, Download, MapPin, Globe, CheckCircle
 } from 'lucide-react';
 import FloatingChatWidget from './FloatingChatWidget';
+import { getWorkspacePath, normalizeRole } from '../utils/workspaceRoutes.js';
 
 const navItems = [
   { label: 'Trang chủ', to: '/' },
@@ -13,59 +14,10 @@ const navItems = [
   { label: 'Tuyển dụng', to: '/tuyen-dung' },
 ];
 
-const normalizeRole = (value) => {
-  const role = String(value || '').trim().toLowerCase();
-  const aliases = {
-    hr: 'hr_manager',
-    human_resources: 'hr_manager',
-    nhan_su: 'hr_manager',
-    fleet: 'fleet_manager',
-    dispatcher: 'fleet_manager',
-    dieu_hanh: 'fleet_manager',
-    coordinator: 'fleet_manager',
-    shipper: 'driver',
-    driver: 'driver',
-    linehaul_driver: 'linehaul_driver',
-    admin: 'director',
-    warehouse: 'warehouse_manager',
-    kho: 'warehouse_manager',
-    content: 'content_manager',
-    content_manager: 'content_manager',
-    cskh: 'customer_service',
-    customer_support: 'customer_service',
-    support: 'customer_service',
-    content_team: 'content_manager',
-    phong_ban_noi_dung: 'content_manager',
-    marketing: 'content_manager',
-    shop: 'shop',
-    accountant: 'accountant',
-    director: 'director',
-    warehouse_manager: 'warehouse_manager',
-    fleet_manager: 'fleet_manager',
-    hr_manager: 'hr_manager',
-    customer: 'customer'
-  };
-
-  return aliases[role] || role;
-};
-
 export default function PublicLayout() {
   const rawRole = localStorage.getItem('role') || localStorage.getItem('user_role');
   const role = normalizeRole(rawRole);
-  const roleMap = {
-    shop: '/cua-hang',
-    driver: '/tai-xe',
-    linehaul_driver: '/tai-xe',
-    warehouse_manager: '/kho',
-    fleet_manager: '/dieu-hanh',
-    accountant: '/ke-toan',
-    director: '/admin',
-    hr_manager: '/nhan-su',
-    content_manager: '/phong-ban-noi-dung',
-    customer_service: '/ho-tro'
-  };
-
-  const dashboardLink = role ? roleMap[role] || '/' : '/dang-nhap';
+  const dashboardLink = role ? getWorkspacePath(role) : '/dang-nhap';
 
   const logout = () => {
     localStorage.clear();

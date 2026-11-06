@@ -1,23 +1,81 @@
-import { apiFetch as fetch } from '../../utils/apiFetch.js';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { API_URL, apiFetch as fetch } from '../../utils/apiFetch.js';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Html5QrcodeScanner, Html5QrcodeSupportedFormats } from 'html5-qrcode';
+import QRCode from 'react-qr-code';
 import { io } from 'socket.io-client';
-import { MapPin, Package, CheckCircle, XCircle, LogOut, Navigation, Wallet, UserCircle, Bike, Map, Send, CalendarOff, Camera, AlertTriangle, X, ShieldCheck, House, PackageCheck, Banknote, Siren, Wifi, WifiOff, ScanLine, Route, Truck } from 'lucide-react';
-import { MapContainer, TileLayer, Marker, Popup, Polyline } from 'react-leaflet';
+import { MapPin, Package, PackageCheck, CheckCircle, XCircle, LogOut, Navigation, Wallet, UserCircle, Bike, Map as MapIcon, Send, CalendarOff, Camera, AlertTriangle, X, ShieldCheck, House, Banknote, Siren, Wifi, WifiOff, ScanLine, Route, Truck, MessageCircle } from 'lucide-react';
+import { MapContainer, TileLayer, Marker, Popup, Polyline, useMap } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
+import { GOVAP_MAP_CENTER, MAP_ATTRIBUTION, MAP_TILE_URL } from '../../utils/govapMap.js';
+import { OrderStatusBadge } from '../../utils/orderStatus.jsx';
 
 import iconMarkerUrl from 'leaflet/dist/images/marker-icon.png';
 import iconShadowUrl from 'leaflet/dist/images/marker-shadow.png';
+import DriverOrderChat from '../../Layouts/DriverOrderChat.jsx';
 const truckIcon = new L.Icon({
   iconUrl: iconMarkerUrl,
   shadowUrl: iconShadowUrl,
   iconSize: [25, 41],
   iconAnchor: [12, 41]
 });
+const routeStopIcon = (sequence, mode) => new L.DivIcon({
+  className: 'route-stop-marker',
+  html: `<span style="display:grid;place-items:center;width:30px;height:30px;border:2px solid white;border-radius:50%;background:${mode === 'pickup' ? '#d97706' : '#2563eb'};color:white;font-weight:900;box-shadow:0 1px 5px #334155">${sequence}</span>`,
+  iconSize: [30, 30],
+  iconAnchor: [15, 15]
+});
 
 const tinhTongTienCanThu = (order) => Number(order?.cod_amount || 0)
   + (order?.fee_payer === 'receiver' ? Number(order?.shipping_fee || 0) : 0);
+const MAX_EVIDENCE_IMAGE_BYTES = 8 * 1024 * 1024;
+const ACCEPTED_EVIDENCE_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
+
+async function prepareEvidenceImage(file) {
+  if (!ACCEPTED_EVIDENCE_IMAGE_TYPES.includes(file.type)) {
+    throw new Error('Ảnh cần có định dạng JPG, PNG hoặc WEBP.');
+  }
+
+  const image = await createImageBitmap(file);
+  const scale = Math.min(1, 1920 / Math.max(image.width, image.height));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(image.width * scale));
+  canvas.height = Math.max(1, Math.round(image.height * scale));
+  const context = canvas.getContext('2d');
+  if (!context) {
+    image.close();
+    throw new Error('Thiết bị không thể xử lý ảnh chụp.');
+  }
+  try {
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+  } finally {
+    image.close();
+  }
+
+  for (const quality of [0.82, 0.68, 0.54, 0.4]) {
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', quality));
+    if (blob && blob.size <= MAX_EVIDENCE_IMAGE_BYTES) {
+      const baseName = file.name.replace(/\.[^.]+$/, '') || 'evidence';
+      return new File([blob], `${baseName}.jpg`, { type: 'image/jpeg', lastModified: Date.now() });
+    }
+  }
+  throw new Error('Ảnh quá lớn, vui lòng chụp lại hoặc chọn ảnh nhỏ hơn 8 MB.');
+}
+
+const tinhTienTheoHangDaQuet = (order, quantities = {}) => {
+  const items = order?.order_items;
+  if (!Array.isArray(items) || items.length === 0) return tinhTongTienCanThu(order);
+  const cod = items
+    .filter((item) => item.direction === 'outbound')
+    .reduce((total, item) => total
+      + (Number(quantities[item.id] || 0) * Number(item.unit_cod_amount || 0)), 0);
+  const deliveredCount = items
+    .filter((item) => item.direction === 'outbound')
+    .reduce((total, item) => total + Number(quantities[item.id] || 0), 0);
+  return cod + (deliveredCount > 0 && order?.fee_payer === 'receiver'
+    ? Number(order?.shipping_fee || 0)
+    : 0);
+};
 const distanceBetween = (first, second) => {
   const toRadians = (degrees) => (degrees * Math.PI) / 180;
   const deltaLatitude = toRadians(Number(second.lat) - Number(first.lat));
@@ -36,37 +94,43 @@ const getDeliveryCoordinates = (order) => {
     ? { lat, lng }
     : null;
 };
-const optimizeDeliveryStops = (start, orders) => {
-  const remaining = orders
-    .map((order) => ({ order, coordinates: getDeliveryCoordinates(order) }))
-    .filter((stop) => stop.coordinates);
-  const unlocated = orders.filter((order) => !getDeliveryCoordinates(order));
-  const optimized = [];
-  let current = start;
-  let totalDistance = 0;
-  while (remaining.length) {
-    let nearestIndex = 0;
-    let nearestDistance = distanceBetween(current, remaining[0].coordinates);
-    for (let index = 1; index < remaining.length; index += 1) {
-      const distance = distanceBetween(current, remaining[index].coordinates);
-      if (distance < nearestDistance) {
-        nearestDistance = distance;
-        nearestIndex = index;
-      }
-    }
-    const [next] = remaining.splice(nearestIndex, 1);
-    optimized.push(next.order);
-    totalDistance += nearestDistance;
-    current = next.coordinates;
-  }
-  return { orders: [...optimized, ...unlocated], totalDistance, optimizedCount: optimized.length };
-};
-
-const socket = io('http://localhost:5000', {
+const socket = io(API_URL, {
   auth: { token: localStorage.getItem('access_token') }
 });
 
-function LinehaulDriverApp() {
+function InvalidateMapSize() {
+  const map = useMap();
+  useEffect(() => {
+    const container = map.getContainer();
+    const invalidate = () => window.requestAnimationFrame(() => map.invalidateSize({ pan: false }));
+    const timer = window.setTimeout(invalidate, 150);
+    const observer = new ResizeObserver(invalidate);
+    observer.observe(container);
+    window.addEventListener('resize', invalidate);
+    return () => {
+      window.clearTimeout(timer);
+      observer.disconnect();
+      window.removeEventListener('resize', invalidate);
+    };
+  }, [map]);
+  return null;
+}
+
+function LinehaulDriverApp({ disabled = false }) {
+  if (disabled) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-slate-50 p-6 text-center">
+        <div className="max-w-md rounded-2xl bg-white p-8 shadow-sm">
+          <h1 className="text-xl font-black text-slate-800">Tuyến liên kho đã tắt</h1>
+          <p className="mt-3 text-sm leading-6 text-slate-600">Hệ thống hiện chỉ vận hành giao nhận trong 6 phường Gò Vấp qua một kho tổng.</p>
+        </div>
+      </div>
+    );
+  }
+  return <LinehaulDriverAppContent />;
+}
+
+function LinehaulDriverAppContent() {
   const driverName = localStorage.getItem('full_name') || 'Tài xế xe tải';
   const [trips, setTrips] = useState([]);
   const [selectedTripId, setSelectedTripId] = useState('');
@@ -91,7 +155,7 @@ function LinehaulDriverApp() {
 
   const taiChuyenXe = useCallback(async () => {
     try {
-      const response = await fetch('http://localhost:5000/api/driver/trips');
+      const response = await fetch('/api/driver/trips');
       const data = await response.json();
       if (!response.ok || !data.success) throw new Error(data.message || 'Không tải được chuyến xe.');
       setTrips(data.data || []);
@@ -116,7 +180,7 @@ function LinehaulDriverApp() {
     setBusy(true);
     setError('');
     try {
-      const response = await fetch('http://localhost:5000/api/driver/trips/scan', {
+      const response = await fetch('/api/driver/trips/scan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ bag_code: bagCode })
@@ -174,7 +238,7 @@ function LinehaulDriverApp() {
     setBusy(true);
     setError('');
     try {
-      const response = await fetch(`http://localhost:5000/api/driver/trips/${activeTrip.id}/start`, { method: 'POST' });
+      const response = await fetch(`/api/driver/trips/${activeTrip.id}/start`, { method: 'POST' });
       const data = await response.json();
       if (!response.ok || !data.success) throw new Error(data.message || 'Không thể bắt đầu chuyến xe.');
       setNotice(data.message);
@@ -191,7 +255,7 @@ function LinehaulDriverApp() {
     setBusy(true);
     setError('');
     try {
-      const response = await fetch(`http://localhost:5000/api/driver/trips/${activeTrip.id}/arrive`, { method: 'POST' });
+      const response = await fetch(`/api/driver/trips/${activeTrip.id}/arrive`, { method: 'POST' });
       const data = await response.json();
       if (!response.ok || !data.success) throw new Error(data.message || 'Không thể báo đã đến kho.');
       setNotice(data.message);
@@ -209,7 +273,7 @@ function LinehaulDriverApp() {
       const { latitude: lat, longitude: lng } = position.coords;
       setCurrentLocation({ lat, lng });
       try {
-        const response = await fetch(`http://localhost:5000/api/driver/trips/${activeTripId}/location`, {
+        const response = await fetch(`/api/driver/trips/${activeTripId}/location`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ lat, lng })
@@ -264,11 +328,12 @@ function LinehaulDriverApp() {
               </div>
               <div className="grid gap-3 sm:grid-cols-2">
                 <div className="rounded-xl bg-slate-50 p-4"><p className="text-xs font-black uppercase text-slate-500">Kho xuất phát</p><p className="mt-1 font-bold">{activeTrip.source_warehouse_name}</p><p className="mt-1 text-sm text-slate-500">{activeTrip.source_warehouse_address || 'Chưa có địa chỉ kho'}</p></div>
-                <div className="rounded-xl bg-indigo-50 p-4"><p className="text-xs font-black uppercase text-indigo-600">Kho nhận hàng</p><p className="mt-1 font-bold text-indigo-950">{activeTrip.destination_warehouse_name}</p><p className="mt-1 text-sm text-indigo-800">{activeTrip.destination_warehouse_address || 'Chưa có địa chỉ kho'}</p>{destinationCoordinates && <a href={`https://www.google.com/maps/dir/?api=1&destination=${destinationCoordinates[0]},${destinationCoordinates[1]}`} target="_blank" rel="noreferrer" className="mt-2 inline-flex items-center gap-1 text-sm font-bold text-indigo-700 underline"><Navigation size={14} /> Mở đường đi</a>}</div>
+                <div className="rounded-xl bg-indigo-50 p-4"><p className="text-xs font-black uppercase text-indigo-600">Kho nhận hàng</p><p className="mt-1 font-bold text-indigo-950">{activeTrip.destination_warehouse_name}</p><p className="mt-1 text-sm text-indigo-800">{activeTrip.destination_warehouse_address || 'Chưa có địa chỉ kho'}</p>{destinationCoordinates && <p className="mt-2 inline-flex items-center gap-1 text-xs font-bold text-indigo-700"><MapPin size={14} /> {destinationCoordinates[0].toFixed(5)}, {destinationCoordinates[1].toFixed(5)}</p>}</div>
               </div>
-              {destinationCoordinates && <div className="overflow-hidden rounded-xl border border-slate-200">
-                <MapContainer key={activeTrip.id} center={currentCoordinates || destinationCoordinates} zoom={currentCoordinates ? 11 : 13} scrollWheelZoom={false} className="h-64 w-full">
-                  <TileLayer attribution='&copy; OpenStreetMap contributors' url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
+              {destinationCoordinates && <div className="relative z-0 isolate overflow-hidden rounded-xl border border-slate-200">
+                <MapContainer key={activeTrip.id} center={currentCoordinates || destinationCoordinates} zoom={currentCoordinates ? 11 : 13} scrollWheelZoom={false} className="relative z-0 h-56 w-full rounded-xl sm:h-64">
+                  <InvalidateMapSize />
+                  <TileLayer attribution={MAP_ATTRIBUTION} url={MAP_TILE_URL} />
                   <Marker position={destinationCoordinates} icon={truckIcon}><Popup>{activeTrip.destination_warehouse_name}</Popup></Marker>
                   {currentCoordinates && <><Marker position={currentCoordinates} icon={truckIcon}><Popup>Vị trí xe hiện tại</Popup></Marker><Polyline positions={[currentCoordinates, destinationCoordinates]} pathOptions={{ color: '#4f46e5', weight: 4, dashArray: '8 8' }} /></>}
                 </MapContainer>
@@ -305,20 +370,33 @@ function LinehaulDriverApp() {
 
 export default function AppTaiXe() {
   const role = localStorage.getItem('role') || localStorage.getItem('user_role');
-  return role === 'linehaul_driver' ? <LinehaulDriverApp /> : <MotorcycleDriverApp />;
+  return role === 'linehaul_driver' ? <LinehaulDriverApp disabled /> : <MotorcycleDriverApp />;
 }
 
 function MotorcycleDriverApp() {
   const [donHang, setDonHang] = useState([]);
+  const [ordersLoading, setOrdersLoading] = useState(true);
+  const [ordersLoadError, setOrdersLoadError] = useState('');
+  const [chatOrder, setChatOrder] = useState(null);
   const [tabHienTai, setTabHienTai] = useState('dashboard');
   const [viTien, setViTien] = useState(0);
+  const [walletLoading, setWalletLoading] = useState(true);
+  const [walletLoadError, setWalletLoadError] = useState('');
   const [tienChoNop, setTienChoNop] = useState(0);
   const [kyQuy, setKyQuy] = useState({ balance: 0, reserved: 0, available: 0 });
+  const [thuNhapThamKhao, setThuNhapThamKhao] = useState(null);
   const [dangOnline, setDangOnline] = useState(navigator.onLine);
+  const [apiDisconnected, setApiDisconnected] = useState(false);
   const [offlineSyncNotice, setOfflineSyncNotice] = useState('');
   const [showSos, setShowSos] = useState(false);
   const [sosType, setSosType] = useState('vehicle_breakdown');
+  const [sosOrderId, setSosOrderId] = useState('');
   const [sosDescription, setSosDescription] = useState('');
+  const [sosEvidence, setSosEvidence] = useState(null);
+  const [sosEvidencePreview, setSosEvidencePreview] = useState('');
+  const [cameraTarget, setCameraTarget] = useState(null);
+  const [cameraStream, setCameraStream] = useState(null);
+  const cameraVideoRef = useRef(null);
   const [sendingSos, setSendingSos] = useState(false);
   const [scanningTripBags, setScanningTripBags] = useState(false);
   const [tripBagNotice, setTripBagNotice] = useState('');
@@ -326,10 +404,14 @@ function MotorcycleDriverApp() {
   const [expenseClaims, setExpenseClaims] = useState([]);
   const [expenseSubmitting, setExpenseSubmitting] = useState(false);
   const [expenseNotice, setExpenseNotice] = useState('');
-  const [viTriHienTai, setViTriHienTai] = useState({ lat: 10.762622, lng: 106.660172 }); 
+  const [viTriHienTai, setViTriHienTai] = useState({ lat: GOVAP_MAP_CENTER[0], lng: GOVAP_MAP_CENTER[1] });
   const [routeInfo, setRouteInfo] = useState(null);
-  const [optimizedRouteIds, setOptimizedRouteIds] = useState([]);
-  const [optimizedRouteDistance, setOptimizedRouteDistance] = useState(null);
+  const [routeRequestResult, setRouteRequestResult] = useState(null);
+  const [driverRouteGeometry, setDriverRouteGeometry] = useState(null);
+  const [driverRoute, setDriverRoute] = useState({});
+  const [routeLoadError, setRouteLoadError] = useState('');
+  const [routeReorderBusy, setRouteReorderBusy] = useState(false);
+  const [draggedStopId, setDraggedStopId] = useState(null);
   
   // State cho form nghỉ phép
   const [lyDoNghi, setLyDoNghi] = useState('');
@@ -342,6 +424,30 @@ function MotorcycleDriverApp() {
   const signatureCanvasRef = useRef(null);
   const [signatureDrawn, setSignatureDrawn] = useState(false);
   const [lyDoHuy, setLyDoHuy] = useState('');
+  const [ghiChuXuLy, setGhiChuXuLy] = useState('');
+  const [submitErrors, setSubmitErrors] = useState({});
+  const [submitError, setSubmitError] = useState('');
+  const [deliveryScanQuantities, setDeliveryScanQuantities] = useState({});
+  const [returnScanQuantities, setReturnScanQuantities] = useState({});
+  const [scanItemMode, setScanItemMode] = useState(false);
+  const [itemScanMessage, setItemScanMessage] = useState('');
+  const deliveryScanQuantitiesRef = useRef({});
+  const returnScanQuantitiesRef = useRef({});
+
+  useEffect(() => {
+    if (!cameraTarget || !cameraStream || !cameraVideoRef.current) return undefined;
+    const video = cameraVideoRef.current;
+    video.srcObject = cameraStream;
+    video.play().catch(() => {
+      if (cameraTarget) alert('Không thể bật camera. Vui lòng kiểm tra quyền truy cập camera của trình duyệt.');
+    });
+    return () => {
+      video.srcObject = null;
+      cameraStream.getTracks().forEach((track) => track.stop());
+    };
+  }, [cameraTarget, cameraStream]);
+  const [failureReasonCodes, setFailureReasonCodes] = useState({ PICKUP: [], DELIVERY: [] });
+  const [reasonCodeError, setReasonCodeError] = useState('');
   const [xacNhanTien, setXacNhanTien] = useState(false);
   const [phuongThucCOD, setPhuongThucCOD] = useState('');
   const [dangCapNhat, setDangCapNhat] = useState(false);
@@ -350,10 +456,45 @@ function MotorcycleDriverApp() {
   const [maVanDonNhapTay, setMaVanDonNhapTay] = useState('');
   const [dangXacNhanMaQuet, setDangXacNhanMaQuet] = useState(false);
   const pickupScanBusyRef = useRef(false);
+  const itemScanBusyRef = useRef(false);
+  const formRef = useRef(null);
+  const submitLockRef = useRef(false);
 
   const driverId = localStorage.getItem('user_id');
   const driverRole = localStorage.getItem('role') || localStorage.getItem('user_role');
   const isPickupDriver = driverRole === 'pickup_driver';
+  const failureReasonGroup = modalXuLy.loai === 'pickup_failed' ? 'PICKUP' : 'DELIVERY';
+  const selectedFailureReason = failureReasonCodes[failureReasonGroup]
+    .find((reason) => reason.code === lyDoHuy);
+  const resetFormErrors = () => {
+    setSubmitErrors({});
+    setSubmitError('');
+    setGhiChuXuLy('');
+    setLyDoHuy('');
+    setSignatureDrawn(false);
+    setAnhMinhChung(null);
+    setAnhPreview((current) => {
+      if (current) URL.revokeObjectURL(current);
+      return null;
+    });
+  };
+  const moModalGiaoHang = (don) => {
+    resetFormErrors();
+    const items = Array.isArray(don.order_items) ? don.order_items : [];
+    const deliveryQuantities = Object.fromEntries(
+      items.filter((item) => item.direction === 'outbound').map((item) => [item.id, ''])
+    );
+    const returnQuantities = Object.fromEntries(
+      items.filter((item) => item.direction === 'exchange_in').map((item) => [item.id, ''])
+    );
+    deliveryScanQuantitiesRef.current = deliveryQuantities;
+    returnScanQuantitiesRef.current = returnQuantities;
+    setDeliveryScanQuantities(deliveryQuantities);
+    setReturnScanQuantities(returnQuantities);
+    setItemScanMessage('');
+    setScanItemMode(false);
+    setModalXuLy({ mo: true, loai: 'completed', don });
+  };
   const driverTheme = isPickupDriver
     ? {
       header: 'from-amber-500 to-orange-600',
@@ -377,12 +518,56 @@ function MotorcycleDriverApp() {
     };
   const driverName = localStorage.getItem('full_name') || 'Tài Xế Giao Nhận';
   const taskRoute = routeInfo?.task_route;
-  const diemDi = taskRoute?.origin?.address || (taskRoute?.origin ? `${taskRoute.origin.lat},${taskRoute.origin.lng}` : '10.762622,106.660172');
+  const diemDi = taskRoute?.origin?.address || (taskRoute?.origin ? `${taskRoute.origin.lat},${taskRoute.origin.lng}` : `${GOVAP_MAP_CENTER[0]},${GOVAP_MAP_CENTER[1]}`);
   const tenKho = routeInfo?.warehouse?.address || 'Kho trung tâm Smart Logistics, TP. Hồ Chí Minh';
   const diemDen = taskRoute?.destination?.address || (taskRoute?.destination ? `${taskRoute.destination.lat},${taskRoute.destination.lng}` : tenKho);
-  const urlChiDuong = routeInfo
-    ? `https://www.google.com/maps/dir/?api=1&${new URLSearchParams({ origin: diemDi, destination: diemDen, travelmode: 'driving' })}`
-    : '';
+  const routeOrigin = taskRoute?.origin;
+  const routeDestination = taskRoute?.destination;
+  const originLat = Number(routeOrigin?.lat);
+  const originLng = Number(routeOrigin?.lng);
+  const destinationLat = Number(routeDestination?.lat);
+  const destinationLng = Number(routeDestination?.lng);
+  const routeRequestKey = `${originLat},${originLng};${destinationLat},${destinationLng}`;
+  const currentRouteResult = routeRequestResult?.key === routeRequestKey ? routeRequestResult : null;
+  const directions = currentRouteResult?.directions || null;
+  const directionsError = currentRouteResult?.error || '';
+  const routeGeometry = directions?.geometry?.coordinates?.map(([lng, lat]) => [lat, lng]) || [];
+
+  useEffect(() => {
+    Promise.all(['PICKUP', 'DELIVERY'].map(async (group) => {
+      const response = await fetch(`/api/reason-codes?group_type=${group}`);
+      const result = await response.json();
+      if (!response.ok || !result.success) throw new Error(result.message || `Không tải được lý do ${group}.`);
+      return [group, result.data || []];
+    })).then((groups) => {
+      setFailureReasonCodes(Object.fromEntries(groups));
+      setReasonCodeError('');
+    }).catch((error) => setReasonCodeError(error.message || 'Không tải được danh sách lý do.'));
+  }, []);
+
+  useEffect(() => {
+    if (!Number.isFinite(originLat) || !Number.isFinite(originLng)
+      || !Number.isFinite(destinationLat) || !Number.isFinite(destinationLng)) {
+      return undefined;
+    }
+    const controller = new AbortController();
+    fetch(`${API_URL}/api/map/route?from=${originLat},${originLng}&to=${destinationLat},${destinationLng}`, { signal: controller.signal })
+      .then(async (response) => {
+        const result = await response.json();
+        if (!response.ok || !result.success) throw new Error(result.message || 'Không lấy được chỉ đường.');
+        setRouteRequestResult({ key: routeRequestKey, directions: result.data, error: '' });
+      })
+      .catch((error) => {
+        if (error.name !== 'AbortError') {
+          setRouteRequestResult({
+            key: routeRequestKey,
+            directions: null,
+            error: error.message || 'Không kết nối được dịch vụ chỉ đường nội bộ.'
+          });
+        }
+      });
+    return () => controller.abort();
+  }, [originLat, originLng, destinationLat, destinationLng, routeRequestKey]);
 
   const batDauPhatToaDo = useCallback((orderId, trackingCode) => {
     if (!navigator.geolocation) return;
@@ -402,37 +587,89 @@ function MotorcycleDriverApp() {
     }, (error) => console.error('Lỗi GPS:', error), { enableHighAccuracy: true });
   }, [driverId]);
 
-  const taiDuLieu = useCallback(async () => {
-    if (!driverId) return;
+  const taiLoTrinh = useCallback(async () => {
     try {
-      const res = await fetch(`http://localhost:5000/api/orders/shipper/${driverId}`);
+      const response = await fetch(`${API_URL}/api/driver/route/today`);
+      const result = await response.json();
+      if (!response.ok || !result.success) throw new Error(result.message || 'Không tải được lộ trình.');
+      setDriverRoute(result.data || {});
+      setRouteLoadError('');
+      return result.data || {};
+    } catch (error) {
+      setRouteLoadError(error.message || 'Không tải được lộ trình.');
+      throw error;
+    }
+  }, []);
+
+  const taiDuLieu = useCallback(async () => {
+    if (!driverId) {
+      setOrdersLoading(false);
+      setOrdersLoadError('Không tìm thấy tài khoản tài xế trong phiên đăng nhập. Hãy đăng nhập lại.');
+      return;
+    }
+    setOrdersLoading(true);
+    setOrdersLoadError('');
+    try {
+      const res = await fetch(`/api/orders/shipper/${driverId}`);
       const data = await res.json();
-      if (data.success) {
-        setDonHang(data.data);
-        const activeStatuses = isPickupDriver
-          ? ['picking', 'picked_up', 'transferring_to_central', 'transferring_to_destination']
-          : ['at_destination_warehouse', 'delivering'];
-        const firstActiveOrder = data.data.find(item => activeStatuses.includes(item.status));
-        if (firstActiveOrder) {
-          const routeRes = await fetch(`http://localhost:5000/api/orders/${firstActiveOrder.id}/route`);
-          const routeData = await routeRes.json();
-          if (routeData.success) {
-            setRouteInfo(routeData.data);
-            if (['transferring_to_central', 'transferring_to_destination'].includes(firstActiveOrder.status)) {
-              batDauPhatToaDo(firstActiveOrder.id, firstActiveOrder.tracking_code);
-            }
+      if (!res.ok || !data.success || !Array.isArray(data.data)) {
+        throw new Error(data.message || 'Không tải được danh sách đơn hàng.');
+      }
+      setDonHang(data.data);
+      await taiLoTrinh().catch((routeError) => console.error('Không tải được lộ trình tài xế:', routeError));
+      const activeStatuses = isPickupDriver
+        ? ['picking', 'picked_up', 'transferring_to_central', 'transferring_to_destination']
+        : ['at_central_warehouse', 'at_destination_warehouse', 'delivering', 'returning'];
+      const firstActiveOrder = data.data.find((item) => activeStatuses.includes(item.status));
+      if (firstActiveOrder) {
+        const routeRes = await fetch(`/api/orders/${firstActiveOrder.id}/route`);
+        const routeData = await routeRes.json();
+        if (routeRes.ok && routeData.success) {
+          setRouteInfo(routeData.data || null);
+          if (['transferring_to_central', 'transferring_to_destination', 'returning'].includes(firstActiveOrder.status)) {
+            batDauPhatToaDo(firstActiveOrder.id, firstActiveOrder.tracking_code);
           }
         }
       }
     } catch (error) {
       console.error("Lỗi tải dữ liệu:", error);
+      setOrdersLoadError(error.message || 'Không tải được dữ liệu tài xế.');
+    } finally {
+      setOrdersLoading(false);
     }
-  }, [driverId, isPickupDriver, batDauPhatToaDo]);
+  }, [driverId, isPickupDriver, batDauPhatToaDo, taiLoTrinh]);
+
+  const doiThuTuLoTrinh = useCallback(async (mode, stopIds) => {
+    const reason = window.prompt('Lý do đổi thứ tự điểm dừng:');
+    if (!reason?.trim()) return;
+    setRouteReorderBusy(true);
+    try {
+      const response = await fetch(`${API_URL}/api/driver/route/reorder`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode, ordered_stop_ids: stopIds, override_reason: reason.trim() })
+      });
+      const result = await response.json();
+      if (!response.ok || !result.success) throw new Error(result.message || 'Không lưu được thứ tự tuyến.');
+      await taiLoTrinh();
+    } catch (error) {
+      window.alert(error.message || 'Không lưu được thứ tự tuyến.');
+    } finally {
+      setRouteReorderBusy(false);
+      setDraggedStopId(null);
+    }
+  }, [taiLoTrinh]);
 
   const taiViTien = useCallback(async () => {
-    if (!driverId) return;
+    if (!driverId) {
+      setWalletLoading(false);
+      setWalletLoadError('Không tìm thấy tài khoản tài xế trong phiên đăng nhập.');
+      return;
+    }
+    setWalletLoading(true);
+    setWalletLoadError('');
     try {
-      const response = await fetch(`http://localhost:5000/api/driver/wallet/${driverId}`);
+      const response = await fetch(`/api/driver/wallet/${driverId}`);
       const data = await response.json();
       if (!response.ok || !data.success) throw new Error(data.message || 'Không thể tải ví COD.');
       setViTien(Number(data.data.cash_on_hand || 0));
@@ -444,12 +681,32 @@ function MotorcycleDriverApp() {
       });
     } catch (error) {
       console.error('Không tải được ví tài xế:', error);
+      setWalletLoadError(error.message || 'Không tải được số dư COD.');
+    } finally {
+      setWalletLoading(false);
     }
   }, [driverId]);
 
+  const taiThuNhapThamKhao = useCallback(async () => {
+    if (!driverId) return;
+    try {
+      const response = await fetch(`${API_URL}/api/driver/payroll/estimate`);
+      const data = await response.json();
+      if (!response.ok || !data.success) throw new Error(data.message || 'Không tải được thu nhập tham khảo.');
+      setThuNhapThamKhao(data.data);
+    } catch (error) {
+      console.error('Không tải được thu nhập tham khảo:', error);
+    }
+  }, [driverId]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => { void taiThuNhapThamKhao(); }, 0);
+    return () => window.clearTimeout(timer);
+  }, [taiThuNhapThamKhao]);
+
   const taiYeuCauPhuPhi = useCallback(async () => {
     if (!driverId) return;
-    const response = await fetch('http://localhost:5000/api/driver/expense-claims');
+    const response = await fetch('/api/driver/expense-claims');
     const data = await response.json();
     if (!response.ok || !data.success) throw new Error(data.message || 'Không tải được yêu cầu phụ phí.');
     setExpenseClaims(data.data || []);
@@ -464,6 +721,14 @@ function MotorcycleDriverApp() {
       });
     };
     const offlineHandler = () => setDangOnline(false);
+    const apiConnectionHandler = (event) => {
+      const online = Boolean(event.detail?.online);
+      setApiDisconnected(!online);
+      if (online) {
+        void taiViTien();
+        void taiDuLieu();
+      }
+    };
     const serviceWorkerMessage = (event) => {
       if (event.data?.type !== 'DRIVER_ACTION_SYNCED') return;
       setOfflineSyncNotice(event.data.success
@@ -473,6 +738,7 @@ function MotorcycleDriverApp() {
     };
     window.addEventListener('online', onlineHandler);
     window.addEventListener('offline', offlineHandler);
+    window.addEventListener('api-connection-status', apiConnectionHandler);
     navigator.serviceWorker?.addEventListener('message', serviceWorkerMessage);
     navigator.serviceWorker?.controller?.postMessage({
       type: 'SYNC_DRIVER_ACTIONS',
@@ -481,9 +747,10 @@ function MotorcycleDriverApp() {
     return () => {
       window.removeEventListener('online', onlineHandler);
       window.removeEventListener('offline', offlineHandler);
+      window.removeEventListener('api-connection-status', apiConnectionHandler);
       navigator.serviceWorker?.removeEventListener('message', serviceWorkerMessage);
     };
-  }, [taiDuLieu]);
+  }, [taiDuLieu, taiViTien]);
 
   useEffect(() => {
     const initialLoad = window.setTimeout(() => {
@@ -501,13 +768,16 @@ function MotorcycleDriverApp() {
       alert(data.message);
       taiDuLieu(); 
     };
+    const routeUpdated = () => taiLoTrinh().catch((error) => console.error('Không tải được tuyến mới:', error));
     socket.on(`new_order_assigned_${driverId}`, orderAssigned);
+    socket.on('driver_route_updated', routeUpdated);
 
     return () => {
       window.clearTimeout(initialLoad);
       socket.off(`new_order_assigned_${driverId}`, orderAssigned);
+      socket.off('driver_route_updated', routeUpdated);
     };
-  }, [driverId, isPickupDriver, taiDuLieu, taiViTien]);
+  }, [driverId, isPickupDriver, taiDuLieu, taiViTien, taiLoTrinh]);
 
   const xacNhanDaLayHang = (order) => {
     setLoiQuetMa('');
@@ -532,7 +802,7 @@ function MotorcycleDriverApp() {
     setDangXacNhanMaQuet(true);
     setLoiQuetMa('');
     try {
-      const response = await fetch(`http://localhost:5000/api/orders/${donCanQuet.id}/status`, {
+      const response = await fetch(`/api/orders/${donCanQuet.id}/status`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
@@ -545,7 +815,7 @@ function MotorcycleDriverApp() {
       batDauPhatToaDo(donCanQuet.id, donCanQuet.tracking_code);
       setDonCanQuet(null);
       setMaVanDonNhapTay('');
-      const routeResponse = await fetch(`http://localhost:5000/api/orders/${donCanQuet.id}/route`);
+      const routeResponse = await fetch(`/api/orders/${donCanQuet.id}/route`);
       const routeResult = await routeResponse.json();
       if (routeResult.success) setRouteInfo(routeResult.data);
       alert(result.offline_queued
@@ -584,6 +854,59 @@ function MotorcycleDriverApp() {
   }, [donCanQuet, xacNhanMaVanDon]);
 
   useEffect(() => {
+    if (!scanItemMode || !modalXuLy.mo || modalXuLy.loai !== 'completed' || !modalXuLy.don) return undefined;
+    let active = true;
+    const scanner = new Html5QrcodeScanner('driver-order-item-scanner', {
+      fps: 8,
+      qrbox: { width: 220, height: 160 },
+      formatsToSupport: [
+        Html5QrcodeSupportedFormats.QR_CODE,
+        Html5QrcodeSupportedFormats.CODE_128,
+        Html5QrcodeSupportedFormats.CODE_39
+      ],
+      rememberLastUsedCamera: false
+    }, false);
+    scanner.render((decodedText) => {
+      if (!active || itemScanBusyRef.current) return;
+      itemScanBusyRef.current = true;
+      const match = decodedText.trim().match(/^ORDER_ITEM:(\d+):(\d+):(OUT|IN)$/);
+      const orderId = Number(modalXuLy.don.id);
+      const itemId = Number(match?.[2]);
+      const direction = match?.[3] === 'OUT' ? 'outbound' : 'exchange_in';
+      const item = modalXuLy.don.order_items.find((entry) => Number(entry.id) === itemId
+        && entry.direction === direction);
+      if (!match || Number(match[1]) !== orderId || !item) {
+        setItemScanMessage('Mã không thuộc đơn hàng hoặc không đúng chiều giao/thu hồi.');
+      } else if (direction === 'outbound') {
+        const count = Number(deliveryScanQuantitiesRef.current[item.id] || 0);
+        if (count >= Number(item.quantity)) {
+          setItemScanMessage(`Đã quét đủ số lượng giao "${item.item_name}".`);
+        } else {
+          const next = { ...deliveryScanQuantitiesRef.current, [item.id]: String(count + 1) };
+          deliveryScanQuantitiesRef.current = next;
+          setDeliveryScanQuantities(next);
+          setItemScanMessage(`Đã quét giao ${count + 1}/${item.quantity}: ${item.item_name}.`);
+        }
+      } else {
+        const count = Number(returnScanQuantitiesRef.current[item.id] || 0);
+        if (count >= Number(item.quantity)) {
+          setItemScanMessage(`Đã quét đủ số lượng thu hồi "${item.item_name}".`);
+        } else {
+          const next = { ...returnScanQuantitiesRef.current, [item.id]: String(count + 1) };
+          returnScanQuantitiesRef.current = next;
+          setReturnScanQuantities(next);
+          setItemScanMessage(`Đã quét thu hồi ${count + 1}/${item.quantity}: ${item.item_name}.`);
+        }
+      }
+      window.setTimeout(() => { itemScanBusyRef.current = false; }, 1000);
+    }, () => {});
+    return () => {
+      active = false;
+      scanner.clear().catch((error) => console.error('Không thể dừng camera quét mặt hàng:', error));
+    };
+  }, [scanItemMode, modalXuLy.mo, modalXuLy.loai, modalXuLy.don]);
+
+  useEffect(() => {
     if (!scanningTripBags) return undefined;
     let processing = false;
     const scanner = new Html5QrcodeScanner('driver-linehaul-barcode', {
@@ -600,7 +923,7 @@ function MotorcycleDriverApp() {
       if (processing) return;
       processing = true;
       try {
-        const response = await fetch('http://localhost:5000/api/driver/trips/scan', {
+        const response = await fetch('/api/driver/trips/scan', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ driver_id: Number(driverId), bag_code: decodedText.trim() })
@@ -625,7 +948,7 @@ function MotorcycleDriverApp() {
   const batDauGiaoHang = async (orderId, trackingCode) => {
     if (!window.confirm('Bắt đầu đi giao đơn này?')) return;
     try {
-      const res = await fetch(`http://localhost:5000/api/orders/${orderId}/status`, {
+      const res = await fetch(`/api/orders/${orderId}/status`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status: 'delivering', user_id: driverId })
@@ -633,7 +956,7 @@ function MotorcycleDriverApp() {
       const data = await res.json();
       if (res.ok && data.success) {
         batDauPhatToaDo(orderId, trackingCode);
-        const routeRes = await fetch(`http://localhost:5000/api/orders/${orderId}/route`);
+        const routeRes = await fetch(`/api/orders/${orderId}/route`);
         const routeData = await routeRes.json();
         if (routeData.success) setRouteInfo(routeData.data);
         alert("🚀 Đã bật GPS đồng bộ lộ trình!");
@@ -648,17 +971,53 @@ function MotorcycleDriverApp() {
 
   const nopTienMat = async () => {
     if (viTien <= 0 || cashSubmitting) return;
-    if (!window.confirm(`Gửi yêu cầu nộp ${viTien.toLocaleString()} đ tiền mặt COD cho Kế toán xác nhận?`)) return;
+    const today = new Date().toISOString().slice(0, 10);
+    const workDate = window.prompt('Ngày làm việc của các đơn COD cần nộp (YYYY-MM-DD):', today);
+    if (workDate === null) return;
     setCashSubmitting(true);
     try {
-      const response = await fetch('http://localhost:5000/api/driver/cash-remittances', {
+      const expectedResponse = await fetch(
+        `/api/driver/cash-remittances/expected?work_date=${encodeURIComponent(workDate)}`
+      );
+      const expectedData = await expectedResponse.json();
+      if (!expectedResponse.ok || !expectedData.success) {
+        throw new Error(expectedData.message || 'Không tính được số COD phải nộp trong ngày.');
+      }
+      const expected = BigInt(String(expectedData.data.expected_amount || '0'));
+      if (expected <= 0n || !expectedData.data.order_count) {
+        throw new Error('Không có đơn COD tiền mặt chưa nộp trong ngày làm việc này.');
+      }
+      const actualAmount = window.prompt(
+        `Số tiền phải nộp ${expected.toLocaleString('vi-VN')} đ cho ${expectedData.data.order_count} đơn. Nhập số nguyên VND không dấu phân cách:`,
+        expected.toString()
+      );
+      if (actualAmount === null) return;
+      const normalizedActual = actualAmount.trim();
+      if (!/^\d+$/.test(normalizedActual)) {
+        throw new Error('Số tiền thực nộp không hợp lệ.');
+      }
+      const actualValue = BigInt(normalizedActual);
+      let varianceReason = '';
+      if (actualValue !== expected) {
+        const reason = window.prompt('Nhập lý do chênh lệch tiền nộp (ít nhất 5 ký tự):', '');
+        if (reason === null) return;
+        varianceReason = reason.trim();
+        if (varianceReason.length < 5) throw new Error('Lý do chênh lệch cần tối thiểu 5 ký tự.');
+      }
+      if (!window.confirm(`Gửi phiếu nộp ${actualValue.toLocaleString('vi-VN')} đ cho Kế toán xác nhận?`)) return;
+      const response = await fetch('/api/driver/cash-remittances', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ driver_id: Number(driverId) })
+        body: JSON.stringify({
+          driver_id: Number(driverId),
+          work_date: workDate,
+          actual_amount: actualValue.toString(),
+          variance_reason: varianceReason
+        })
       });
       const data = await response.json();
       if (!response.ok || !data.success) throw new Error(data.message || 'Không thể tạo phiếu nộp tiền.');
-      alert(`${data.message} Số tiền: ${Number(data.data.amount).toLocaleString()} đ.`);
+      alert(`${data.message} Thực nộp: ${BigInt(data.data.actualAmount).toLocaleString('vi-VN')} đ; phải nộp: ${BigInt(data.data.expectedAmount).toLocaleString('vi-VN')} đ.`);
       await taiViTien();
     } catch (error) {
       alert(error.message || 'Lỗi kết nối khi nộp tiền.');
@@ -673,7 +1032,7 @@ function MotorcycleDriverApp() {
     setExpenseSubmitting(true);
     setExpenseNotice('');
     try {
-      const response = await fetch('http://localhost:5000/api/driver/expense-claims', {
+      const response = await fetch('/api/driver/expense-claims', {
         method: 'POST',
         body: new FormData(form)
       });
@@ -691,29 +1050,39 @@ function MotorcycleDriverApp() {
 
   useEffect(() => {
     if (tabHienTai !== 'wallet') return;
-    taiYeuCauPhuPhi().catch((error) => setExpenseNotice(error.message || 'Không tải được yêu cầu phụ phí.'));
+    const timer = window.setTimeout(() => {
+      taiYeuCauPhuPhi().catch((error) => setExpenseNotice(error.message || 'Không tải được yêu cầu phụ phí.'));
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, [tabHienTai, taiYeuCauPhuPhi]);
 
   const guiBaoCaoSuCo = async (event) => {
     event.preventDefault();
     setSendingSos(true);
     try {
-      const response = await fetch('http://localhost:5000/api/driver/incidents', {
+      const formData = new FormData();
+      formData.append('driver_id', String(Number(driverId)));
+      formData.append('order_id', sosOrderId ? String(Number(sosOrderId)) : '');
+      formData.append('incident_type', sosType);
+      formData.append('description', sosDescription.trim());
+      formData.append('lat', String(viTriHienTai.lat));
+      formData.append('lng', String(viTriHienTai.lng));
+      if (sosEvidence) formData.append('evidence_image', sosEvidence);
+      const response = await fetch('/api/driver/incidents', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          driver_id: Number(driverId),
-          incident_type: sosType,
-          description: sosDescription.trim(),
-          lat: viTriHienTai.lat,
-          lng: viTriHienTai.lng
-        })
+        body: formData
       });
       const data = await response.json();
       if (!response.ok || !data.success) throw new Error(data.message || 'Không thể gửi báo cáo sự cố.');
       alert(data.message);
       setShowSos(false);
       setSosDescription('');
+      setSosOrderId('');
+      setSosEvidence(null);
+      setSosEvidencePreview((current) => {
+        if (current) URL.revokeObjectURL(current);
+        return '';
+      });
     } catch (error) {
       alert(error.message || 'Lỗi kết nối khi gửi báo cáo.');
     } finally {
@@ -721,12 +1090,68 @@ function MotorcycleDriverApp() {
     }
   };
 
-  // Hàm xử lý chọn ảnh
-  const xuLyChonAnh = (e) => {
-    const file = e.target.files[0];
-    if (file) {
-      setAnhMinhChung(file);
-      setAnhPreview(URL.createObjectURL(file));
+  const moCamera = async (target) => {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      return alert('Thiết bị hoặc trình duyệt này không hỗ trợ camera trực tiếp. Hãy mở ứng dụng bằng HTTPS hoặc localhost.');
+    }
+    try {
+      setCameraTarget(target);
+      setCameraStream(await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: { facingMode: { ideal: 'environment' } }
+      }));
+    } catch (error) {
+      setCameraTarget(null);
+      setCameraStream(null);
+      alert(error.name === 'NotAllowedError'
+        ? 'Bạn chưa cấp quyền camera. Hãy cho phép camera trong cài đặt trình duyệt rồi thử lại.'
+        : 'Không thể mở camera trên thiết bị này. Vui lòng kiểm tra camera và thử lại.');
+    }
+  };
+
+  const dongCamera = () => {
+    setCameraTarget(null);
+    setCameraStream(null);
+  };
+
+  const chupAnhTrucTiep = async () => {
+    const video = cameraVideoRef.current;
+    if (!video?.videoWidth || !video.videoHeight || !cameraTarget) {
+      return alert('Camera chưa sẵn sàng. Vui lòng đợi một chút rồi chụp lại.');
+    }
+    const canvas = document.createElement('canvas');
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const context = canvas.getContext('2d');
+    if (!context) return alert('Không thể xử lý ảnh từ camera trên thiết bị này.');
+    context.drawImage(video, 0, 0, canvas.width, canvas.height);
+    try {
+      const blob = await new Promise((resolve, reject) => {
+        canvas.toBlob((imageBlob) => {
+          if (imageBlob) resolve(imageBlob);
+          else reject(new Error('Không thể tạo ảnh từ camera.'));
+        }, 'image/jpeg', 0.92);
+      });
+      const file = new File([blob], 'camera-evidence.jpg', { type: 'image/jpeg' });
+      const preparedFile = await prepareEvidenceImage(file);
+      const previewUrl = URL.createObjectURL(preparedFile);
+      if (cameraTarget === 'sos') {
+        setSosEvidence(preparedFile);
+        setSosEvidencePreview((current) => {
+          if (current) URL.revokeObjectURL(current);
+          return previewUrl;
+        });
+      } else {
+        setAnhMinhChung(preparedFile);
+        xoaLoiTruong('proof');
+        setAnhPreview((current) => {
+          if (current) URL.revokeObjectURL(current);
+          return previewUrl;
+        });
+      }
+      dongCamera();
+    } catch (error) {
+      alert(error.message || 'Không thể chụp ảnh bằng camera.');
     }
   };
 
@@ -746,6 +1171,7 @@ function MotorcycleDriverApp() {
     context.moveTo(x, y);
     canvas.setPointerCapture(event.pointerId);
     setSignatureDrawn(true);
+    xoaLoiTruong('signature');
   };
 
   const veChuKy = (event) => {
@@ -769,88 +1195,197 @@ function MotorcycleDriverApp() {
     setSignatureDrawn(false);
   };
 
-  // Hàm Submit Xử Lý (Gửi FormData chứa Ảnh + Trạng thái)
-  const xacNhanThaoTac = async (e) => {
-    e.preventDefault();
-    const { loai, don } = modalXuLy;
+  const hienLoiTruong = (field, message) => {
+    setSubmitErrors({ [field]: message });
+    requestAnimationFrame(() => {
+      const fieldElement = formRef.current?.querySelector(`[data-form-field="${field}"]`);
+      fieldElement?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      fieldElement?.focus?.({ preventScroll: true });
+    });
+  };
 
-    // Validate bắt buộc đối với Báo thất bại
-    if (loai === 'returning') {
-      if (!lyDoHuy) return alert("Vui lòng chọn hoặc nhập lý do giao thất bại!");
-      if (!anhMinhChung) return alert("BẮT BUỘC: Vui lòng chụp ảnh minh chứng!");
-    }
+  const xoaLoiTruong = (field) => {
+    setSubmitErrors((current) => {
+      if (!current[field]) return current;
+      const next = { ...current };
+      delete next[field];
+      return next;
+    });
+  };
 
-    // Validate bắt buộc đối với Giao thành công
-    if (loai === 'completed') {
-      const amountToCollect = tinhTongTienCanThu(don);
-      if (amountToCollect > 0 && !xacNhanTien) return alert('Vui lòng xác nhận đã thu đủ COD và phí vận chuyển.');
-      if (amountToCollect > 0 && !['cash', 'bank_transfer'].includes(phuongThucCOD)) {
-        return alert('Vui lòng chọn tiền mặt hoặc chuyển khoản.');
-      }
-      if (!anhMinhChung) return alert("BẮT BUỘC: Vui lòng chụp ảnh minh chứng đã giao hàng!");
-      if (!signatureDrawn) return alert('Vui lòng lấy chữ ký xác nhận của người nhận.');
-    }
-
+  const xacNhanThaoTac = async (event) => {
+    event.preventDefault();
+    if (submitLockRef.current) return;
+    submitLockRef.current = true;
     setDangCapNhat(true);
+    setSubmitErrors({});
+    setSubmitError('');
+    const { loai, don } = modalXuLy;
+    const validationError = (field, message) => Object.assign(new Error(message), { field });
+
     try {
-      const formData = new FormData();
-      formData.append('status', loai); // 'completed' hoặc 'returning'
-      formData.append('user_id', driverId);
-      
-      if (anhMinhChung) {
-        formData.append('proof_image', anhMinhChung);
+      if (['pickup_failed', 'delivery_failed'].includes(loai)) {
+        if (!lyDoHuy || !selectedFailureReason) {
+          throw validationError('reason', 'Vui lòng chọn mã lý do hợp lệ.');
+        }
+        if (Number(selectedFailureReason.require_evidence) === 1 && !anhMinhChung) {
+          throw validationError('proof', 'Lý do này yêu cầu chụp ảnh bằng chứng.');
+        }
       }
 
       if (loai === 'completed') {
-        const signatureCanvas = signatureCanvasRef.current;
-        if (!signatureCanvas) {
-          setDangCapNhat(false);
-          return alert('Không tìm thấy vùng chữ ký. Vui lòng đóng và mở lại xác nhận giao hàng.');
+        const items = Array.isArray(don.order_items) ? don.order_items : [];
+        if (!items.length) {
+          throw validationError('items', 'Đơn hàng chưa tải được danh sách mặt hàng.');
         }
-        const signatureBlob = await new Promise((resolve) => signatureCanvas.toBlob(resolve, 'image/png'));
-        if (!signatureBlob) {
-          setDangCapNhat(false);
-          return alert('Không thể tạo ảnh chữ ký. Vui lòng ký lại.');
+        const outboundItems = items.filter((item) => item.direction === 'outbound');
+        const exchangeItems = items.filter((item) => item.direction === 'exchange_in');
+        const isValidScan = (item, quantity) => quantity !== ''
+          && Number.isSafeInteger(Number(quantity))
+          && Number(quantity) >= 0
+          && Number(quantity) <= Number(item.quantity);
+        if (outboundItems.some((item) => !isValidScan(item, deliveryScanQuantities[item.id]))) {
+          throw validationError('items', 'Vui lòng nhập số lượng đã quét giao hợp lệ cho từng mặt hàng.');
         }
-        formData.append('signature_image', signatureBlob, `signature-${don.id}.png`);
-        formData.append('cod_collected', String(xacNhanTien));
-        if (tinhTongTienCanThu(don) > 0) formData.append('cod_payment_method', phuongThucCOD);
-      }
-      
-      if (loai === 'returning') {
-        formData.append('fail_reason', lyDoHuy);
+        if (!outboundItems.some((item) => Number(deliveryScanQuantities[item.id]) > 0)) {
+          throw validationError('items', 'Cần xác nhận giao ít nhất một mặt hàng.');
+        }
+        if (exchangeItems.some((item) => !isValidScan(item, returnScanQuantities[item.id])
+          || Number(returnScanQuantities[item.id]) !== Number(item.quantity))) {
+          throw validationError('items', 'Đơn đổi trả cần xác nhận quét thu hồi đủ số lượng hàng cũ.');
+        }
+        const amountToCollect = tinhTienTheoHangDaQuet(don, deliveryScanQuantities);
+        if (amountToCollect > 0 && !xacNhanTien) {
+          throw validationError('cod', 'Vui lòng xác nhận đã thu đủ COD và phí vận chuyển.');
+        }
+        if (amountToCollect > 0 && !['cash', 'bank_transfer'].includes(phuongThucCOD)) {
+          throw validationError('payment', 'Vui lòng chọn tiền mặt hoặc chuyển khoản.');
+        }
+        if (!anhMinhChung || anhMinhChung.size <= 0) {
+          throw validationError('proof', 'Vui lòng chụp ảnh bằng chứng giao hàng.');
+        }
+        if (!signatureDrawn) {
+          throw validationError('signature', 'Người nhận chưa ký.');
+        }
       }
 
-      const res = await fetch(`http://localhost:5000/api/orders/${don.id}/status`, {
-        method: 'PUT',
-        body: formData // Fetch tự động nhận diện FormData và set Content-Type: multipart/form-data
-      });
-      
-      const data = await res.json();
-      
-      if (data.success) {
-        alert(loai === 'completed' ? 'Đã xác nhận giao hàng và thu đủ COD + cước.' : 'Đã ghi nhận chuyển hoàn hàng!');
-        dongModal();
-        taiDuLieu();
-        taiViTien();
-      } else {
-        alert("Lỗi: " + data.message);
+      let evidenceLocation;
+      try {
+        if (!navigator.geolocation) throw new Error('unsupported');
+        evidenceLocation = await new Promise((resolve, reject) => {
+          navigator.geolocation.getCurrentPosition(
+            (position) => resolve({
+              lat: position.coords.latitude,
+              lng: position.coords.longitude
+            }),
+            reject,
+            { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+          );
+        });
+      } catch {
+        throw validationError('gps', 'Chưa lấy được vị trí GPS. Hãy bật quyền vị trí và thử lại.');
       }
-    } catch {
-      alert('Lỗi kết nối máy chủ!');
+
+      const formData = new FormData();
+      formData.append('status', loai);
+      formData.append('user_id', driverId);
+      formData.append('lat', String(evidenceLocation.lat));
+      formData.append('lng', String(evidenceLocation.lng));
+
+      if (anhMinhChung) formData.append('proof_image', anhMinhChung, anhMinhChung.name);
+      if (loai === 'completed') {
+        const hasExchangeItems = don.order_items.some((item) => item.direction === 'exchange_in');
+        const deliveredItems = Object.entries(deliveryScanQuantities).map(([itemId, quantity]) => ({
+          order_item_id: Number(itemId),
+          quantity: Number(quantity)
+        }));
+        const collectedItems = Object.entries(returnScanQuantities).map(([itemId, quantity]) => ({
+          order_item_id: Number(itemId),
+          quantity: Number(quantity)
+        }));
+        formData.append('delivered_items', JSON.stringify(deliveredItems));
+        if (hasExchangeItems) formData.append('collected_items', JSON.stringify(collectedItems));
+
+        const signatureCanvas = signatureCanvasRef.current;
+        if (!signatureCanvas) throw validationError('signature', 'Không tìm thấy vùng ký. Vui lòng mở lại xác nhận giao hàng.');
+        const signatureBlob = await new Promise((resolve) => signatureCanvas.toBlob(resolve, 'image/png'));
+        if (!signatureBlob || signatureBlob.size <= 0) {
+          throw validationError('signature', 'Không tạo được ảnh chữ ký. Vui lòng ký lại.');
+        }
+        formData.append('signature_image', signatureBlob, `signature-${don.id}.png`);
+        const amountToCollect = tinhTienTheoHangDaQuet(don, deliveryScanQuantities);
+        formData.append('cod_collected', String(amountToCollect > 0 && xacNhanTien));
+        if (amountToCollect > 0) formData.append('cod_payment_method', phuongThucCOD);
+      }
+
+      if (['pickup_failed', 'delivery_failed'].includes(loai)) {
+        formData.append('reason_code', lyDoHuy);
+        formData.append('fail_reason', [selectedFailureReason.description, ghiChuXuLy.trim()]
+          .filter(Boolean).join(' — '));
+      }
+
+      const response = await fetch(`/api/orders/${don.id}/status`, {
+        method: 'PUT',
+        body: formData
+      });
+      let data;
+      try {
+        data = await response.json();
+      } catch {
+        throw new Error('Máy chủ trả về phản hồi không hợp lệ. Vui lòng thử lại.');
+      }
+      if (!response.ok || !data.success) {
+        const message = String(data.message || '');
+        if (/reason.?code|lý do/i.test(message)) {
+          throw validationError('reason', 'Mã lý do không hợp lệ hoặc không còn áp dụng cho đơn này.');
+        }
+        if (/photo|image|ảnh|bằng chứng/i.test(message)) {
+          throw validationError('proof', 'Máy chủ chưa nhận được ảnh bằng chứng. Vui lòng chụp lại.');
+        }
+        if (/signature|chữ ký/i.test(message)) {
+          throw validationError('signature', 'Máy chủ chưa nhận được chữ ký. Vui lòng ký lại.');
+        }
+        if (/lat|lng|gps|tọa độ|coordinates/i.test(message)) {
+          throw validationError('gps', 'Chưa lấy được vị trí GPS hợp lệ. Hãy bật quyền vị trí và thử lại.');
+        }
+        throw new Error(message.includes('Không') || message.includes('Vui lòng')
+          ? message
+          : 'Không thể cập nhật đơn hàng. Vui lòng thử lại.');
+      }
+
+      alert(loai === 'completed' ? 'Đã xác nhận giao hàng thành công.' : (data.message || 'Đã ghi nhận báo cáo giao hàng.'));
+      dongModal();
+      await Promise.all([taiDuLieu(), taiViTien()]);
+    } catch (error) {
+      if (error.field) {
+        hienLoiTruong(error.field, error.message);
+      } else {
+        setSubmitError(error.message || 'Không thể gửi báo cáo. Vui lòng thử lại.');
+      }
     } finally {
+      submitLockRef.current = false;
       setDangCapNhat(false);
     }
   };
 
   const dongModal = () => {
+    dongCamera();
     setModalXuLy({ mo: false, loai: '', don: null });
     setAnhMinhChung(null);
-    setAnhPreview(null);
+    setAnhPreview((current) => {
+      if (current) URL.revokeObjectURL(current);
+      return null;
+    });
     xoaChuKy();
     setLyDoHuy('');
     setXacNhanTien(false);
     setPhuongThucCOD('');
+    setDeliveryScanQuantities({});
+    setReturnScanQuantities({});
+    deliveryScanQuantitiesRef.current = {};
+    returnScanQuantitiesRef.current = {};
+    setScanItemMode(false);
+    setItemScanMessage('');
   };
 
   const guiDonNghiPhep = async (e) => {
@@ -859,7 +1394,7 @@ function MotorcycleDriverApp() {
     setDangGuiNghiPhep(true);
     
     try {
-      const res = await fetch('http://localhost:5000/api/hr/leave', {
+      const res = await fetch('/api/hr/leave', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ user_id: driverId, reason: lyDoNghi })
@@ -886,38 +1421,71 @@ function MotorcycleDriverApp() {
   const donThanhCong = donHang.filter(d => d.status === 'completed');
   const donDangChay = donHang.filter(d => isPickupDriver
     ? ['picking', 'picked_up', 'transferring_to_central', 'transferring_to_destination'].includes(d.status)
-    : ['at_destination_warehouse', 'delivering'].includes(d.status));
+    : ['at_central_warehouse', 'at_destination_warehouse', 'delivering', 'returning'].includes(d.status));
   const tongTienThuHo = donThanhCong.reduce((sum, item) => sum + tinhTongTienCanThu(item), 0);
   const donHoanTatHomNay = donThanhCong.filter((order) => new Date(order.updated_at).toDateString() === new Date().toDateString()).length;
   const donTrongNgay = donDangChay.length + donHoanTatHomNay;
   const tienDoHomNay = donTrongNgay ? Math.round((donHoanTatHomNay / donTrongNgay) * 100) : 0;
+  const routeMode = isPickupDriver ? 'pickup' : 'delivery';
+  const activeDriverRoute = driverRoute[routeMode] || {};
+  const routeStops = useMemo(() => activeDriverRoute.stops || [], [activeDriverRoute.stops]);
+  const nextRouteStop = activeDriverRoute.next_stop || routeStops[0] || null;
+  const routeGeometryKey = `${routeMode}:${routeStops.map((stop) => stop.stop_ids?.[0]).join(',')}`;
+  useEffect(() => {
+    if (!routeStops.length) return undefined;
+    const destination = routeStops[routeStops.length - 1];
+    const via = routeStops.slice(0, -1)
+      .map((stop) => `${stop.lat},${stop.lng}`).join('|');
+    const query = new URLSearchParams({
+      from: `${GOVAP_MAP_CENTER[0]},${GOVAP_MAP_CENTER[1]}`,
+      to: `${destination.lat},${destination.lng}`
+    });
+    if (via) query.set('via', via);
+    const controller = new AbortController();
+    fetch(`${API_URL}/api/map/route?${query}`, { signal: controller.signal })
+      .then(async (response) => {
+        const result = await response.json();
+        if (!response.ok || !result.success) throw new Error(result.message || 'Không thể tải tuyến đường OSRM.');
+        setDriverRouteGeometry({
+          key: routeGeometryKey,
+          positions: result.data.geometry.coordinates.map(([lng, lat]) => [lat, lng])
+        });
+      })
+      .catch((error) => {
+        if (error.name !== 'AbortError') {
+          setDriverRouteGeometry({ key: routeGeometryKey, positions: [] });
+          console.error('Không thể tải hình học tuyến:', error);
+        }
+      });
+    return () => controller.abort();
+  }, [routeGeometryKey, routeStops]);
   const nextMission = donDangChay
     .map((order) => {
       const target = isPickupDriver
         ? { lat: order.shop_lat, lng: order.shop_lng }
-        : { lat: order.receiver_lat, lng: order.receiver_lng };
+        : order.status === 'returning'
+        ? { lat: order.shop_lat, lng: order.shop_lng }
+        : getDeliveryCoordinates(order) || {};
       const hasTarget = Number.isFinite(Number(target.lat)) && Number.isFinite(Number(target.lng));
       return { ...order, distance: hasTarget ? distanceBetween(viTriHienTai, target) : Number.POSITIVE_INFINITY };
     })
     .sort((first, second) => first.distance - second.distance)[0];
-  const donTheoTuyen = optimizedRouteIds.length
-    ? donDangChay
-      .map((order, currentIndex) => ({ order, rank: optimizedRouteIds.indexOf(order.id), currentIndex }))
-      .sort((first, second) => {
-        const firstRank = first.rank < 0 ? Number.MAX_SAFE_INTEGER : first.rank;
-        const secondRank = second.rank < 0 ? Number.MAX_SAFE_INTEGER : second.rank;
-        return firstRank - secondRank || first.currentIndex - second.currentIndex;
-      })
-      .map(({ order }) => order)
-    : donDangChay;
-  const toiUuTuyenGiao = () => {
-    const { orders, totalDistance, optimizedCount } = optimizeDeliveryStops(viTriHienTai, donDangChay);
-    if (!optimizedCount) {
-      alert('Các đơn hiện tại chưa có tọa độ người nhận hợp lệ để sắp xếp tuyến.');
-      return;
-    }
-    setOptimizedRouteIds(orders.map((order) => order.id));
-    setOptimizedRouteDistance(totalDistance);
+  const routeOrderByOrderId = new Map(routeStops.flatMap((stop) => (
+    (stop.order_ids || []).map((orderId) => [Number(orderId), Number(stop.stop_sequence)])
+  )));
+  const donTheoTuyen = [...donDangChay].sort((first, second) => {
+    const firstOrder = routeOrderByOrderId.get(Number(first.id)) || Number.MAX_SAFE_INTEGER;
+    const secondOrder = routeOrderByOrderId.get(Number(second.id)) || Number.MAX_SAFE_INTEGER;
+    return firstOrder - secondOrder || Number(first.route_order || 0) - Number(second.route_order || 0);
+  });
+  const handleRouteStopDrop = (targetStopId) => {
+    if (!draggedStopId || draggedStopId === targetStopId || routeReorderBusy) return;
+    const ordered = routeStops.map((stop) => stop.stop_ids[0]);
+    const fromIndex = ordered.indexOf(Number(draggedStopId));
+    const toIndex = ordered.indexOf(Number(targetStopId));
+    if (fromIndex < 0 || toIndex < 0) return;
+    ordered.splice(toIndex, 0, ordered.splice(fromIndex, 1)[0]);
+    doiThuTuLoTrinh(routeMode, ordered);
   };
   return (
     <div className="bg-slate-100 min-h-screen flex justify-center font-sans text-slate-800">
@@ -936,7 +1504,7 @@ function MotorcycleDriverApp() {
               </div>
             </div>
             <div className="flex items-center gap-2">
-              <span className={`flex items-center gap-1 rounded-full px-2 py-1 text-[10px] font-black ${dangOnline ? 'bg-emerald-400/20 text-emerald-100' : 'bg-red-400/20 text-red-100'}`}>{dangOnline ? <Wifi size={13} /> : <WifiOff size={13} />}{dangOnline ? 'ONLINE' : 'OFFLINE'}</span>
+              <span className={`flex items-center gap-1 rounded-full px-2 py-1 text-[10px] font-black ${dangOnline && !apiDisconnected ? 'bg-emerald-400/20 text-emerald-100' : 'bg-red-400/20 text-red-100'}`}>{dangOnline && !apiDisconnected ? <Wifi size={13} /> : <WifiOff size={13} />}{dangOnline && !apiDisconnected ? 'ONLINE' : 'OFFLINE'}</span>
               <button type="button" onClick={() => setShowSos(true)} className="rounded-full bg-red-500 p-2 text-white shadow-lg shadow-red-900/20" aria-label="Báo cáo sự cố SOS"><Siren size={18} /></button>
               <button onClick={dangXuat} className="bg-white/10 hover:bg-white/20 p-2 rounded-full transition-colors" aria-label="Đăng xuất">
                 <LogOut size={18} />
@@ -951,26 +1519,87 @@ function MotorcycleDriverApp() {
               </div>
               <div>
                 <p className="text-slate-400 text-[10px] font-bold uppercase">COD TIỀN MẶT ĐANG GIỮ</p>
-                <h3 className="font-black text-lg text-slate-800">{viTien.toLocaleString()} đ</h3>
+                {walletLoadError && !apiDisconnected
+                  ? <p className="mt-1 text-sm font-semibold text-rose-700" role="alert">{walletLoadError}</p>
+                  : <h3 className="font-black text-lg text-slate-800">{walletLoading ? 'Đang tải...' : `${viTien.toLocaleString()} đ`}</h3>}
               </div>
             </div>
+            {walletLoadError && !apiDisconnected && (
+              <button type="button" onClick={() => { void taiViTien(); }} disabled={walletLoading} className="rounded-lg bg-blue-700 px-3 py-2 text-xs font-bold text-white disabled:opacity-60">
+                Thử lại
+              </button>
+            )}
           </div>
         </div>
 
         {/* CONTENT */}
         <div className="flex-1 overflow-y-auto pb-28">
-          {routeInfo && (isPickupDriver ? ['picking', 'picked_up', 'transferring_to_central', 'transferring_to_destination'].includes(routeInfo.status) : ['at_destination_warehouse', 'delivering'].includes(routeInfo.status)) && (
+          {apiDisconnected && (
+            <div className="sticky top-0 z-40 flex items-center gap-2 border-b border-amber-300 bg-amber-100 px-4 py-2 text-sm font-bold text-amber-950" role="status" aria-live="polite">
+              <WifiOff size={16} /> Đang mất kết nối
+            </div>
+          )}
+          {ordersLoading && donHang.length === 0 && (
+            <div className="space-y-3 p-4" role="status" aria-live="polite" aria-busy="true">
+              <p className="text-sm font-bold text-slate-700">Đang tải đơn hàng và lộ trình...</p>
+              {[1, 2, 3].map((item) => (
+                <div key={item} className="h-24 animate-pulse rounded-2xl bg-slate-100" />
+              ))}
+            </div>
+          )}
+          {ordersLoadError && !apiDisconnected && (
+            <div className="m-4 rounded-2xl border border-rose-200 bg-rose-50 p-4" role="alert">
+              <p className="font-bold text-rose-900">{ordersLoadError}</p>
+              <button
+                type="button"
+                onClick={() => { void taiDuLieu(); }}
+                disabled={ordersLoading}
+                className="mt-3 rounded-lg bg-rose-700 px-4 py-2 text-sm font-bold text-white disabled:opacity-60"
+              >
+                {ordersLoading ? 'Đang thử lại...' : 'Thử lại'}
+              </button>
+            </div>
+          )}
+          {routeLoadError && !apiDisconnected && (
+            <div className="mx-4 mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-4" role="alert">
+              <p className="font-bold text-amber-900">Không tải được lộ trình: {routeLoadError}</p>
+              <button
+                type="button"
+                onClick={() => {
+                  void taiLoTrinh().catch((error) => console.error('Không thể thử tải lại lộ trình:', error));
+                }}
+                className="mt-3 rounded-lg bg-amber-700 px-4 py-2 text-sm font-bold text-white"
+              >
+                Thử lại lộ trình
+              </button>
+            </div>
+          )}
+          {((routeInfo && (isPickupDriver ? ['picking', 'picked_up', 'transferring_to_central', 'transferring_to_destination'].includes(routeInfo.status) : ['at_central_warehouse', 'at_destination_warehouse', 'delivering'].includes(routeInfo.status))) || routeStops.length > 0) && (
             <div className="p-4 border-b border-slate-100 bg-slate-50">
               <div className="mb-2 flex items-center justify-between">
                 <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">{taskRoute?.label || 'Lộ trình vận chuyển'}</p>
                 <span className="rounded-full bg-emerald-100 px-2 py-1 text-[10px] font-bold text-emerald-700">{isPickupDriver ? 'Lấy hàng / trung chuyển' : 'Giao hàng'}</span>
               </div>
-              <div className="h-36 overflow-hidden rounded-2xl border border-slate-200">
-                <iframe
-                  title="Driver route map"
-                  className="h-full w-full border-0"
-                  src={`https://www.google.com/maps?q=${encodeURIComponent(diemDen)}&z=14&output=embed`}
-                />
+              <div className="relative z-0 isolate h-56 w-full overflow-hidden rounded-2xl sm:h-64">
+              <MapContainer
+                center={[Number.isFinite(originLat) ? originLat : Number(routeStops[0]?.lat || GOVAP_MAP_CENTER[0]), Number.isFinite(originLng) ? originLng : Number(routeStops[0]?.lng || GOVAP_MAP_CENTER[1])]}
+                zoom={15}
+                scrollWheelZoom
+                className="relative z-0 h-full w-full rounded-2xl border border-slate-200"
+              >
+                <InvalidateMapSize />
+                <TileLayer attribution={MAP_ATTRIBUTION} url={MAP_TILE_URL} />
+                {driverRouteGeometry?.key === routeGeometryKey && driverRouteGeometry.positions.length > 1
+                  && <Polyline positions={driverRouteGeometry.positions} pathOptions={{ color: isPickupDriver ? '#d97706' : '#2563eb', weight: 5 }} />}
+                {routeGeometry.length > 1 && <Polyline positions={routeGeometry} pathOptions={{ color: '#2563eb', weight: 5 }} />}
+                {routeStops.map((stop, index) => (
+                  <Marker key={`route-stop-${stop.stop_ids[0]}`} position={[Number(stop.lat), Number(stop.lng)]} icon={routeStopIcon(index + 1, routeMode)}>
+                    <Popup><strong>Điểm {index + 1}</strong><br />{(stop.tracking_codes || []).join(', ')}<br />{stop.address}</Popup>
+                  </Marker>
+                ))}
+                {Number.isFinite(originLat) && Number.isFinite(originLng) && <Marker position={[originLat, originLng]} icon={truckIcon}><Popup>Điểm đi</Popup></Marker>}
+                {Number.isFinite(destinationLat) && Number.isFinite(destinationLng) && <Marker position={[destinationLat, destinationLng]} icon={truckIcon}><Popup>Điểm đến</Popup></Marker>}
+              </MapContainer>
               </div>
               <div className="mt-3 space-y-2">
                 <div className="rounded-xl bg-white p-3">
@@ -982,9 +1611,20 @@ function MotorcycleDriverApp() {
                   <p className="text-[10px] font-black uppercase tracking-wider text-blue-700">Điểm đến</p>
                   <p className="mt-1 text-xs font-medium text-slate-700">{diemDen}</p>
                 </div>
-                <a href={urlChiDuong} target="_blank" rel="noreferrer" className="flex w-full items-center justify-center gap-2 rounded-xl bg-blue-600 px-4 py-3 text-sm font-bold text-white hover:bg-blue-700">
-                  <Navigation size={16} /> Mở chỉ đường
-                </a>
+                {directions && <p className="rounded-xl bg-emerald-50 p-3 text-xs font-bold text-emerald-800">
+                  Lộ trình nội bộ: {(directions.distance_m / 1000).toFixed(1)} km · khoảng {Math.ceil(directions.duration_s / 60)} phút
+                </p>}
+                {directionsError && <p role="alert" className="rounded-xl bg-amber-50 p-3 text-xs font-semibold text-amber-800">{directionsError}</p>}
+                {directions?.steps?.length > 0 && (
+                  <ol className="max-h-48 space-y-2 overflow-y-auto rounded-xl bg-white p-3">
+                    {directions.steps.map((step, index) => (
+                      <li key={`${index}-${step.instruction}`} className="flex gap-2 text-xs text-slate-700">
+                        <span className="font-black text-blue-700">{index + 1}.</span>
+                        <span>{step.instruction} · {step.distance_m >= 1000 ? `${(step.distance_m / 1000).toFixed(1)} km` : `${Math.round(step.distance_m)} m`}</span>
+                      </li>
+                    ))}
+                  </ol>
+                )}
               </div>
             </div>
           )}
@@ -998,6 +1638,18 @@ function MotorcycleDriverApp() {
                   <p className="mt-1 text-sm font-bold text-slate-700">{isPickupDriver ? 'Nhận kiện từ cửa hàng và bàn giao đúng kho.' : 'Nhận kiện tại kho đích và giao trực tiếp cho người nhận.'}</p>
                 </div>
               </section>
+              <section className="rounded-2xl border border-emerald-100 bg-emerald-50 p-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-[10px] font-black uppercase tracking-wider text-emerald-700">Thu nhập hôm nay (ước tính)</p>
+                    <p className="mt-1 text-2xl font-black text-emerald-900">
+                      {thuNhapThamKhao ? `${BigInt(thuNhapThamKhao.estimated_income || '0').toLocaleString('vi-VN')} đ` : '—'}
+                    </p>
+                  </div>
+                  <Wallet className="text-emerald-600" size={24} />
+                </div>
+                <p className="mt-2 text-xs text-emerald-800">Chỉ mang tính tham khảo; tiền lương chính thức được xác nhận khi chốt kỳ.</p>
+              </section>
               <section className="flex items-center gap-5 rounded-[28px] bg-slate-900 p-5 text-white shadow-lg">
                 <div className="grid h-28 w-28 shrink-0 place-items-center rounded-full" style={{ background: `conic-gradient(${driverTheme.progress} ${tienDoHomNay * 3.6}deg, #334155 0deg)` }}>
                   <div className="grid h-20 w-20 place-items-center rounded-full bg-slate-900 text-center">
@@ -1007,17 +1659,30 @@ function MotorcycleDriverApp() {
                 <div><p className={`text-xs font-black uppercase tracking-wider ${driverTheme.accent}`}>Tiến độ hoàn thành</p><h3 className="mt-2 text-xl font-black">{donHoanTatHomNay}/{donTrongNgay} đơn</h3><p className="mt-1 text-xs text-slate-400">Cố lên, hoàn thành các nhiệm vụ còn lại!</p></div>
               </section>
               <section className={`rounded-2xl border p-4 ${driverTheme.mission}`}>
-                <div className="flex items-center justify-between"><p className={`text-xs font-black uppercase tracking-wider ${driverTheme.missionLabel}`}>{isPickupDriver ? 'Điểm nhận tiếp theo · Gần bạn nhất' : 'Điểm giao tiếp theo · Gần bạn nhất'}</p><Navigation size={16} className={isPickupDriver ? 'text-amber-600' : 'text-blue-600'} /></div>
+                <div className="flex items-center justify-between"><p className={`text-xs font-black uppercase tracking-wider ${driverTheme.missionLabel}`}>Điểm kế tiếp trong lộ trình</p><Navigation size={16} className={isPickupDriver ? 'text-amber-600' : 'text-blue-600'} /></div>
                 {offlineSyncNotice && <p role="status" className="mb-3 rounded-lg bg-amber-100 p-3 text-xs font-bold text-amber-800">{offlineSyncNotice}</p>}
-                {nextMission ? <div className="mt-3">
+                {nextRouteStop ? <div className="mt-3">
+                  <h3 className="font-black text-slate-800">{(nextRouteStop.tracking_codes || []).join(', ')}</h3>
+                  <p className="mt-1 text-sm text-slate-600">{nextRouteStop.address || 'Chưa có địa chỉ'}</p>
+                  <p className={`mt-1 text-xs font-bold ${driverTheme.missionLabel}`}>
+                    ETA {nextRouteStop.eta ? new Date(nextRouteStop.eta).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' }) : 'đang tính'}
+                    · {Number(nextRouteStop.order_ids?.length || 0)} đơn
+                    · COD {Number(nextRouteStop.cod_to_collect || 0).toLocaleString('vi-VN')} đ
+                  </p>
+                  {routeMode === 'pickup' && nextRouteStop.ranking_reason && (
+                    <p className="mt-1 text-xs font-medium text-slate-700">Ưu tiên: {nextRouteStop.ranking_reason}</p>
+                  )}
+                  <a href={`https://www.google.com/maps/dir/?api=1&destination=${nextRouteStop.lat},${nextRouteStop.lng}`} target="_blank" rel="noreferrer" className={`mt-3 inline-flex rounded-lg px-4 py-2 text-sm font-bold text-white ${driverTheme.action}`}>Chỉ đường</a>
+                  <button type="button" onClick={() => setTabHienTai('thu-gom')} className={`mt-3 rounded-lg px-4 py-2 text-sm font-bold text-white ${driverTheme.action}`}>Mở nhiệm vụ</button>
+                </div> : nextMission ? <div className="mt-3">
                   <h3 className="font-black text-slate-800">{nextMission.tracking_code}</h3>
-                  <p className="mt-1 text-sm text-slate-600">{isPickupDriver ? nextMission.shop_address : nextMission.receiver_address}</p>
+                  <p className="mt-1 text-sm text-slate-600">{isPickupDriver || nextMission.status === 'returning' ? nextMission.shop_address : nextMission.receiver_address}</p>
                   <p className={`mt-1 text-xs font-bold ${driverTheme.missionLabel}`}>{Number.isFinite(nextMission.distance) ? `${nextMission.distance.toFixed(1)} km từ vị trí gần nhất` : 'Vị trí địa chỉ chưa có'}</p>
                   <button type="button" onClick={() => setTabHienTai('thu-gom')} className={`mt-3 rounded-lg px-4 py-2 text-sm font-bold text-white ${driverTheme.action}`}>Mở nhiệm vụ</button>
                 </div> : <p className="mt-3 text-sm text-slate-600">Chưa có nhiệm vụ đang chờ. Hệ thống sẽ cập nhật khi Điều phối giao đơn.</p>}
               </section>
               <button type="button" onClick={() => setShowSos(true)} className="flex w-full items-center justify-center gap-2 rounded-2xl bg-red-600 p-4 font-black text-white shadow-md"><Siren size={19} /> SOS · Báo sự cố khẩn cấp</button>
-              <button type="button" onClick={() => setTabHienTai('bando')} className="flex w-full items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white p-3 text-sm font-bold text-slate-700"><Map size={17} /> Mở bản đồ vị trí GPS</button>
+              <button type="button" onClick={() => setTabHienTai('bando')} className="flex w-full items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white p-3 text-sm font-bold text-slate-700"><MapIcon size={17} /> Mở bản đồ vị trí GPS</button>
             </div>
           )}
 
@@ -1027,17 +1692,43 @@ function MotorcycleDriverApp() {
                 <h3 className="font-black text-base text-slate-800 flex items-center gap-2 mb-1">
                   <Navigation className="text-blue-600" size={18} /> {isPickupDriver ? 'Đơn cần lấy' : 'Đơn cần giao'} ({donDangChay.length})
                 </h3>
-                {!isPickupDriver && donDangChay.length > 1 && (
-                  <button type="button" onClick={toiUuTuyenGiao} className="flex shrink-0 items-center gap-1 rounded-lg bg-indigo-600 px-3 py-2 text-xs font-black text-white">
-                    <Route size={14} /> Tối ưu đường đi
-                  </button>
-                )}
+                {routeReorderBusy && <span className="text-xs font-bold text-indigo-700">Đang lưu thứ tự...</span>}
               </div>
-              {optimizedRouteIds.length > 0 && (
-                <div className="flex items-center justify-between rounded-lg bg-indigo-50 p-3 text-xs text-indigo-800">
-                  <span>Tuyến đã sắp xếp · ước tính {optimizedRouteDistance.toFixed(1)} km theo đường chim bay</span>
-                  <button type="button" onClick={() => { setOptimizedRouteIds([]); setOptimizedRouteDistance(null); }} className="font-black underline">Xóa</button>
-                </div>
+              {routeStops.length > 0 && (
+                <section className="space-y-2 rounded-2xl border border-indigo-100 bg-indigo-50 p-3">
+                  <div className="flex items-center justify-between text-xs font-bold text-indigo-900">
+                    <span>{activeDriverRoute.summary?.is_estimated ? 'Tuyến ước tính' : 'Tuyến theo OSRM'} · {(Number(activeDriverRoute.summary?.total_distance_m || 0) / 1000).toFixed(1)} km · {Math.ceil(Number(activeDriverRoute.summary?.total_duration_s || 0) / 60)} phút</span>
+                    <Route size={16} />
+                  </div>
+                  {routeStops.map((stop, index) => (
+                    <article
+                      key={stop.stop_ids[0]}
+                      draggable={!routeReorderBusy}
+                      onDragStart={() => setDraggedStopId(String(stop.stop_ids[0]))}
+                      onDragOver={(event) => event.preventDefault()}
+                      onDrop={() => handleRouteStopDrop(stop.stop_ids[0])}
+                      onDragEnd={() => setDraggedStopId(null)}
+                      className={`rounded-xl border bg-white p-3 ${index === 0 ? 'border-indigo-400 shadow-sm' : 'border-slate-200'} ${draggedStopId === String(stop.stop_ids[0]) ? 'opacity-50' : ''}`}
+                    >
+                      <div className="flex items-start gap-3">
+                        <span className="grid h-7 w-7 shrink-0 place-items-center rounded-full bg-indigo-600 text-xs font-black text-white">{index + 1}</span>
+                        <div className="min-w-0 flex-1">
+                          <p className="text-sm font-bold text-slate-900">{(stop.tracking_codes || []).join(', ')}</p>
+                          <p className="mt-1 text-xs text-slate-700">{stop.address || 'Chưa có địa chỉ'}</p>
+                          <p className="mt-1 text-xs font-semibold text-indigo-800">
+                            ETA {stop.eta ? new Date(stop.eta).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' }) : 'đang tính'}
+                            · {stop.order_ids.length} đơn · COD {Number(stop.cod_to_collect || 0).toLocaleString('vi-VN')} đ
+                          </p>
+                          {routeMode === 'pickup' && stop.ranking_reason && (
+                            <p className="mt-1 text-xs font-medium text-slate-700">Ưu tiên: {stop.ranking_reason}</p>
+                          )}
+                        </div>
+                        <a href={`https://www.google.com/maps/dir/?api=1&destination=${stop.lat},${stop.lng}`} target="_blank" rel="noreferrer" aria-label="Chỉ đường đến điểm dừng" className="rounded-lg bg-indigo-100 p-2 text-indigo-800"><Navigation size={16} /></a>
+                      </div>
+                    </article>
+                  ))}
+                  <p className="text-[11px] text-indigo-800">Kéo điểm dừng để đổi thứ tự; hệ thống sẽ yêu cầu nhập lý do và lưu nhật ký.</p>
+                </section>
               )}
 
               {donDangChay.length === 0 ? (
@@ -1049,67 +1740,82 @@ function MotorcycleDriverApp() {
               ) : (
                 donTheoTuyen.map((don) => (
                   <div key={don.id} className="bg-white rounded-[24px] shadow-sm border border-slate-100 overflow-hidden relative">
-                    <div className={`absolute top-0 left-0 w-1.5 h-full ${don.status === 'picking' ? 'bg-blue-500' : 'bg-amber-500'}`}></div>
+                    <div className="absolute top-0 left-0 h-full w-1.5 bg-slate-300"></div>
                     <div className="p-5 pl-6">
                       <div className="flex justify-between items-center mb-3 border-b border-slate-50 pb-2">
-                        <span className="font-black text-slate-800">{don.tracking_code}</span>
-                        <span className={`px-2.5 py-1 rounded-md text-[10px] font-bold uppercase ${don.status === 'picking' ? 'bg-blue-50 text-blue-600' : 'bg-amber-50 text-amber-600'}`}>
-                          {{
-                            picking: 'Đang đến Shop',
-                            picked_up: 'Đã lấy hàng',
-                            transferring_to_central: 'Điều chuyển về kho tổng',
-                            transferring_to_destination: 'Điều chuyển về kho con đích',
-                            at_destination_warehouse: 'Chờ xuất phát giao',
-                            delivering: 'Đang giao'
-                          }[don.status]}
-                        </span>
+                        <span className="font-black text-slate-800">{don.tracking_code}{don.route_order ? <span className="ml-2 rounded-md bg-blue-50 px-2 py-1 text-[10px] font-black text-blue-700">Điểm {don.route_order}</span> : null}</span>
+                        <OrderStatusBadge status={don.status} />
                       </div>
+                      <p className="mb-3 text-[11px] font-semibold text-slate-500">
+                        Lần lấy thất bại: {Number(don.pickup_attempts || 0)} · Lần giao tính lượt: {Number(don.delivery_attempts || 0)}
+                      </p>
                       <div className="space-y-2.5 mb-4 text-sm">
                         <div className="flex items-start gap-2.5">
                           <UserCircle size={16} className="text-slate-400 mt-0.5 shrink-0" />
                           <div>
-                            <p className="font-bold text-slate-800">{isPickupDriver ? taskRoute?.label || 'Nhiệm vụ lấy hàng / trung chuyển' : don.receiver_name}</p>
-                              {!isPickupDriver && <a href={`tel:${don.receiver_phone}`} className="text-blue-600 font-bold text-xs">{don.receiver_phone}</a>}
+                            <p className="font-bold text-slate-800">{isPickupDriver ? taskRoute?.label || 'Nhiệm vụ lấy hàng / trung chuyển' : don.status === 'returning' ? 'Hoàn hàng về Shop' : don.receiver_name}</p>
+                              {!isPickupDriver && <a href={`tel:${don.status === 'returning' ? don.shop_phone : don.receiver_phone}`} className="text-blue-600 font-bold text-xs">{don.status === 'returning' ? don.shop_phone : don.receiver_phone}</a>}
                           </div>
                         </div>
                         <div className="flex items-start gap-2.5">
                           <MapPin size={16} className="text-orange-400 mt-0.5 shrink-0" />
-                          <p className="text-slate-600 text-xs leading-relaxed">{isPickupDriver ? diemDen : don.receiver_address}</p>
+                          <p className="text-slate-600 text-xs leading-relaxed">{isPickupDriver ? diemDen : don.status === 'returning' ? don.shop_address : don.receiver_address}</p>
                         </div>
-                        {!isPickupDriver && <div className="bg-slate-50 p-2.5 rounded-xl space-y-1.5 text-xs">
+                        {!isPickupDriver && don.status !== 'returning' && <div className="bg-slate-50 p-2.5 rounded-xl space-y-1.5 text-xs">
                           <div className="flex justify-between"><span className="font-bold text-slate-500">COD hàng:</span><span>{Number(don.cod_amount || 0).toLocaleString()} đ</span></div>
                           <div className="flex justify-between"><span className="font-bold text-slate-500">Cước vận chuyển:</span><span>{Number(don.shipping_fee || 0).toLocaleString()} đ</span></div>
                           <div className="flex justify-between border-t border-slate-200 pt-1.5"><span className="font-black text-slate-700">Tổng cần thu:</span><span className="font-black text-red-500 text-sm">{tinhTongTienCanThu(don).toLocaleString()} đ</span></div>
                         </div>}
                       </div>
+                      {!isPickupDriver && ['at_central_warehouse', 'at_destination_warehouse', 'delivering', 'completed'].includes(don.status) && (
+                        <button type="button" onClick={() => setChatOrder(don)} className="mb-3 flex w-full items-center justify-center gap-2 rounded-xl border border-blue-100 bg-blue-50 py-2.5 text-xs font-black text-blue-700 hover:bg-blue-100">
+                          <MessageCircle size={15} /> Nhắn trực tiếp người nhận
+                        </button>
+                      )}
                       <div className="grid grid-cols-2 gap-2">
                         {don.status === 'picking' ? (
-                          <button onClick={() => xacNhanDaLayHang(don)} className="col-span-2 bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded-xl text-xs transition-all shadow-md shadow-blue-200">
-                            Mở camera quét mã nhận hàng
-                          </button>
+                          <>
+                            <button onClick={() => xacNhanDaLayHang(don)} className="col-span-2 bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded-xl text-xs transition-all shadow-md shadow-blue-200">
+                              Mở camera quét mã nhận hàng
+                            </button>
+                            <button onClick={() => { resetFormErrors(); setModalXuLy({ mo: true, loai: 'pickup_failed', don }); }} className="col-span-2 rounded-xl border border-red-100 bg-red-50 py-3 text-xs font-bold text-red-600">
+                              Báo lấy hàng thất bại
+                            </button>
+                          </>
+                        ) : don.status === 'returning' ? (
+                          <p className="col-span-2 rounded-xl bg-orange-50 px-3 py-3 text-center text-xs font-bold text-orange-700">Mang hàng hoàn về kho tổng để quét nhận.</p>
                         ) : don.status === 'picked_up' || don.status === 'transferring_to_central' || don.status === 'transferring_to_destination' ? (
-                          <p className="col-span-2 rounded-xl bg-amber-50 px-3 py-3 text-center text-xs font-bold text-amber-700">{don.status === 'picked_up' ? 'Đã lấy tại Shop, chờ kho con quét nhận.' : 'Đang trung chuyển, kho nhận sẽ quét khi hàng đến.'}</p>
-                        ) : don.status === 'at_destination_warehouse' ? (
+                          <p className="col-span-2 rounded-xl bg-amber-50 px-3 py-3 text-center text-xs font-bold text-amber-700">{don.status === 'picked_up' ? 'Đã lấy tại Shop, chờ kho tổng Gò Vấp quét nhận.' : 'Đang trung chuyển, kho nhận sẽ quét khi hàng đến.'}</p>
+                        ) : ['at_central_warehouse', 'at_destination_warehouse'].includes(don.status) ? (
                           <button onClick={() => batDauGiaoHang(don.id, don.tracking_code)} className="col-span-2 bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded-xl text-xs transition-all shadow-md shadow-blue-200">
-                            Nhận hàng tại kho con và bắt đầu giao
+                            {don.status === 'at_destination_warehouse' ? 'Nhận hàng tại kho đích và bắt đầu giao' : 'Nhận hàng tại kho tổng và bắt đầu giao'}
                           </button>
-                        ) : (
+                        ) : don.status === 'delivering' ? (
                           <>
                             <button 
-                              onClick={() => setModalXuLy({ mo: true, loai: 'completed', don })} 
+                              onClick={() => moModalGiaoHang(don)}
                               className="bg-emerald-500 text-white font-bold py-3 rounded-xl text-xs flex items-center justify-center gap-1"
                             >
                               <CheckCircle size={14} /> Giao Tới Nơi
                             </button>
                             <button 
-                              onClick={() => setModalXuLy({ mo: true, loai: 'returning', don })} 
+                              onClick={() => { resetFormErrors(); setModalXuLy({ mo: true, loai: 'delivery_failed', don }); }}
                               className="bg-red-50 text-red-500 font-bold py-3 rounded-xl text-xs border border-red-100 flex items-center justify-center gap-1"
                             >
                               <XCircle size={14} /> Báo Thất Bại
                             </button>
                           </>
-                        )}
+                        ) : don.status === 'completed' ? (
+                          <p className="col-span-2 rounded-xl bg-emerald-50 px-3 py-3 text-center text-xs font-bold text-emerald-800">
+                            Đơn đã giao thành công. Không thể gửi thêm kết quả giao hàng.
+                          </p>
+                        ) : ['delivery_failed', 'return_pending'].includes(don.status) ? (
+                          <p className="col-span-2 rounded-xl bg-orange-50 px-3 py-3 text-center text-xs font-bold text-orange-800">
+                            {don.status === 'delivery_failed' ? 'Giao hàng thất bại, chờ điều phối xử lý.' : 'Đơn đang chờ phân công hoàn về Shop.'}
+                          </p>
+                        ) : null}
                       </div>
+                      {chatOrder && <DriverOrderChat order={chatOrder} onClose={() => setChatOrder(null)} />}
                     </div>
                   </div>
                 ))
@@ -1118,10 +1824,11 @@ function MotorcycleDriverApp() {
           )}
 
           {tabHienTai === 'bando' && (
-            <div className="h-[calc(100vh-220px)] w-full flex flex-col">
+            <div className="relative z-0 isolate flex h-[calc(100vh-220px)] w-full flex-col">
               <div className="p-3 bg-blue-50 border-b border-blue-100 text-center text-xs font-bold text-blue-700">🛰️ GPS đang đồng bộ liên tục.</div>
               <MapContainer center={[viTriHienTai.lat, viTriHienTai.lng]} zoom={15} style={{ flex: 1, width: '100%' }}>
-                <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"/>
+                <InvalidateMapSize />
+                <TileLayer attribution={MAP_ATTRIBUTION} url={MAP_TILE_URL}/>
                 <Marker position={[viTriHienTai.lat, viTriHienTai.lng]} icon={truckIcon}><Popup><div className="font-bold">Bạn đang ở đây</div></Popup></Marker>
               </MapContainer>
             </div>
@@ -1160,8 +1867,8 @@ function MotorcycleDriverApp() {
                 <p className="text-xs font-black uppercase tracking-wider text-slate-400">Ví COD tiền mặt</p>
                 <h2 className="mt-2 text-3xl font-black text-emerald-700">{viTien.toLocaleString()} đ</h2>
                 <p className="mt-2 text-sm text-slate-500">Đang chờ Kế toán xác nhận: {tienChoNop.toLocaleString()} đ</p>
-                <button type="button" disabled={cashSubmitting || viTien <= 0 || !dangOnline} onClick={nopTienMat} className="mt-5 flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-3 font-black text-white disabled:cursor-not-allowed disabled:opacity-50"><Banknote size={18} />{cashSubmitting ? 'Đang gửi yêu cầu...' : 'Yêu cầu nộp tiền mặt'}</button>
-                {!dangOnline && <p className="mt-2 text-xs font-semibold text-amber-700">Cần có kết nối mạng để lập phiếu nộp tiền.</p>}
+                <button type="button" disabled={cashSubmitting || viTien <= 0 || !dangOnline || apiDisconnected} onClick={nopTienMat} className="mt-5 flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-3 font-black text-white disabled:cursor-not-allowed disabled:opacity-50"><Banknote size={18} />{cashSubmitting ? 'Đang gửi yêu cầu...' : 'Yêu cầu nộp tiền mặt'}</button>
+                {(!dangOnline || apiDisconnected) && <p className="mt-2 text-xs font-semibold text-amber-700">Cần có kết nối mạng để lập phiếu nộp tiền.</p>}
               </section>
               <section className="rounded-2xl border border-slate-200 bg-white p-5"><p className="font-black text-slate-800">Tổng COD và cước đã thu hôm nay</p><p className="mt-2 text-2xl font-black text-red-600">{tongTienThuHo.toLocaleString()} đ</p></section>
               <section className="rounded-2xl border border-orange-100 bg-white p-5 shadow-sm">
@@ -1172,11 +1879,11 @@ function MotorcycleDriverApp() {
                   <select name="expense_type" required className="w-full rounded-xl border border-slate-200 bg-white p-3 text-sm">
                     <option value="toll">Phí cầu đường</option><option value="parking">Phí gửi xe</option><option value="fuel">Nhiên liệu</option><option value="other">Khác</option>
                   </select>
-                  <input name="amount" type="number" required min="1" max="10000000" step="0.01" placeholder="Số tiền (tối đa 10.000.000đ)" className="w-full rounded-xl border border-slate-200 p-3 text-sm" />
+                  <input name="amount" type="number" required min="1" max="10000000" step="1" placeholder="Số tiền nguyên VND (tối đa 10.000.000đ)" className="w-full rounded-xl border border-slate-200 p-3 text-sm" />
                   <textarea name="note" required minLength={5} maxLength={500} rows={2} placeholder="Mô tả khoản chi" className="w-full rounded-xl border border-slate-200 p-3 text-sm" />
                   <input name="receipt_image" type="file" required accept="image/jpeg,image/png,image/webp" className="w-full text-sm" />
-                  <button type="submit" disabled={expenseSubmitting || !dangOnline} className="w-full rounded-xl bg-orange-600 px-4 py-3 font-black text-white disabled:opacity-50">{expenseSubmitting ? 'Đang gửi...' : 'Gửi Kế toán duyệt'}</button>
-                  {!dangOnline && <p className="text-xs font-semibold text-amber-700">Cần kết nối mạng để tải ảnh biên lai.</p>}
+                  <button type="submit" disabled={expenseSubmitting || !dangOnline || apiDisconnected} className="w-full rounded-xl bg-orange-600 px-4 py-3 font-black text-white disabled:opacity-50">{expenseSubmitting ? 'Đang gửi...' : 'Gửi Kế toán duyệt'}</button>
+                  {(!dangOnline || apiDisconnected) && <p className="text-xs font-semibold text-amber-700">Cần kết nối mạng để tải ảnh biên lai.</p>}
                 </form>
                 <div className="mt-5 border-t border-slate-100 pt-4">
                   <div className="mb-3 flex items-center justify-between"><h4 className="font-bold text-slate-700">Lịch sử yêu cầu</h4><button type="button" onClick={() => taiYeuCauPhuPhi().catch((error) => setExpenseNotice(error.message))} className="text-sm font-bold text-blue-700">Làm mới</button></div>
@@ -1238,7 +1945,6 @@ function MotorcycleDriverApp() {
           {[
             { id: 'dashboard', label: 'Trang chủ', Icon: House },
             { id: 'thu-gom', label: 'Thu gom', Icon: Package },
-            { id: 'handover', label: 'Bàn giao', Icon: PackageCheck },
             { id: 'wallet', label: 'Đối soát', Icon: Banknote },
             { id: 'canhan', label: 'Cá nhân', Icon: UserCircle }
           ].map(({ id, label, Icon }) => (
@@ -1299,56 +2005,212 @@ function MotorcycleDriverApp() {
         {showSos && (
           <div className="fixed inset-0 z-[130] flex items-center justify-center bg-slate-950/80 p-4">
             <form onSubmit={guiBaoCaoSuCo} className="w-full max-w-md space-y-4 rounded-2xl bg-white p-5">
-              <div className="flex items-center justify-between"><h3 className="flex items-center gap-2 text-lg font-black text-red-700"><Siren size={20} /> Báo cáo sự cố</h3><button type="button" onClick={() => setShowSos(false)} className="rounded-full bg-slate-100 p-2"><X size={18} /></button></div>
+              <div className="flex items-center justify-between"><h3 className="flex items-center gap-2 text-lg font-black text-red-700"><Siren size={20} /> Báo cáo sự cố</h3><button type="button" onClick={() => {
+                dongCamera();
+                setShowSos(false);
+                setSosEvidence(null);
+                setSosEvidencePreview((current) => {
+                  if (current) URL.revokeObjectURL(current);
+                  return '';
+                });
+              }} className="rounded-full bg-slate-100 p-2"><X size={18} /></button></div>
               <label className="block text-sm font-bold text-slate-600">Loại sự cố
                 <select value={sosType} onChange={(event) => setSosType(event.target.value)} className="mt-2 w-full rounded-lg border border-slate-200 bg-white p-3">
-                  <option value="accident">Tai nạn</option><option value="vehicle_breakdown">Hỏng xe</option><option value="traffic">Tắc đường</option><option value="other">Khác</option>
+                  <option value="accident">Tai nạn</option><option value="vehicle_breakdown">Hỏng xe</option><option value="traffic">Tắc đường</option><option value="wrong_item">Giao nhầm hàng</option><option value="customer_absent">Khách không có nhà</option><option value="damaged_goods">Hàng hóa hư hỏng</option><option value="lost_goods">Thất lạc hàng hóa</option><option value="other">Khác</option>
+                </select>
+              </label>
+              <label className="block text-sm font-bold text-slate-600">Đơn hàng liên quan (nếu có)
+                <select value={sosOrderId} onChange={(event) => setSosOrderId(event.target.value)} className="mt-2 w-full rounded-lg border border-slate-200 bg-white p-3">
+                  <option value="">Không chọn đơn hàng</option>
+                  {donDangChay.map((order) => <option key={order.id} value={order.id}>{order.tracking_code || `Đơn #${order.id}`} — {order.receiver_name || order.shop_name || 'Đơn đang giao'}</option>)}
                 </select>
               </label>
               <label className="block text-sm font-bold text-slate-600">Mô tả và hỗ trợ cần thiết
                 <textarea required maxLength={2000} value={sosDescription} onChange={(event) => setSosDescription(event.target.value)} rows={3} placeholder="Mô tả ngắn gọn tình huống..." className="mt-2 w-full rounded-lg border border-slate-200 p-3" />
               </label>
+              <div>
+                <p className="mb-2 text-sm font-bold text-slate-600">Ảnh sự cố gửi về Trung tâm (không bắt buộc)</p>
+                {sosEvidencePreview ? (
+                  <div className="relative">
+                    <img src={sosEvidencePreview} alt="Ảnh sự cố đã chọn" className="max-h-52 w-full rounded-xl border border-slate-200 bg-slate-50 object-contain" />
+                    <button type="button" onClick={() => {
+                      setSosEvidence(null);
+                      setSosEvidencePreview((current) => {
+                        if (current) URL.revokeObjectURL(current);
+                        return '';
+                      });
+                    }} aria-label="Xóa ảnh sự cố" className="absolute right-2 top-2 rounded-full bg-slate-900/75 p-2 text-white">
+                      <X size={16} />
+                    </button>
+                  </div>
+                ) : cameraTarget === 'sos' ? (
+                  <div className="space-y-2">
+                    <video ref={cameraVideoRef} autoPlay playsInline muted className="max-h-64 w-full rounded-xl bg-black object-contain" />
+                    <div className="flex gap-2">
+                      <button type="button" onClick={chupAnhTrucTiep} className="flex-1 rounded-lg bg-red-600 px-3 py-2 font-bold text-white">Chụp ảnh</button>
+                      <button type="button" onClick={dongCamera} className="rounded-lg bg-slate-200 px-3 py-2 font-bold text-slate-700">Đóng camera</button>
+                    </div>
+                  </div>
+                ) : (
+                  <button type="button" onClick={() => moCamera('sos')} className="flex h-24 w-full flex-col items-center justify-center gap-1 rounded-xl border-2 border-dashed border-red-200 bg-red-50 text-sm font-bold text-red-700">
+                    <Camera size={24} />
+                    Mở camera chụp ảnh sự cố
+                  </button>
+                )}
+                <p className="mt-1 text-xs text-slate-500">Camera mở trực tiếp trong ứng dụng; ảnh sẽ được nén trước khi gửi.</p>
+              </div>
               <p className="text-xs text-slate-500">Vị trí GPS hiện tại sẽ được gửi kèm khi báo cáo.</p>
-              <button type="submit" disabled={sendingSos} className="w-full rounded-xl bg-red-600 px-4 py-3 font-black text-white disabled:opacity-50">{sendingSos ? 'Đang gửi...' : 'Gửi SOS đến Trung tâm'}</button>
+              <button type="submit" disabled={sendingSos || !dangOnline || apiDisconnected} className="w-full rounded-xl bg-red-600 px-4 py-3 font-black text-white disabled:opacity-50">{sendingSos ? 'Đang gửi...' : 'Gửi SOS đến Trung tâm'}</button>
+              {(!dangOnline || apiDisconnected) && <p className="text-xs font-semibold text-amber-700">Cần kết nối mạng để gửi báo cáo và ảnh đến Trung tâm.</p>}
             </form>
           </div>
         )}
         {modalXuLy.mo && (
-          <div className="fixed inset-0 bg-slate-900/80 z-[100] flex flex-col justify-end">
-            <div className="bg-white w-full rounded-t-3xl p-6 pb-10 animate-in slide-in-from-bottom-full duration-300">
+          <div className="fixed inset-0 z-[1000] flex flex-col justify-end bg-slate-900/80">
+            <div className="max-h-[92vh] w-full overflow-y-auto rounded-t-3xl bg-white p-6 pb-10 animate-in slide-in-from-bottom-full duration-300">
               <div className="flex justify-between items-center mb-6">
                 <h3 className={`font-black text-xl flex items-center gap-2 ${modalXuLy.loai === 'completed' ? 'text-emerald-600' : 'text-red-600'}`}>
                   {modalXuLy.loai === 'completed' ? <CheckCircle /> : <AlertTriangle />}
                   {modalXuLy.loai === 'completed' ? 'Xác Nhận Thành Công' : 'Báo Cáo Thất Bại'}
                 </h3>
-                <button onClick={dongModal} className="bg-slate-100 p-2 rounded-full text-slate-500"><X size={20}/></button>
+                <button onClick={() => { dongCamera(); dongModal(); }} className="bg-slate-100 p-2 rounded-full text-slate-500"><X size={20}/></button>
               </div>
 
-              <form onSubmit={xacNhanThaoTac} className="space-y-5">
+              <form ref={formRef} onSubmit={xacNhanThaoTac} className="space-y-5">
+                {submitError && (
+                  <div role="alert" className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm font-semibold text-red-800">
+                    <p>{submitError}</p>
+                    <button
+                      type="button"
+                      onClick={() => formRef.current?.requestSubmit()}
+                      disabled={dangCapNhat}
+                      className="mt-2 rounded-lg bg-red-700 px-3 py-2 text-xs font-black text-white disabled:opacity-50"
+                    >
+                      {dangCapNhat ? 'Đang gửi...' : 'Thử gửi lại'}
+                    </button>
+                  </div>
+                )}
                 
                 {/* 1. MỤC DÀNH CHO THẤT BẠI: LÝ DO */}
-                {modalXuLy.loai === 'returning' && (
-                  <div>
-                    <label className="block text-sm font-bold text-slate-700 mb-2">Chọn lý do giao thất bại (*)</label>
+                {['pickup_failed', 'delivery_failed'].includes(modalXuLy.loai) && (
+                  <div data-form-field="reason" tabIndex={-1}>
+                    <label className="block text-sm font-bold text-slate-700 mb-2">
+                      {failureReasonGroup === 'PICKUP' ? 'Chọn lý do lấy hàng thất bại (*)' : 'Chọn lý do giao thất bại (*)'}
+                    </label>
                     <select 
-                      required
                       className="w-full bg-slate-50 border border-slate-200 rounded-xl p-3.5 outline-none focus:border-red-400 text-sm font-medium"
                       value={lyDoHuy}
-                      onChange={(e) => setLyDoHuy(e.target.value)}
+                      onChange={(e) => { setLyDoHuy(e.target.value); xoaLoiTruong('reason'); }}
                     >
                       <option value="">-- Nhấp để chọn lý do --</option>
-                      <option value="Khách không nghe máy (Đã gọi 3 lần)">Khách không nghe máy (Đã gọi 3 lần)</option>
-                      <option value="Sai địa chỉ / Không tìm thấy nhà">Sai địa chỉ / Không tìm thấy nhà</option>
-                      <option value="Khách đổi ý không nhận hàng">Khách đổi ý không nhận hàng</option>
-                      <option value="Hàng hóa bị móp méo, khách từ chối">Hàng hóa bị hỏng, khách từ chối</option>
+                      {failureReasonCodes[failureReasonGroup].map((reason) => (
+                        <option key={reason.code} value={reason.code}>{reason.description}</option>
+                      ))}
                     </select>
+                    {submitErrors.reason && <p role="alert" className="mt-2 text-xs font-semibold text-red-600">{submitErrors.reason}</p>}
+                    {reasonCodeError && <p role="alert" className="mt-2 text-xs font-semibold text-red-600">{reasonCodeError}</p>}
+                    {Number(selectedFailureReason?.require_evidence) === 1 && <p className="mt-2 text-xs font-semibold text-red-600">Mã lý do này yêu cầu ảnh minh chứng.</p>}
+                    <label className="mt-3 block text-sm font-semibold text-slate-700">
+                      Ghi chú bổ sung (nếu có)
+                      <textarea
+                        value={ghiChuXuLy}
+                        onChange={(event) => setGhiChuXuLy(event.target.value)}
+                        maxLength={1000}
+                        rows={2}
+                        placeholder="Mô tả thêm tình huống để trung tâm xử lý..."
+                        className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm"
+                      />
+                    </label>
                   </div>
                 )}
 
                 {/* 2. MỤC DÀNH CHO THÀNH CÔNG: XÁC NHẬN VÀ CHỌN HÌNH THỨC COD */}
                 {modalXuLy.loai === 'completed' && (
-                  <div className="bg-emerald-50 border border-emerald-100 p-4 rounded-xl">
-                    {tinhTongTienCanThu(modalXuLy.don) > 0 ? (
+                  <>
+                  <section data-form-field="items" tabIndex={-1} className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <h4 className="font-black text-slate-800">Xác nhận mặt hàng đã quét</h4>
+                        <p className="mt-1 text-xs text-slate-500">Quét QR từng dòng hàng hoặc nhập số lượng đã quét.</p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setItemScanMessage('');
+                          setScanItemMode((current) => !current);
+                        }}
+                        className="rounded-lg bg-blue-600 px-3 py-2 text-xs font-black text-white"
+                      >
+                        {scanItemMode ? 'Tắt camera quét' : 'Mở camera quét QR'}
+                      </button>
+                    </div>
+                    {scanItemMode && <div id="driver-order-item-scanner" className="mt-3 overflow-hidden rounded-lg bg-white" />}
+                    {itemScanMessage && <p role="status" className="mt-2 text-sm font-bold text-blue-700">{itemScanMessage}</p>}
+                    {submitErrors.items && <p role="alert" className="mt-2 text-sm font-semibold text-red-700">{submitErrors.items}</p>}
+                    <div className="mt-3 space-y-3">
+                      {modalXuLy.don.order_items.filter((item) => item.direction === 'outbound').map((item) => (
+                        <div key={item.id} className="flex items-center justify-between gap-3 rounded-lg bg-white p-3">
+                          <div className="min-w-0">
+                            <span className="block truncate text-sm font-bold text-slate-700">{item.item_name}</span>
+                            <span className="text-xs text-slate-500">Hàng giao · tối đa {item.quantity}</span>
+                            <details className="mt-1">
+                              <summary className="cursor-pointer text-xs font-bold text-blue-700">Hiện mã QR mặt hàng</summary>
+                              <div className="mt-2 inline-block rounded bg-white p-2">
+                                <QRCode value={`ORDER_ITEM:${modalXuLy.don.id}:${item.id}:OUT`} size={96} />
+                              </div>
+                            </details>
+                          </div>
+                          <input
+                            type="number"
+                            min="0"
+                            max={item.quantity}
+                            step="1"
+                            value={deliveryScanQuantities[item.id] ?? ''}
+                            onChange={(event) => {
+                              const next = { ...deliveryScanQuantitiesRef.current, [item.id]: event.target.value };
+                              deliveryScanQuantitiesRef.current = next;
+                              setDeliveryScanQuantities(next);
+                              xoaLoiTruong('items');
+                            }}
+                            className="w-24 rounded-lg border border-slate-200 p-2 text-center font-bold"
+                            aria-label={`Số lượng giao đã quét: ${item.item_name}`}
+                          />
+                        </div>
+                      ))}
+                      {modalXuLy.don.order_items.filter((item) => item.direction === 'exchange_in').map((item) => (
+                        <div key={item.id} className="flex items-center justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 p-3">
+                          <span className="min-w-0">
+                            <span className="block truncate text-sm font-bold text-amber-900">{item.item_name}</span>
+                            <span className="text-xs text-amber-700">Hàng đổi trả cần thu hồi · {item.quantity}</span>
+                            <details className="mt-1">
+                              <summary className="cursor-pointer text-xs font-bold text-amber-800">Hiện mã QR thu hồi</summary>
+                              <div className="mt-2 inline-block rounded bg-white p-2">
+                                <QRCode value={`ORDER_ITEM:${modalXuLy.don.id}:${item.id}:IN`} size={96} />
+                              </div>
+                            </details>
+                          </span>
+                          <input
+                            type="number"
+                            min="0"
+                            max={item.quantity}
+                            step="1"
+                            value={returnScanQuantities[item.id] ?? ''}
+                            onChange={(event) => {
+                              const next = { ...returnScanQuantitiesRef.current, [item.id]: event.target.value };
+                              returnScanQuantitiesRef.current = next;
+                              setReturnScanQuantities(next);
+                              xoaLoiTruong('items');
+                            }}
+                            className="w-24 rounded-lg border border-amber-200 bg-white p-2 text-center font-bold"
+                            aria-label={`Số lượng hàng đổi trả đã quét: ${item.item_name}`}
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  </section>
+
+                  <div data-form-field="cod" tabIndex={-1} className="bg-emerald-50 border border-emerald-100 p-4 rounded-xl">
+                    {tinhTienTheoHangDaQuet(modalXuLy.don, deliveryScanQuantities) > 0 ? (
                       <>
                         <div className="flex items-start gap-3">
                           <input
@@ -1356,19 +2218,19 @@ function MotorcycleDriverApp() {
                             id="checkTien"
                             className="w-6 h-6 mt-0.5 accent-emerald-500 rounded"
                             checked={xacNhanTien}
-                            onChange={(e) => setXacNhanTien(e.target.checked)}
+                            onChange={(e) => { setXacNhanTien(e.target.checked); xoaLoiTruong('cod'); }}
                           />
                           <label htmlFor="checkTien" className="text-sm">
                             <p className="font-bold text-emerald-800">Xác nhận đã thu đủ số tiền cần thu</p>
-                            <p className="font-black text-red-600 text-lg">{tinhTongTienCanThu(modalXuLy.don).toLocaleString()} VNĐ</p>
+                            <p className="font-black text-red-600 text-lg">{tinhTienTheoHangDaQuet(modalXuLy.don, deliveryScanQuantities).toLocaleString()} VNĐ</p>
                           </label>
                         </div>
                         <div className="ml-9 mt-2 space-y-1 text-xs text-emerald-800">
-                          <div className="flex justify-between"><span>COD hàng</span><span>{Number(modalXuLy.don?.cod_amount || 0).toLocaleString()} VNĐ</span></div>
+                          <div className="flex justify-between"><span>COD hàng đã quét giao</span><span>{(tinhTienTheoHangDaQuet(modalXuLy.don, deliveryScanQuantities) - (modalXuLy.don?.fee_payer === 'receiver' ? Number(modalXuLy.don?.shipping_fee || 0) : 0)).toLocaleString()} VNĐ</span></div>
                           <div className="flex justify-between"><span>Phí vận chuyển ({modalXuLy.don?.fee_payer === 'receiver' ? 'người nhận trả' : 'người gửi trả'})</span><span>{modalXuLy.don?.fee_payer === 'receiver' ? Number(modalXuLy.don?.shipping_fee || 0).toLocaleString() : '0'} VNĐ</span></div>
-                          <div className="flex justify-between border-t border-emerald-200 pt-1 font-black"><span>Tổng cần thu</span><span>{tinhTongTienCanThu(modalXuLy.don).toLocaleString()} VNĐ</span></div>
+                          <div className="flex justify-between border-t border-emerald-200 pt-1 font-black"><span>Tổng cần thu</span><span>{tinhTienTheoHangDaQuet(modalXuLy.don, deliveryScanQuantities).toLocaleString()} VNĐ</span></div>
                         </div>
-                      <fieldset className="mt-4 border-t border-emerald-200 pt-3">
+                      <fieldset data-form-field="payment" tabIndex={-1} className="mt-4 border-t border-emerald-200 pt-3">
                         <legend className="mb-2 text-xs font-black uppercase text-emerald-800">Hình thức thanh toán</legend>
                         <div className="grid grid-cols-2 gap-2">
                           {[
@@ -1381,19 +2243,21 @@ function MotorcycleDriverApp() {
                                 name="cod_payment_method"
                                 value={method.value}
                                 checked={phuongThucCOD === method.value}
-                                onChange={(event) => setPhuongThucCOD(event.target.value)}
+                                onChange={(event) => { setPhuongThucCOD(event.target.value); xoaLoiTruong('payment'); }}
                                 className="accent-emerald-600"
                               />
                               {method.label}
                             </label>
                           ))}
                         </div>
+                        {submitErrors.payment && <p role="alert" className="mt-2 text-xs font-semibold text-red-700">{submitErrors.payment}</p>}
                       </fieldset>
+                      {submitErrors.cod && <p role="alert" className="mt-2 text-xs font-semibold text-red-700">{submitErrors.cod}</p>}
                       </>
                     ) : (
                       <p className="text-sm font-bold text-emerald-800">Đơn này không cần thu COD hoặc cước từ người nhận.</p>
                     )}
-                    <div className="mt-4 border-t border-emerald-200 pt-3">
+                    <div data-form-field="signature" tabIndex={-1} className="mt-4 border-t border-emerald-200 pt-3">
                       <div className="mb-2 flex items-center justify-between">
                         <label htmlFor="recipient-signature" className="text-xs font-black uppercase text-emerald-800">Chữ ký người nhận (*)</label>
                         <button type="button" onClick={xoaChuKy} className="text-xs font-bold text-slate-500 underline">Xóa chữ ký</button>
@@ -1408,33 +2272,45 @@ function MotorcycleDriverApp() {
                         className="h-36 w-full touch-none rounded-lg border border-emerald-200 bg-white"
                         aria-label="Vùng ký xác nhận của người nhận"
                       />
+                      {submitErrors.signature && <p role="alert" className="mt-2 text-xs font-semibold text-red-700">{submitErrors.signature}</p>}
                       <p className="mt-1 text-[11px] text-emerald-800">Người nhận ký trực tiếp trên màn hình. Chữ ký được tải lên cùng ảnh minh chứng khi có kết nối mạng.</p>
                     </div>
                   </div>
+                  </>
                 )}
 
                 {/* 3. BẮT BUỘC CHỤP ẢNH MINH CHỨNG */}
-                <div>
-                  <label className="block text-sm font-bold text-slate-700 mb-2">Ảnh chụp bằng chứng (*)</label>
-                  {!anhPreview ? (
+                <div data-form-field="proof" tabIndex={-1}>
+                  <label className="block text-sm font-bold text-slate-700 mb-2">
+                    Ảnh chụp bằng chứng {modalXuLy.loai === 'completed' || Number(selectedFailureReason?.require_evidence) === 1 ? '(*)' : '(nếu có)'}
+                  </label>
+                  {!anhPreview && cameraTarget === 'delivery' ? (
+                    <div className="space-y-2">
+                      <video ref={cameraVideoRef} autoPlay playsInline muted className="h-40 w-full rounded-xl bg-black object-contain" />
+                      <div className="flex gap-2">
+                        <button type="button" onClick={chupAnhTrucTiep} className="flex-1 rounded-lg bg-blue-600 px-3 py-2 font-bold text-white">Chụp ảnh</button>
+                        <button type="button" onClick={dongCamera} className="rounded-lg bg-slate-200 px-3 py-2 font-bold text-slate-700">Đóng camera</button>
+                      </div>
+                    </div>
+                  ) : !anhPreview ? (
                     <div className="relative w-full h-32 border-2 border-dashed border-blue-300 bg-blue-50 rounded-xl flex flex-col items-center justify-center overflow-hidden">
                       <Camera className="text-blue-500 mb-2" size={32} />
-                      <span className="text-sm font-bold text-blue-600">Mở Camera Chụp Ảnh</span>
-                      {/* Cú pháp capture="environment" sẽ tự động mở Camera mặt sau trên điện thoại */}
-                      <input 
-                        type="file" 
-                        accept="image/*" 
-                        capture="environment"
-                        onChange={xuLyChonAnh}
-                        className="absolute inset-0 opacity-0 cursor-pointer"
-                      />
+                      <button type="button" onClick={() => moCamera('delivery')} className="absolute inset-0 flex items-center justify-center text-sm font-bold text-blue-600">
+                        Mở Camera Chụp Ảnh
+                      </button>
                     </div>
                   ) : (
                     <div className="relative">
                       <img src={anhPreview} alt="Preview" className="w-full h-40 object-cover rounded-xl border border-slate-200" />
                       <button 
                         type="button"
-                        onClick={() => { setAnhMinhChung(null); setAnhPreview(null); }}
+                        onClick={() => {
+                          setAnhMinhChung(null);
+                          setAnhPreview((current) => {
+                            if (current) URL.revokeObjectURL(current);
+                            return null;
+                          });
+                        }}
                         className="absolute top-2 right-2 bg-slate-900/60 text-white p-2 rounded-full"
                       >
                         <X size={16} />
@@ -1446,6 +2322,11 @@ function MotorcycleDriverApp() {
                       ? "Ghi chú: Vui lòng chụp rõ kiện hàng đặt tại địa chỉ khách."
                       : "Ghi chú: Chụp ảnh cuộc gọi nhỡ hoặc chụp địa chỉ nhà khóa kín."}
                   </p>
+                </div>
+
+                <div data-form-field="gps" tabIndex={-1} className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                  <p className="text-sm font-semibold text-slate-700">Vị trí GPS sẽ được ghi cùng báo cáo để xác minh điểm xử lý.</p>
+                  {submitErrors.gps && <p role="alert" className="mt-1 text-xs font-semibold text-red-700">{submitErrors.gps}</p>}
                 </div>
 
                 {/* NÚT SUBMIT */}

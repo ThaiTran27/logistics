@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { MapContainer, TileLayer, CircleMarker, Popup } from 'react-leaflet';
+import { GOVAP_MAP_CENTER, MAP_ATTRIBUTION, MAP_TILE_URL } from '../../utils/govapMap.js';
 import { apiFetch as fetch } from '../../utils/apiFetch.js';
 import { 
   BarChart3, TrendingUp, Package, Truck, Wallet, 
@@ -421,8 +422,8 @@ export default function DashboardGiamDoc() {
                 <p className="mt-1 text-sm font-medium text-slate-500">Vị trí được tổng hợp từ tọa độ giao hàng thực tế; vòng tròn lớn và đậm biểu thị nhiều đơn hơn.</p>
               </div>
               {heatmapPoints.length > 0 ? (
-                <MapContainer center={[10.7769, 106.7009]} zoom={10} scrollWheelZoom={false} className="h-[420px] w-full rounded-2xl">
-                  <TileLayer attribution="&copy; OpenStreetMap contributors" url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
+                <MapContainer center={GOVAP_MAP_CENTER} zoom={13} scrollWheelZoom={false} className="h-[420px] w-full rounded-2xl">
+                  <TileLayer attribution={MAP_ATTRIBUTION} url={MAP_TILE_URL} />
                   {heatmapPoints.map((item) => {
                     const intensity = Math.min(Number(item.order_count) / maxHeatmapOrders, 1);
                     return (

@@ -1,9 +1,8 @@
-import { apiFetch as fetch } from '../../utils/apiFetch.js';
+import { API_URL, apiFetch as fetch } from '../../utils/apiFetch.js';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
 import { Headphones, MessageCircle, Phone, Send, UserRound, XCircle } from 'lucide-react';
-
-const API_URL = 'http://localhost:5000';
+import { OrderStatusBadge } from '../../utils/orderStatus.jsx';
 
 export default function TrungTamHoTro() {
   const token = localStorage.getItem('access_token');
@@ -216,7 +215,7 @@ export default function TrungTamHoTro() {
                   {context.orders.map((order) => (
                     <div key={order.tracking_code} className="rounded-lg border border-slate-200 p-3 text-xs">
                       <p className="font-mono font-black text-blue-700">{order.tracking_code}</p>
-                      <p className="mt-1 text-slate-600">{order.status}</p>
+                      <OrderStatusBadge status={order.status} className="mt-1" />
                       <p className="mt-1 text-slate-500">{new Date(order.created_at).toLocaleDateString('vi-VN')}</p>
                     </div>
                   ))}
