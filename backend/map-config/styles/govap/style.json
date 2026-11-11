@@ -1,0 +1,101 @@
+{
+  "version": 8,
+  "name": "Smart Logistics Gò Vấp",
+  "metadata": {
+    "maputnik:license": "© OpenStreetMap contributors"
+  },
+  "sources": {
+    "vietnam": {
+      "type": "vector",
+      "tiles": ["http://localhost:8080/data/vietnam/{z}/{x}/{y}.pbf"],
+      "maxzoom": 14,
+      "attribution": "© OpenStreetMap contributors"
+    }
+  },
+  "glyphs": "http://localhost:8080/fonts/{fontstack}/{range}.pbf",
+  "layers": [
+    {
+      "id": "background",
+      "type": "background",
+      "paint": {
+        "background-color": "#f3f6f4"
+      }
+    },
+    {
+      "id": "water",
+      "type": "fill",
+      "source": "vietnam",
+      "source-layer": "water_polygons",
+      "paint": {
+        "fill-color": "#a9d9e8"
+      }
+    },
+    {
+      "id": "land",
+      "type": "fill",
+      "source": "vietnam",
+      "source-layer": "land",
+      "paint": {
+        "fill-color": "#dce9dc"
+      }
+    },
+    {
+      "id": "sites",
+      "type": "fill",
+      "source": "vietnam",
+      "source-layer": "sites",
+      "paint": {
+        "fill-color": "#c8dfca",
+        "fill-opacity": 0.8
+      }
+    },
+    {
+      "id": "buildings",
+      "type": "fill",
+      "source": "vietnam",
+      "source-layer": "buildings",
+      "minzoom": 14,
+      "paint": {
+        "fill-color": "#e4ddd3",
+        "fill-outline-color": "#d2c8bb"
+      }
+    },
+    {
+      "id": "street-casing",
+      "type": "line",
+      "source": "vietnam",
+      "source-layer": "streets",
+      "paint": {
+        "line-color": "#ffffff",
+        "line-width": ["interpolate", ["linear"], ["zoom"], 10, 0.5, 16, 5]
+      }
+    },
+    {
+      "id": "streets",
+      "type": "line",
+      "source": "vietnam",
+      "source-layer": "streets",
+      "paint": {
+        "line-color": "#f1b866",
+        "line-width": ["interpolate", ["linear"], ["zoom"], 10, 0.25, 16, 3.2]
+      }
+    },
+    {
+      "id": "places",
+      "type": "symbol",
+      "source": "vietnam",
+      "source-layer": "place_labels",
+      "layout": {
+        "text-field": ["coalesce", ["get", "name"], ["get", "name_en"]],
+        "text-font": ["Open Sans Semibold"],
+        "text-size": ["interpolate", ["linear"], ["zoom"], 8, 10, 14, 15],
+        "text-max-width": 8
+      },
+      "paint": {
+        "text-color": "#344b48",
+        "text-halo-color": "#ffffff",
+        "text-halo-width": 1.2
+      }
+    }
+  ]
+}

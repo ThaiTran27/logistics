@@ -1,0 +1,6 @@
+.git
+**/node_modules
+**/dist
+**/.env
+backend/map-data
+backend/public/uploads

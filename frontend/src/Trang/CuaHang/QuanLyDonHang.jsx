@@ -1,0 +1,2677 @@
+import { API_URL, apiFetch as fetch } from '../../utils/apiFetch.js';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { MapContainer, TileLayer, Marker, Popup, Polyline, GeoJSON, useMap, useMapEvents } from 'react-leaflet';
+import { io } from 'socket.io-client';
+import * as XLSX from 'xlsx';
+import 'leaflet/dist/leaflet.css';
+import L from 'leaflet';
+import { Store, PackagePlus, ListOrdered, Wallet, LogOut, User, Phone, MapPin, DollarSign, Clock, Truck, CheckCircle, AlertCircle, PackageSearch, Scale, Calculator, Eye, X, Box, MapPinned, Printer, Camera, Zap, ShieldAlert, Navigation, Bell, FileSpreadsheet, Download, Upload, KeyRound, Webhook, Copy, RotateCw } from 'lucide-react';
+import Barcode from 'react-barcode';
+
+import iconMarkerUrl from 'leaflet/dist/images/marker-icon.png';
+import iconShadowUrl from 'leaflet/dist/images/marker-shadow.png';
+import {
+  GOVAP_MAP_BOUNDS,
+  GOVAP_MAP_CENTER,
+  GOVAP_WARDS,
+  isWithinGovapServiceArea,
+  MAP_ATTRIBUTION,
+  MAP_TILE_URL
+} from '../../utils/govapMap.js';
+import { OrderStatusBadge, getOrderStatusLabel } from '../../utils/orderStatus.jsx';
+const BULK_ORDER_LIMIT = 500;
+const BULK_ORDER_HEADERS = [
+  'shop_address', 'shop_province', 'shop_lat', 'shop_lng',
+  'receiver_name', 'receiver_phone', 'receiver_address', 'receiver_lat', 'receiver_lng',
+  'customer_email', 'cod_amount', 'weight_kg', 'length', 'width', 'height',
+  'item_value', 'service_fee', 'distance_km', 'destination_province',
+  'fee_payer', 'service_type', 'is_fragile', 'is_remote_area'
+];
+const normalizeImportHeader = (value) => String(value || '')
+  .trim()
+  .toLocaleLowerCase('vi')
+  .normalize('NFD')
+  .replace(/[\u0300-\u036f]/g, '')
+  .replace(/đ/g, 'd')
+  .replace(/[^a-z0-9]/g, '');
+
+const shopMarkerIcon = new L.Icon({
+  iconUrl: iconMarkerUrl,
+  shadowUrl: iconShadowUrl,
+  iconSize: [25, 41],
+  iconAnchor: [12, 41]
+});
+
+const liveDriverIcon = new L.Icon({
+  iconUrl: iconMarkerUrl,
+  shadowUrl: iconShadowUrl,
+  iconSize: [30, 48],
+  iconAnchor: [15, 48]
+});
+
+function FitTrackingMap({ route, driverLocation }) {
+  const map = useMap();
+
+  useEffect(() => {
+    const points = [route?.warehouse, route?.pickup, route?.delivery, driverLocation]
+      .filter((point) => Number.isFinite(Number(point?.lat)) && Number.isFinite(Number(point?.lng)))
+      .map((point) => [Number(point.lat), Number(point.lng)]);
+
+    if (points.length > 0) {
+      map.fitBounds(points, { padding: [28, 28], maxZoom: 14 });
+    }
+  }, [driverLocation, map, route]);
+
+  return null;
+}
+
+function LiveTrackingMap({ route, driverLocation }) {
+  const routePoints = [route?.pickup, route?.warehouse, route?.delivery]
+    .filter((point) => Number.isFinite(Number(point?.lat)) && Number.isFinite(Number(point?.lng)))
+    .map((point) => [Number(point.lat), Number(point.lng)]);
+  const mapCenter = routePoints[0] || GOVAP_MAP_CENTER;
+
+  return (
+    <MapContainer center={mapCenter} zoom={13} scrollWheelZoom className="h-72 w-full rounded-2xl">
+      <TileLayer attribution={MAP_ATTRIBUTION} url={MAP_TILE_URL} />
+      <FitTrackingMap route={route} driverLocation={driverLocation} />
+      {routePoints.length > 1 && <Polyline positions={routePoints} pathOptions={{ color: '#2563eb', weight: 5, opacity: 0.75, dashArray: '8 8' }} />}
+      {route?.pickup && <Marker position={[Number(route.pickup.lat), Number(route.pickup.lng)]} icon={shopMarkerIcon}><Popup><strong>Điểm lấy hàng</strong></Popup></Marker>}
+      {route?.warehouse && <Marker position={[Number(route.warehouse.lat), Number(route.warehouse.lng)]} icon={shopMarkerIcon}><Popup><strong>{route.warehouse.label}</strong><br />{route.warehouse.address}</Popup></Marker>}
+      {route?.delivery && <Marker position={[Number(route.delivery.lat), Number(route.delivery.lng)]} icon={shopMarkerIcon}><Popup><strong>Điểm giao hàng</strong></Popup></Marker>}
+      {driverLocation && <Marker position={[Number(driverLocation.lat), Number(driverLocation.lng)]} icon={liveDriverIcon}><Popup><strong>Tài xế đang di chuyển</strong><br />Cập nhật: {new Date(driverLocation.updated_at || driverLocation.timestamp).toLocaleTimeString('vi-VN')}</Popup></Marker>}
+    </MapContainer>
+  );
+}
+
+function MapClickHandler({ onSelect, onOutside }) {
+  useMapEvents({
+    click: (event) => {
+      if (isWithinGovapServiceArea(event.latlng.lat, event.latlng.lng)) {
+        onSelect(event.latlng.lat, event.latlng.lng);
+      } else {
+        onOutside();
+      }
+    }
+  });
+  return null;
+}
+
+function GovapBoundaryOverlay() {
+  return <GeoJSON data={GOVAP_WARDS} style={{ color: '#2563eb', weight: 2, fillOpacity: 0.03 }} interactive={false} />;
+}
+
+function RecenterMap({ value }) {
+  const map = useMap();
+  useEffect(() => {
+    map.flyTo([value.lat, value.lng], 13, { duration: 1.2 });
+  }, [value.lat, value.lng, map]);
+  return null;
+}
+
+function ShopMapPicker({ value, onSelect }) {
+  return (
+    <MapContainer center={[value.lat, value.lng]} zoom={13} maxBounds={GOVAP_MAP_BOUNDS} maxBoundsViscosity={1} scrollWheelZoom={true} className="h-64 w-full rounded-xl border border-slate-200">
+      <LocationMapTiles />
+      <GovapBoundaryOverlay />
+      <RecenterMap value={value} />
+      <MapClickHandler onSelect={onSelect} onOutside={() => window.alert('Vui lòng chọn vị trí trong 6 phường thuộc Gò Vấp.')} />
+      <Marker position={[value.lat, value.lng]} icon={shopMarkerIcon} />
+    </MapContainer>
+  );
+}
+
+function LocationMapTiles() {
+  const [retryAttempt, setRetryAttempt] = useState(0);
+  const [tilesUnavailable, setTilesUnavailable] = useState(false);
+  return (
+    <>
+      <TileLayer
+        key={retryAttempt}
+        attribution={MAP_ATTRIBUTION}
+        url={MAP_TILE_URL}
+        eventHandlers={{
+          tileload: () => setTilesUnavailable(false),
+          tileerror: () => setTilesUnavailable(true)
+        }}
+      />
+      {tilesUnavailable && (
+        <div className="leaflet-top leaflet-left pointer-events-none">
+          <div role="status" className="m-2 max-w-80 rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs font-semibold text-amber-950 shadow">
+            <p>Không tải được bản đồ nội bộ. Hãy kiểm tra dịch vụ bản đồ Docker tại máy chủ.</p>
+            <div className="mt-2 flex gap-2">
+              <button type="button" onClick={() => { setTilesUnavailable(false); setRetryAttempt((current) => current + 1); }} className="pointer-events-auto rounded bg-white px-2 py-1 font-bold text-amber-950 ring-1 ring-amber-300 hover:bg-amber-100">Thử lại</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+function MapClickHandlerReceiver({ onSelect }) {
+  useMapEvents({
+    click: (event) => {
+      if (isWithinGovapServiceArea(event.latlng.lat, event.latlng.lng)) {
+        onSelect(event.latlng.lat, event.latlng.lng);
+      } else {
+        window.alert('Vui lòng chọn vị trí trong 6 phường thuộc Gò Vấp.');
+      }
+    }
+  });
+
+  return null;
+}
+
+export default function QuanLyDonHang() {
+  const [donHang, setDonHang] = useState([]);
+  const [form, setForm] = useState({ 
+    shop_address: '',
+    shop_province: 'Thành phố Hồ Chí Minh',
+    shop_lat: GOVAP_MAP_CENTER[0],
+    shop_lng: GOVAP_MAP_CENTER[1],
+    shop_location_verified: false,
+    receiver_name: '', 
+    receiver_phone: '', 
+    customer_email: '',
+    receiver_address: '', 
+    receiver_lat: null,
+    receiver_lng: null,
+    receiver_location_verified: false,
+    destination_province: 'TP. Hồ Chí Minh',
+    cod_amount: '',
+    weight_kg: '1',
+    length: '10',
+    width: '10',
+    height: '10',
+    item_value: '0',
+    service_fee: '0',
+    distance_km: '5',
+    is_remote_area: false,
+    service_type: 'standard',
+    pickup_appointment_at: '',
+    vehicle_type: 'motorbike',
+    fee_payer: 'sender',
+    is_fragile: false
+  });
+  const [vehicleSelectionMode, setVehicleSelectionMode] = useState('automatic');
+  const [showShopMap, setShowShopMap] = useState(false);
+  const [showReceiverMap, setShowReceiverMap] = useState(false);
+  const [locationLookup, setLocationLookup] = useState({ shop: '', receiver: '', profile: '' });
+  const locationLookupRequest = useRef({ shop: 0, receiver: 0, profile: 0 });
+  
+  const [shippingFee, setShippingFee] = useState(0);
+  const [chargeableWeight, setChargeableWeight] = useState(0); // Trọng lượng tính cước cuối cùng
+  const [tabHienTai, setTabHienTai] = useState('taodon');
+  const [bulkRows, setBulkRows] = useState([]);
+  const [bulkFileName, setBulkFileName] = useState('');
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkError, setBulkError] = useState('');
+  const [shopApiKeys, setShopApiKeys] = useState([]);
+  const [shopProfile, setShopProfile] = useState({
+    full_name: localStorage.getItem('full_name') || '',
+    email: localStorage.getItem('email') || '',
+    phone: '',
+    shop_address: '',
+    shop_province: 'TP. Hồ Chí Minh',
+    shop_lat: null,
+    shop_lng: null
+  });
+  const [shopProfileLoading, setShopProfileLoading] = useState(true);
+  const [shopProfileSaving, setShopProfileSaving] = useState(false);
+  const [shopProfileError, setShopProfileError] = useState('');
+  const [shopProfileMessage, setShopProfileMessage] = useState('');
+  const [showProfileMap, setShowProfileMap] = useState(false);
+  const [profileMapSearch, setProfileMapSearch] = useState('');
+  const [profileSearchMessage, setProfileSearchMessage] = useState('');
+  const [shopWebhook, setShopWebhook] = useState({ target_url: '', enabled: false, secret_configured: false });
+  const [apiKeyName, setApiKeyName] = useState('');
+  const [revealedCredential, setRevealedCredential] = useState(null);
+  const [integrationBusy, setIntegrationBusy] = useState(false);
+  const [integrationError, setIntegrationError] = useState('');
+  const [integrationMessage, setIntegrationMessage] = useState('');
+  const [rmaOrders, setRmaOrders] = useState([]);
+  const [rmaBusy, setRmaBusy] = useState(false);
+  const [rmaLoading, setRmaLoading] = useState(false);
+  const [rmaError, setRmaError] = useState('');
+  const [rmaMessage, setRmaMessage] = useState('');
+  const [thongBaoShop, setThongBaoShop] = useState([]);
+  
+  const [donHangDangChon, setDonHangDangChon] = useState(null);
+  const [modalMo, setModalMo] = useState(false);
+  const [routeTheoDoi, setRouteTheoDoi] = useState(null);
+  const [viTriTaiXe, setViTriTaiXe] = useState(null);
+  
+  // State quản lý việc in phiếu
+  const [phieuIn, setPhieuIn] = useState(null);
+  const [selectedOrderIds, setSelectedOrderIds] = useState([]);
+  const [filterKeyword, setFilterKeyword] = useState('');
+  const [statusFilter, setStatusFilter] = useState('all');
+  const requiresTruck = Number(form.weight_kg) > 100
+    || (Number(form.length) * Number(form.width) * Number(form.height)) > 1000000;
+  
+  const shopId = localStorage.getItem('user_id');
+  const shopName = shopProfile.full_name || localStorage.getItem('full_name') || 'Cửa Hàng Đối Tác';
+  const profileLocationValid = shopProfile.shop_lat !== null && shopProfile.shop_lat !== ''
+    && shopProfile.shop_lng !== null && shopProfile.shop_lng !== ''
+    && isWithinGovapServiceArea(shopProfile.shop_lat, shopProfile.shop_lng);
+
+  const taiHoSoShop = useCallback(async () => {
+    setShopProfileLoading(true);
+    setShopProfileError('');
+    try {
+      const response = await fetch(`${API_URL}/api/shop/profile`);
+      const result = await response.json();
+      if (!response.ok || !result.success) throw new Error(result.message || 'Không tải được thông tin Shop.');
+      const profile = result.data;
+      setShopProfile(profile);
+      setProfileMapSearch(profile.shop_address || '');
+      if (profile.shop_address && profile.shop_lat !== null && profile.shop_lat !== ''
+        && profile.shop_lng !== null && profile.shop_lng !== ''
+        && Number.isFinite(Number(profile.shop_lat)) && Number.isFinite(Number(profile.shop_lng))) {
+        setForm((current) => ({
+          ...current,
+          shop_address: profile.shop_address,
+          shop_province: profile.shop_province || 'TP. Hồ Chí Minh',
+          shop_lat: Number(profile.shop_lat),
+          shop_lng: Number(profile.shop_lng),
+          shop_location_verified: true
+        }));
+      }
+    } catch (error) {
+      setShopProfileError(error.message || 'Không tải được thông tin Shop.');
+    } finally {
+      setShopProfileLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    taiHoSoShop();
+  }, [taiHoSoShop]);
+
+  const taiCauHinhTichHop = useCallback(async () => {
+    setIntegrationBusy(true);
+    setIntegrationError('');
+    try {
+      const response = await fetch(`${API_URL}/api/shop/integrations`);
+      const result = await response.json();
+      if (!response.ok || !result.success) throw new Error(result.message || 'Không tải được cấu hình tích hợp.');
+      setShopApiKeys(result.data.api_keys || []);
+      setShopWebhook(result.data.webhook || { target_url: '', enabled: false, secret_configured: false });
+    } catch (error) {
+      setIntegrationError(error.message || 'Không tải được cấu hình tích hợp.');
+    } finally {
+      setIntegrationBusy(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (tabHienTai === 'integrations') taiCauHinhTichHop();
+  }, [tabHienTai, taiCauHinhTichHop]);
+
+  const taiDanhSachRma = useCallback(async () => {
+    setRmaLoading(true);
+    setRmaError('');
+    try {
+      const [rmaResponse, returnResponse] = await Promise.all([
+        fetch(`${API_URL}/api/shop/rma`),
+        fetch(`${API_URL}/api/shop/returns`)
+      ]);
+      const [rmaResult, returnResult] = await Promise.all([rmaResponse.json(), returnResponse.json()]);
+      if (!rmaResponse.ok || !rmaResult.success) throw new Error(rmaResult.message || 'Không tải được hồ sơ hàng hoàn.');
+      if (!returnResponse.ok || !returnResult.success) throw new Error(returnResult.message || 'Không tải được danh sách hàng đã về kho.');
+      setRmaOrders([...(rmaResult.data || []), ...(returnResult.data || []).map((order) => ({ ...order, awaitingShopReceipt: true }))]);
+    } catch (error) {
+      setRmaError(error.message || 'Không tải được hồ sơ hàng hoàn.');
+    } finally {
+      setRmaLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (tabHienTai === 'rma') taiDanhSachRma();
+  }, [tabHienTai, taiDanhSachRma]);
+
+  const guiYeuCauGiaoLai = async (event, order) => {
+    event.preventDefault();
+    const formData = new FormData(event.currentTarget);
+    setRmaBusy(true);
+    setRmaError('');
+    setRmaMessage('');
+    try {
+      const response = await fetch(`${API_URL}/api/shop/rma/${order.id}/redelivery`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          note: formData.get('note'),
+          customer_confirmed: formData.get('customer_confirmed') === 'on'
+        })
+      });
+      const result = await response.json();
+      if (!response.ok || !result.success) throw new Error(result.message || 'Không gửi được yêu cầu giao lại.');
+      setRmaMessage(result.message);
+      await taiDanhSachRma();
+    } catch (error) {
+      setRmaError(error.message || 'Không gửi được yêu cầu giao lại.');
+    } finally {
+      setRmaBusy(false);
+    }
+  };
+
+  const xacNhanNhanHangHoan = async (event, order) => {
+    event.preventDefault();
+    const formData = new FormData(event.currentTarget);
+    setRmaBusy(true);
+    setRmaError('');
+    setRmaMessage('');
+    try {
+      const response = await fetch(`${API_URL}/api/shop/returns/${order.id}/received`, {
+        method: 'POST',
+        body: formData
+      });
+      const result = await response.json();
+      if (!response.ok || !result.success) throw new Error(result.message || 'Không thể xác nhận Shop nhận hàng.');
+      setRmaMessage(result.message);
+      await taiDanhSachRma();
+    } catch (error) {
+      setRmaError(error.message || 'Không thể xác nhận Shop nhận hàng.');
+    } finally {
+      setRmaBusy(false);
+    }
+  };
+
+  const createShopApiKey = async (event) => {
+    event.preventDefault();
+    setIntegrationBusy(true);
+    setIntegrationError('');
+    setIntegrationMessage('');
+    try {
+      const response = await fetch(`${API_URL}/api/shop/integrations/keys`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: apiKeyName })
+      });
+      const result = await response.json();
+      if (!response.ok || !result.success) throw new Error(result.message || 'Không tạo được API key.');
+      setRevealedCredential({ label: `API key · ${result.data.name}`, value: result.data.api_key });
+      setApiKeyName('');
+      await taiCauHinhTichHop();
+      setIntegrationMessage(result.message);
+    } catch (error) {
+      setIntegrationError(error.message || 'Không tạo được API key.');
+    } finally {
+      setIntegrationBusy(false);
+    }
+  };
+
+  const revokeShopApiKey = async (key) => {
+    if (!window.confirm(`Thu hồi API key "${key.name}"? Hệ thống đang tích hợp bằng key này sẽ không thể tạo đơn nữa.`)) return;
+    setIntegrationBusy(true);
+    setIntegrationError('');
+    setIntegrationMessage('');
+    try {
+      const response = await fetch(`${API_URL}/api/shop/integrations/keys/${key.id}`, { method: 'DELETE' });
+      const result = await response.json();
+      if (!response.ok || !result.success) throw new Error(result.message || 'Không thu hồi được API key.');
+      setRevealedCredential(null);
+      await taiCauHinhTichHop();
+      setIntegrationMessage(result.message);
+    } catch (error) {
+      setIntegrationError(error.message || 'Không thu hồi được API key.');
+    } finally {
+      setIntegrationBusy(false);
+    }
+  };
+
+  const saveShopWebhook = async (event) => {
+    event.preventDefault();
+    setIntegrationBusy(true);
+    setIntegrationError('');
+    setIntegrationMessage('');
+    try {
+      const response = await fetch(`${API_URL}/api/shop/integrations/webhook`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ target_url: shopWebhook.target_url })
+      });
+      const result = await response.json();
+      if (!response.ok || !result.success) throw new Error(result.message || 'Không lưu được webhook.');
+      await taiCauHinhTichHop();
+      setIntegrationMessage(result.message);
+    } catch (error) {
+      setIntegrationError(error.message || 'Không lưu được webhook.');
+    } finally {
+      setIntegrationBusy(false);
+    }
+  };
+
+  const createWebhookSecret = async () => {
+    setIntegrationBusy(true);
+    setIntegrationError('');
+    setIntegrationMessage('');
+    try {
+      const response = await fetch(`${API_URL}/api/shop/integrations/webhook/secret`, { method: 'POST' });
+      const result = await response.json();
+      if (!response.ok || !result.success) throw new Error(result.message || 'Không tạo được signing secret.');
+      setRevealedCredential({ label: 'Webhook signing secret', value: result.data.secret });
+      await taiCauHinhTichHop();
+      setIntegrationMessage(result.message);
+    } catch (error) {
+      setIntegrationError(error.message || 'Không tạo được signing secret.');
+    } finally {
+      setIntegrationBusy(false);
+    }
+  };
+
+  const copyCredential = async () => {
+    if (!revealedCredential) return;
+    try {
+      await navigator.clipboard.writeText(revealedCredential.value);
+      setIntegrationMessage('Đã sao chép thông tin bí mật.');
+    } catch {
+      setIntegrationError('Không thể truy cập clipboard. Hãy chọn và sao chép nội dung trong ô bên dưới.');
+    }
+  };
+
+  const downloadBulkTemplate = () => {
+    const worksheet = XLSX.utils.aoa_to_sheet([BULK_ORDER_HEADERS]);
+    worksheet['!cols'] = BULK_ORDER_HEADERS.map((header) => ({ wch: Math.max(header.length + 3, 18) }));
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Don hang');
+    XLSX.writeFile(workbook, 'mau-import-don-hang.xlsx');
+  };
+
+  const validateBulkOrder = (source, rowNumber) => {
+    const order = Object.fromEntries(BULK_ORDER_HEADERS.map((header) => [header, source[header] ?? '']));
+    const errors = [];
+    const hasPickupData = ['shop_address', 'shop_lat', 'shop_lng']
+      .some((field) => String(order[field] ?? '').trim() !== '');
+    if (!hasPickupData && shopProfile.shop_address
+      && isWithinGovapServiceArea(shopProfile.shop_lat, shopProfile.shop_lng)) {
+      order.shop_address = shopProfile.shop_address;
+      order.shop_province = shopProfile.shop_province || 'TP. Hồ Chí Minh';
+      order.shop_lat = Number(shopProfile.shop_lat);
+      order.shop_lng = Number(shopProfile.shop_lng);
+    }
+    const requiredText = [
+      ['shop_address', 'Thiếu địa chỉ Shop (hoặc chưa lưu hồ sơ Shop)'],
+      ['receiver_name', 'Thiếu tên người nhận'],
+      ['receiver_phone', 'Thiếu số điện thoại'],
+      ['receiver_address', 'Thiếu địa chỉ người nhận']
+    ];
+    requiredText.forEach(([field, label]) => {
+      if (!String(order[field] || '').trim()) errors.push(label);
+    });
+
+    order.receiver_phone = String(order.receiver_phone || '').trim().replace(/[\s().-]/g, '');
+    if (/^84\d{9,10}$/.test(order.receiver_phone)) {
+      order.receiver_phone = `0${order.receiver_phone.slice(2)}`;
+    } else if (/^\d{9}$/.test(order.receiver_phone)) {
+      order.receiver_phone = `0${order.receiver_phone}`;
+    }
+    if (order.receiver_phone && !/^0\d{9,10}$/.test(order.receiver_phone)) {
+      errors.push('Số điện thoại phải có 10-11 chữ số và bắt đầu bằng 0');
+    }
+    order.customer_email = String(order.customer_email || '').trim();
+    if (order.customer_email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(order.customer_email)) {
+      errors.push('Email người nhận không hợp lệ');
+    }
+
+    const parseNumber = (field, label, { required = false, positive = false, fallback = null } = {}) => {
+      const raw = order[field];
+      if (raw === '' || raw === null || raw === undefined) {
+        if (required) errors.push(`Thiếu ${label}`);
+        else if (fallback !== null) order[field] = fallback;
+        return null;
+      }
+      const value = typeof raw === 'number' ? raw : Number(String(raw).trim().replace(',', '.'));
+      if (!Number.isFinite(value) || value < 0 || (positive && value <= 0)) {
+        errors.push(`${label} không hợp lệ`);
+        return null;
+      }
+      order[field] = value;
+      return value;
+    };
+    const shopLat = parseNumber('shop_lat', 'vĩ độ Shop', { required: true });
+    const shopLng = parseNumber('shop_lng', 'kinh độ Shop', { required: true });
+    const receiverLat = parseNumber('receiver_lat', 'vĩ độ người nhận', { required: true });
+    const receiverLng = parseNumber('receiver_lng', 'kinh độ người nhận', { required: true });
+    const weight = parseNumber('weight_kg', 'cân nặng', { required: true, positive: true });
+    const length = parseNumber('length', 'chiều dài', { required: true, positive: true });
+    const width = parseNumber('width', 'chiều rộng', { required: true, positive: true });
+    const height = parseNumber('height', 'chiều cao', { required: true, positive: true });
+    parseNumber('cod_amount', 'COD', { fallback: 0 });
+    parseNumber('item_value', 'giá trị hàng', { fallback: 0 });
+    parseNumber('service_fee', 'phí dịch vụ', { fallback: 0 });
+    parseNumber('distance_km', 'khoảng cách', { positive: true, fallback: 5 });
+
+    if (shopLat !== null && (shopLat > 90 || shopLat < -90) || shopLng !== null && (shopLng > 180 || shopLng < -180)) {
+      errors.push('Tọa độ Shop ngoài giới hạn');
+    } else if (shopLat !== null && shopLng !== null && !isWithinGovapServiceArea(shopLat, shopLng)) {
+      errors.push('Vị trí Shop ngoài 6 phường Gò Vấp');
+    }
+    if (receiverLat !== null && (receiverLat > 90 || receiverLat < -90) || receiverLng !== null && (receiverLng > 180 || receiverLng < -180)) {
+      errors.push('Tọa độ người nhận ngoài giới hạn');
+    } else if (receiverLat !== null && receiverLng !== null && !isWithinGovapServiceArea(receiverLat, receiverLng)) {
+      errors.push('Vị trí người nhận ngoài 6 phường Gò Vấp');
+    }
+    if (weight !== null && length !== null && width !== null && height !== null
+      && (weight > 100 || length * width * height > 1000000)) {
+      order.vehicle_type = 'truck';
+    }
+    order.shop_province = String(order.shop_province || shopProfile.shop_province || 'TP. Hồ Chí Minh').trim();
+    order.destination_province = String(order.destination_province || 'TP. Hồ Chí Minh').trim();
+    order.service_type = String(order.service_type || 'standard').trim().toLowerCase();
+    order.fee_payer = String(order.fee_payer || 'sender').trim().toLowerCase();
+    if (!['economy', 'standard', 'express'].includes(order.service_type)) errors.push('Loại dịch vụ phải là economy, standard hoặc express');
+    if (!['sender', 'receiver'].includes(order.fee_payer)) errors.push('fee_payer phải là sender hoặc receiver');
+    const parseBoolean = (value, label) => {
+      const normalized = String(value ?? '').trim().toLowerCase();
+      if (!normalized || ['false', '0', 'no', 'khong', 'không'].includes(normalized)) return false;
+      if (['true', '1', 'yes', 'co', 'có'].includes(normalized)) return true;
+      errors.push(`${label} phải là true/false`);
+      return false;
+    };
+    order.is_fragile = parseBoolean(order.is_fragile, 'is_fragile');
+    order.is_remote_area = parseBoolean(order.is_remote_area, 'is_remote_area');
+    order.rowNumber = rowNumber;
+    return { order, errors };
+  };
+
+  const parseBulkFile = async (file) => {
+    setBulkError('');
+    setBulkRows([]);
+    setBulkFileName(file?.name || '');
+    if (!file) return;
+    if (!/\.(xlsx|xls|csv)$/i.test(file.name)) {
+      setBulkError('Chỉ chấp nhận file .xlsx, .xls hoặc .csv.');
+      return;
+    }
+    if (file.size > 10 * 1024 * 1024) {
+      setBulkError('File import không được vượt quá 10 MB.');
+      return;
+    }
+    try {
+      const workbook = XLSX.read(await file.arrayBuffer(), { type: 'array', cellDates: false });
+      const sheet = workbook.Sheets[workbook.SheetNames[0]];
+      if (!sheet) throw new Error('File không có trang tính dữ liệu.');
+      const [headerRow, ...dataRows] = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '', raw: false });
+      if (!headerRow?.length) throw new Error('Không tìm thấy hàng tiêu đề trong file.');
+      const headerIndices = new Map(headerRow.map((header, index) => [normalizeImportHeader(header), index]));
+      const missingHeaders = BULK_ORDER_HEADERS
+        .filter((header) => !['customer_email', 'service_fee', 'item_value', 'distance_km', 'shop_province', 'destination_province', 'fee_payer', 'service_type', 'is_fragile', 'is_remote_area'].includes(header))
+        .filter((header) => !headerIndices.has(normalizeImportHeader(header)));
+      if (missingHeaders.length) throw new Error(`Thiếu cột bắt buộc: ${missingHeaders.join(', ')}`);
+      const nonEmptyRows = dataRows.filter((row) => row.some((cell) => String(cell ?? '').trim() !== ''));
+      if (!nonEmptyRows.length) throw new Error('File chưa có dòng đơn hàng nào.');
+      if (nonEmptyRows.length > BULK_ORDER_LIMIT) throw new Error(`Mỗi lần chỉ nhập tối đa ${BULK_ORDER_LIMIT} đơn hàng.`);
+
+      setBulkRows(nonEmptyRows.map((row, index) => {
+        const source = Object.fromEntries(BULK_ORDER_HEADERS.map((header) => {
+          const columnIndex = headerIndices.get(normalizeImportHeader(header));
+          return [header, columnIndex === undefined ? '' : row[columnIndex]];
+        }));
+        const { order, errors } = validateBulkOrder(source, index + 2);
+        return { rowNumber: index + 2, order, errors, status: errors.length ? 'invalid' : 'ready', result: '' };
+      }));
+    } catch (error) {
+      setBulkError(error.message || 'Không đọc được file import.');
+    }
+  };
+
+  const importBulkOrders = async () => {
+    const readyRows = bulkRows.filter((row) => row.status === 'ready');
+    if (!readyRows.length) {
+      setBulkError('Không có dòng hợp lệ để tạo đơn.');
+      return;
+    }
+    setBulkBusy(true);
+    setBulkError('');
+    const queue = [...readyRows];
+    const worker = async () => {
+      while (queue.length) {
+        const currentRow = queue.shift();
+        if (!currentRow) return;
+        setBulkRows((currentRows) => currentRows.map((row) => (
+          row.rowNumber === currentRow.rowNumber ? { ...row, status: 'creating', result: '' } : row
+        )));
+        try {
+          const response = await fetch(`${API_URL}/api/orders`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(currentRow.order)
+          });
+          const data = await response.json();
+          if (!response.ok || !data.success) throw new Error(data.message || 'Không tạo được đơn.');
+          setBulkRows((currentRows) => currentRows.map((row) => (
+            row.rowNumber === currentRow.rowNumber
+              ? { ...row, status: 'success', result: `${data.tracking_code} · ${Number(data.shipping_fee || 0).toLocaleString('vi-VN')} đ${data.warnings?.length ? ` · Cảnh báo: ${data.warnings.join(' ')}` : ''}` }
+              : row
+          )));
+        } catch (error) {
+          setBulkRows((currentRows) => currentRows.map((row) => (
+            row.rowNumber === currentRow.rowNumber ? { ...row, status: 'failed', result: error.message || 'Lỗi kết nối.' } : row
+          )));
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(4, queue.length) }, () => worker()));
+    setBulkBusy(false);
+    taiDuLieu();
+  };
+
+  useEffect(() => {
+    const orderId = donHangDangChon?.id;
+    if (!modalMo || !orderId) return undefined;
+
+    let socket;
+    const taiRoute = async () => {
+      try {
+        const res = await fetch(`${API_URL}/api/orders/${orderId}/route`);
+        const data = await res.json();
+        if (data.success) {
+          setRouteTheoDoi(data.data);
+          setViTriTaiXe(data.data.driver_location || null);
+        }
+      } catch (error) {
+        console.error('Lỗi tải lộ trình vận đơn:', error);
+      }
+    };
+
+    taiRoute();
+    socket = io(API_URL, {
+      auth: { token: localStorage.getItem('access_token') }
+    });
+    socket.emit('join_order_tracking', { order_id: orderId });
+    socket.on('driver_location_changed', (data) => {
+      if (String(data?.order_id) !== String(orderId)) return;
+      setViTriTaiXe({
+        lat: Number(data.lat),
+        lng: Number(data.lng),
+        timestamp: data.timestamp
+      });
+    });
+
+    return () => {
+      socket.disconnect();
+      setRouteTheoDoi(null);
+      setViTriTaiXe(null);
+    };
+  }, [donHangDangChon?.id, modalMo]);
+
+  const taiDuLieu = async () => {
+    try {
+      const res = await fetch(`${API_URL}/api/orders`);
+      const data = await res.json();
+      if (data.success && Array.isArray(data.data)) {
+        // Lọc đúng đơn hàng của Shop đang đăng nhập, tránh lộ dữ liệu
+        const donCuaShop = data.data.filter(d => String(d?.shop_id) === String(shopId));
+        setDonHang(donCuaShop); 
+      } else {
+        setDonHang([]);
+      }
+    } catch (error) {
+      console.error("Lỗi tải dữ liệu:", error);
+      setDonHang([]);
+    }
+  };
+
+  const taiThongBao = async () => {
+    if (!shopId) return;
+    try {
+      const res = await fetch(`${API_URL}/api/notifications/${shopId}`);
+      const data = await res.json();
+      if (data.success) setThongBaoShop(data.data || []);
+    } catch (error) {
+      console.error('Lỗi tải thông báo:', error);
+    }
+  };
+
+  const calculateDistanceKm = (lat1, lng1, lat2, lng2) => {
+    const toRad = (value) => (value * Math.PI) / 180;
+    const earthRadiusKm = 6371;
+    const dLat = toRad(lat2 - lat1);
+    const dLng = toRad(lng2 - lng1);
+    const a =
+      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+      Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+      Math.sin(dLng / 2) * Math.sin(dLng / 2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    return earthRadiusKm * c;
+  };
+
+  const determineVehicleType = ({ weight_kg, length, width, height, distance_km }) => {
+    const actualWeight = Number(weight_kg) || 0;
+    const volume = Number(length) * Number(width) * Number(height);
+    const dist = Number(distance_km) || 0;
+
+    if (dist > 180 || actualWeight > 100 || volume > 1000000) return 'truck';
+    if (dist > 80 || actualWeight > 25 || volume > 300000) return 'van';
+    return 'motorbike';
+  };
+
+  useEffect(() => {
+    taiDuLieu();
+    taiThongBao();
+    const socket = io(API_URL, {
+      auth: { token: localStorage.getItem('access_token') }
+    });
+    socket.on('order_status_changed', (data) => {
+      setDonHang((currentOrders) => currentOrders.map((order) => (
+        String(order.id) === String(data?.order_id)
+          ? { ...order, status: data.status }
+          : order
+      )));
+    });
+    socket.on(`notification_new_${shopId}`, taiThongBao);
+    return () => socket.disconnect();
+  }, [shopId]);
+
+  const danhDauDaDoc = async (notification) => {
+    if (!notification.is_read) {
+      await fetch(`${API_URL}/api/notifications/${notification.id}/read`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_id: shopId })
+      });
+      setThongBaoShop((current) => current.map((item) => item.id === notification.id ? { ...item, is_read: 1 } : item));
+    }
+    if (notification.order_id) setTabHienTai('danhsach');
+  };
+
+  // [LOGIC MỚI CHUẨN VIETTEL POST] Thuật toán tính phí ship tự động
+  useEffect(() => {
+    const actualWeight = parseFloat(form.weight_kg) || 0;
+    const l = parseFloat(form.length) || 0;
+    const w = parseFloat(form.width) || 0;
+    const h = parseFloat(form.height) || 0;
+    const isRemote = Boolean(form.is_remote_area);
+    const isFragile = form.is_fragile;
+
+    const destinationCenter =
+      form.receiver_lat && form.receiver_lng
+        ? { lat: Number(form.receiver_lat), lng: Number(form.receiver_lng) }
+        : { lat: GOVAP_MAP_CENTER[0], lng: GOVAP_MAP_CENTER[1] };
+
+    const autoDistance = Math.max(
+      1,
+      Math.round(
+        calculateDistanceKm(Number(form.shop_lat), Number(form.shop_lng), Number(destinationCenter.lat), Number(destinationCenter.lng))
+      )
+    );
+
+    const autoVehicleType = determineVehicleType({
+      weight_kg: actualWeight,
+      length: l,
+      width: w,
+      height: h,
+      distance_km: autoDistance
+    });
+    const effectiveVehicleType = requiresTruck ? 'truck' : vehicleSelectionMode === 'automatic' ? autoVehicleType : form.vehicle_type;
+    const selectedVehicleType = effectiveVehicleType;
+
+    setForm(prev => {
+      const nextDistance = String(autoDistance);
+      const nextVehicle = requiresTruck ? 'truck' : vehicleSelectionMode === 'automatic' ? autoVehicleType : prev.vehicle_type;
+      const shouldUpdate = Number(prev.distance_km) !== autoDistance || prev.vehicle_type !== nextVehicle || prev.is_remote_area !== isRemote;
+      if (!shouldUpdate) return prev;
+      return {
+        ...prev,
+        distance_km: nextDistance,
+        vehicle_type: nextVehicle,
+        is_remote_area: isRemote
+      };
+    });
+
+    const volumetricWeight = (l * w * h) / 5000;
+    const finalWeight = Math.max(actualWeight, volumetricWeight);
+    setChargeableWeight(finalWeight);
+
+    const baseFee = { economy: 18000, standard: 28000, express: 45000 }[form.service_type] || 28000;
+    const serviceFactor = { economy: 0.88, standard: 1, express: 1.5 }[form.service_type] || 1;
+    const distanceFee = Math.max(0, autoDistance - 5) * 1700;
+    const weightFee = finalWeight > 2 ? Math.ceil((finalWeight - 2) / 0.5) * 4500 : 0;
+    const remoteFee = isRemote ? 22000 : 0;
+    const fragileFee = isFragile ? 12000 : 0;
+    const vehicleFactor = { motorbike: 1, van: 1.5, truck: 2.5 }[selectedVehicleType] || 1;
+    const total = Math.round((baseFee + distanceFee + weightFee + remoteFee + fragileFee) * serviceFactor * vehicleFactor / 1000) * 1000;
+    setShippingFee(total);
+  }, [
+    form.shop_lat,
+    form.shop_lng,
+    form.receiver_lat,
+    form.receiver_lng,
+    form.shop_province,
+    form.destination_province,
+    form.fee_payer,
+    form.weight_kg,
+    form.length,
+    form.width,
+    form.height,
+    form.item_value,
+    form.service_type,
+    form.vehicle_type,
+    form.is_remote_area,
+    form.is_fragile,
+    vehicleSelectionMode,
+    requiresTruck,
+  ]);
+
+  const layCuocPhiChuan = (don) => {
+    if (don?.shipping_fee !== undefined && don?.shipping_fee !== null && Number(don.shipping_fee) > 0) {
+      return Number(don.shipping_fee);
+    }
+    return 15000;
+  };
+
+  const confirmManualProfileLocation = () => {
+    const latitude = Number(shopProfile.shop_lat);
+    const longitude = Number(shopProfile.shop_lng);
+    const address = profileMapSearch.trim();
+    if (!address) {
+      setShopProfileError('Nhập địa chỉ Shop trước khi xác nhận tọa độ.');
+      return;
+    }
+    if (!isWithinGovapServiceArea(latitude, longitude)) {
+      setShopProfileError('Tọa độ phải nằm trong 6 phường thuộc Gò Vấp.');
+      return;
+    }
+    setShopProfile((current) => ({
+      ...current,
+      shop_address: address,
+      shop_province: 'TP. Hồ Chí Minh',
+      shop_lat: latitude,
+      shop_lng: longitude
+    }));
+    setProfileSearchMessage('Đã xác nhận địa chỉ và tọa độ. Bấm “Lưu thông tin Shop” để lưu.');
+    setShopProfileError('');
+  };
+
+  const traDiaChiTuToaDo = async (lat, lng) => {
+    const params = new URLSearchParams({ lat: String(lat), lng: String(lng) });
+    const response = await fetch(`${API_URL}/api/map/reverse?${params}`);
+    const result = await response.json();
+    if (!response.ok || !result.success) throw new Error(result.message || 'Không tra được tên đường.');
+    return result.data.address;
+  };
+
+  const updateProfileLocationFromMap = async (lat, lng) => {
+    const requestId = ++locationLookupRequest.current.profile;
+    setLocationLookup((current) => ({ ...current, profile: 'Đang tra tên đường và phường...' }));
+    setShopProfile((current) => ({
+      ...current,
+      shop_province: 'TP. Hồ Chí Minh',
+      shop_lat: lat,
+      shop_lng: lng
+    }));
+    try {
+      const address = await traDiaChiTuToaDo(lat, lng);
+      if (locationLookupRequest.current.profile !== requestId) return;
+      setShopProfile((current) => ({ ...current, shop_address: address }));
+      setProfileMapSearch(address);
+      setProfileSearchMessage('Đã điền đường/hẻm và phường từ bản đồ. Bạn có thể thêm số nhà cụ thể rồi bấm “Lưu thông tin Shop”.');
+      setLocationLookup((current) => ({ ...current, profile: '' }));
+    } catch (error) {
+      if (locationLookupRequest.current.profile !== requestId) return;
+      setLocationLookup((current) => ({ ...current, profile: error.message || 'Không tra được tên đường.' }));
+      setProfileSearchMessage('Không tự nhận diện được tên đường. Hãy nhập địa chỉ cụ thể bằng chữ; tọa độ đã chọn vẫn được giữ.');
+    }
+  };
+
+  const luuHoSoShop = async (event) => {
+    event.preventDefault();
+    setShopProfileError('');
+    setShopProfileMessage('');
+    if (!shopProfile.full_name?.trim() || !shopProfile.shop_address?.trim()
+      || !isWithinGovapServiceArea(shopProfile.shop_lat, shopProfile.shop_lng)) {
+      setShopProfileError('Vui lòng nhập tên Shop và chọn địa chỉ lấy hàng trong 6 phường thuộc Gò Vấp.');
+      return;
+    }
+    setShopProfileSaving(true);
+    try {
+      const response = await fetch(`${API_URL}/api/shop/profile`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(shopProfile)
+      });
+      const result = await response.json();
+      if (!response.ok || !result.success) throw new Error(result.message || 'Không thể lưu thông tin Shop.');
+      setShopProfile(result.data);
+      setProfileMapSearch(result.data.shop_address);
+      localStorage.setItem('full_name', result.data.full_name);
+      setForm((current) => ({
+        ...current,
+        shop_address: result.data.shop_address,
+        shop_province: result.data.shop_province,
+        shop_lat: Number(result.data.shop_lat),
+        shop_lng: Number(result.data.shop_lng),
+        shop_location_verified: true
+      }));
+      setShopProfileMessage(result.message || 'Đã cập nhật thông tin Shop.');
+    } catch (error) {
+      setShopProfileError(error.message || 'Không thể lưu thông tin Shop.');
+    } finally {
+      setShopProfileSaving(false);
+    }
+  };
+
+  const updateShopLocationFromMap = async (lat, lng) => {
+    const requestId = ++locationLookupRequest.current.shop;
+    setLocationLookup((current) => ({ ...current, shop: 'Đang tra tên đường và phường...' }));
+    setForm((prev) => ({
+      ...prev,
+      shop_lat: lat,
+      shop_lng: lng,
+      shop_location_verified: true
+    }));
+    try {
+      const address = await traDiaChiTuToaDo(lat, lng);
+      if (locationLookupRequest.current.shop !== requestId) return;
+      setForm((current) => ({ ...current, shop_address: address }));
+      setLocationLookup((current) => ({ ...current, shop: 'Đã điền đường/hẻm và phường từ bản đồ. Có thể thêm số nhà cụ thể.' }));
+    } catch (error) {
+      if (locationLookupRequest.current.shop !== requestId) return;
+      setLocationLookup((current) => ({
+        ...current,
+        shop: error.message || 'Không tra được tên đường. Hãy nhập địa chỉ bằng chữ.'
+      }));
+    }
+  };
+
+  const updateReceiverLocationFromMap = async (lat, lng) => {
+    const requestId = ++locationLookupRequest.current.receiver;
+    setLocationLookup((current) => ({ ...current, receiver: 'Đang tra tên đường và phường...' }));
+    setForm((prev) => ({
+      ...prev,
+      receiver_lat: lat,
+      receiver_lng: lng,
+      receiver_location_verified: true
+    }));
+    try {
+      const address = await traDiaChiTuToaDo(lat, lng);
+      if (locationLookupRequest.current.receiver !== requestId) return;
+      setForm((current) => ({ ...current, receiver_address: address }));
+      setLocationLookup((current) => ({ ...current, receiver: 'Đã điền đường/hẻm và phường từ bản đồ. Có thể thêm số nhà cụ thể.' }));
+    } catch (error) {
+      if (locationLookupRequest.current.receiver !== requestId) return;
+      setLocationLookup((current) => ({
+        ...current,
+        receiver: error.message || 'Không tra được tên đường. Hãy nhập địa chỉ bằng chữ.'
+      }));
+    }
+  };
+
+  const taoDonMoi = async (e) => {
+    e.preventDefault();
+    if (shopProfileLoading) {
+      return alert('Đang tải hồ sơ Shop, vui lòng thử lại sau.');
+    }
+    if (!shopProfile.shop_address || !isWithinGovapServiceArea(shopProfile.shop_lat, shopProfile.shop_lng)) {
+      setTabHienTai('profile');
+      return alert('Vui lòng lưu thông tin và vị trí lấy hàng mặc định trong 6 phường Gò Vấp trước khi tạo đơn.');
+    }
+    if (!form.shop_location_verified || !form.receiver_location_verified) {
+      return alert('Vui lòng chọn cả điểm lấy và điểm giao trên bản đồ trong 6 phường Gò Vấp.');
+    }
+    try {
+      const res = await fetch(`${API_URL}/api/orders`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          shop_address: form.shop_address,
+          shop_province: form.shop_province,
+          shop_lat: form.shop_lat,
+          shop_lng: form.shop_lng,
+          receiver_name: form.receiver_name,
+          receiver_phone: form.receiver_phone,
+          receiver_address: form.receiver_address,
+          receiver_lat: form.receiver_lat,
+          receiver_lng: form.receiver_lng,
+          destination_province: form.destination_province,
+          cod_amount: form.cod_amount,
+          customer_email: form.customer_email,
+          shipping_fee: shippingFee,
+          weight_kg: chargeableWeight,
+          length: form.length,
+          width: form.width,
+          height: form.height,
+          item_value: form.item_value,
+          service_fee: form.service_fee,
+          distance_km: form.distance_km,
+          is_remote_area: form.is_remote_area,
+          service_type: form.service_type,
+          pickup_appointment_at: form.pickup_appointment_at || null,
+          is_fragile: form.is_fragile,
+          fee_payer: form.fee_payer,
+          vehicle_type: vehicleSelectionMode === 'automatic' ? determineVehicleType({
+            weight_kg: chargeableWeight,
+            length: form.length,
+            width: form.width,
+            height: form.height,
+            distance_km: form.distance_km
+          }) : form.vehicle_type,
+          shop_id: shopId
+        })
+      });
+      const data = await res.json();
+      
+      if (data.success) {
+        const trackingCode = data.tracking_code;
+        const confirmedFee = Number(data.shipping_fee ?? shippingFee);
+        setShippingFee(confirmedFee);
+        const warningText = data.warnings?.length ? `\nCẢNH BÁO: ${data.warnings.join(' ')}` : '';
+        alert(`Tạo đơn thành công! Mã vận đơn: ${trackingCode} | Cước phí: ${confirmedFee.toLocaleString()} đ${warningText}`);
+        setForm({ 
+          shop_address: shopProfile.shop_address, shop_province: shopProfile.shop_province || 'TP. Hồ Chí Minh', shop_lat: Number(shopProfile.shop_lat), shop_lng: Number(shopProfile.shop_lng), shop_location_verified: true, receiver_name: '', receiver_phone: '', receiver_address: '', receiver_lat: null, receiver_lng: null, receiver_location_verified: false, destination_province: 'TP. Hồ Chí Minh', cod_amount: '',
+          customer_email: '',
+          weight_kg: '1', length: '10', width: '10', height: '10', item_value: '0', service_fee: '0',
+          distance_km: '5', is_remote_area: false, service_type: 'standard', vehicle_type: 'motorbike', fee_payer: 'sender', is_fragile: false, pickup_appointment_at: ''
+        });
+        setSelectedOrderIds([]);
+        taiDuLieu();
+        setTabHienTai('danhsach');
+      } else {
+        alert("Lỗi: " + (data.message || 'Không thể tạo đơn hàng.'));
+      }
+    } catch {
+      alert("Lỗi kết nối máy chủ!");
+    }
+  };
+
+  const dangXuat = () => {
+    if (window.confirm("Bạn có chắc chắn muốn đăng xuất?")) {
+      localStorage.clear();
+      window.location.href = '/'; 
+    }
+  };
+
+  const xacNhanInPhieu = () => {
+    window.print();
+  };
+
+  const hienThiTrangThai = (status) => {
+    return <OrderStatusBadge status={status} />;
+  };
+
+  const renderChiTietTienDo = (status) => {
+    const cacBuoc = [
+      { id: 'pending', name: getOrderStatusLabel('pending'), desc: 'Đơn hàng mới tạo từ Cửa hàng', icon: <Clock size={18} /> },
+      { id: 'picking', name: getOrderStatusLabel('picking'), desc: 'Tài xế đã nhận việc và đang đến lấy', icon: <PackageSearch size={18} /> },
+      { id: 'picked_up', name: getOrderStatusLabel('picked_up'), desc: 'Tài xế đã lấy hàng, chờ kho tổng quét nhận', icon: <PackageSearch size={18} /> },
+      { id: 'at_central_warehouse', name: getOrderStatusLabel('at_central_warehouse'), desc: 'Kho tổng Gò Vấp đã nhận hàng, chờ phân công giao', icon: <Box size={18} /> },
+      { id: 'delivering', name: getOrderStatusLabel('delivering'), desc: 'Tài xế đang mang hàng đến người nhận', icon: <Truck size={18} /> },
+      { id: 'completed', name: getOrderStatusLabel('completed'), desc: 'Người nhận đã nhận hàng', icon: <CheckCircle size={18} /> }
+    ];
+
+    const mucHienTai = cacBuoc.findIndex((buoc) => buoc.id === status);
+
+    if (['cancelled', 'pickup_failed', 'delivery_failed', 'return_pending', 'returning', 'returned'].includes(status)) {
+      return (
+        <div className="my-4 rounded-xl border border-slate-200 bg-slate-50 p-4">
+          <OrderStatusBadge status={status} />
+        </div>
+      );
+    }
+
+    return (
+      <div className="space-y-6 my-6 relative pl-6 border-l-2 border-blue-100 ml-2">
+        {cacBuoc.map((buoc, index) => {
+          const daQua = index <= mucHienTai;
+          const dangChay = index === mucHienTai;
+          
+          return (
+            <div key={buoc.id} className="relative group">
+              <div className={`absolute -left-[31px] top-0 w-8 h-8 rounded-full flex items-center justify-center transition-all ${
+                daQua ? 'bg-blue-600 text-white shadow-md shadow-blue-200' : 'bg-slate-100 text-slate-400 border border-slate-200'
+              } ${dangChay ? 'ring-4 ring-blue-100 scale-110' : ''}`}>
+                {buoc.icon}
+              </div>
+              <div className="pl-4">
+                <p className={`font-bold text-base ${daQua ? 'text-slate-800' : 'text-slate-400'}`}>{buoc.name}</p>
+                <p className="text-xs text-slate-500 mt-0.5">{buoc.desc}</p>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    );
+  };
+
+  const safeDonHang = Array.isArray(donHang) ? donHang : [];
+  const tongDon = safeDonHang.length;
+  const tongCOD = safeDonHang.reduce((sum, item) => sum + Number(item?.cod_amount || 0), 0);
+  const donThanhCong = safeDonHang.filter(d => d?.status === 'completed').length;
+  const donDangGiao = safeDonHang.filter(d => ['picking', 'picked_up', 'transferring_to_central', 'at_central_warehouse', 'transferring_to_destination', 'at_destination_warehouse', 'delivering'].includes(d?.status)).length;
+  const donChoLay = safeDonHang.filter(d => ['pending'].includes(d?.status)).length;
+  const donHoan = safeDonHang.filter(d => ['pickup_failed', 'delivery_failed', 'return_pending', 'returning', 'returned'].includes(d?.status)).length;
+
+  const filteredDonHang = safeDonHang.filter(d => {
+    const kw = filterKeyword.trim().toLowerCase();
+    const matchKeyword = !kw || 
+      (d?.tracking_code || '').toLowerCase().includes(kw) ||
+      (d?.receiver_name || '').toLowerCase().includes(kw) ||
+      (d?.receiver_phone || '').includes(kw) ||
+      (d?.receiver_address || '').toLowerCase().includes(kw);
+    
+    if (!matchKeyword) return false;
+    if (statusFilter === 'all') return true;
+    if (statusFilter === 'pending') return d?.status === 'pending';
+    if (statusFilter === 'delivering') return ['picking', 'picked_up', 'transferring_to_central', 'at_central_warehouse', 'transferring_to_destination', 'at_destination_warehouse', 'delivering'].includes(d?.status);
+    if (statusFilter === 'completed') return d?.status === 'completed';
+    if (statusFilter === 'failed') return ['pickup_failed', 'delivery_failed', 'return_pending', 'returning', 'returned'].includes(d?.status);
+    return true;
+  });
+
+  return (
+    <>
+      <div className="flex h-dvh min-w-0 flex-col overflow-hidden bg-slate-50/80 font-sans text-slate-700 print:hidden lg:flex-row">
+        
+        {/* SIDEBAR */}
+        <div className="sticky top-0 z-20 flex h-auto w-full shrink-0 flex-col justify-between border-r border-slate-200/80 bg-white/95 backdrop-blur-md shadow-soft-sm lg:h-screen lg:w-72">
+          <div className="min-h-0 flex-1 overflow-y-auto">
+            <div className="flex items-center gap-3 border-b border-slate-100 p-4 lg:p-6 bg-gradient-to-b from-blue-50/40 to-transparent">
+              <div className="relative">
+                <div className="bg-gradient-to-tr from-blue-600 via-indigo-600 to-cyan-500 p-3 rounded-2xl shadow-lg shadow-blue-500/20 text-white">
+                  <Store size={22} />
+                </div>
+                <span className="absolute -bottom-0.5 -right-0.5 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-white">
+                  <span className="h-2.5 w-2.5 rounded-full bg-emerald-500 animate-pulse"></span>
+                </span>
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-1.5">
+                  <h2 className="text-base font-black text-slate-800 tracking-tight">Cổng Đối Tác</h2>
+                  <span className="rounded-full bg-blue-100/80 px-2 py-0.5 text-[10px] font-black text-blue-700">SHOP</span>
+                </div>
+                <p className="mt-0.5 truncate text-xs font-bold text-slate-600" title={shopName}>{shopName}</p>
+                <p className="text-[10px] text-emerald-600 font-semibold flex items-center gap-1">
+                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-500"></span> Trực tuyến · Sẵn sàng
+                </p>
+              </div>
+            </div>
+            
+            <div className="mt-2 flex flex-row gap-1.5 overflow-x-auto p-2 lg:flex-col lg:gap-1.5 lg:p-4">
+              <button 
+                onClick={() => setTabHienTai('taodon')}
+                className={`shrink-0 whitespace-nowrap rounded-xl px-4 py-3 text-left text-xs font-bold transition-all duration-200 flex items-center gap-3 group lg:w-full lg:px-4 lg:py-3.5 ${tabHienTai === 'taodon' ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-md shadow-blue-500/20' : 'text-slate-600 hover:bg-slate-100/80 hover:text-blue-600'}`}
+              >
+                <PackagePlus size={18} className={tabHienTai === 'taodon' ? 'text-white' : 'text-slate-400 group-hover:text-blue-600 transition-colors'} />
+                <span className="flex-1">Tạo Đơn Giao Hàng</span>
+                {tabHienTai === 'taodon' && <span className="h-2 w-2 rounded-full bg-white/80"></span>}
+              </button>
+              
+              <button 
+                onClick={() => setTabHienTai('danhsach')}
+                className={`shrink-0 whitespace-nowrap rounded-xl px-4 py-3 text-left text-xs font-bold transition-all duration-200 flex items-center gap-3 group lg:w-full lg:px-4 lg:py-3.5 ${tabHienTai === 'danhsach' ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-md shadow-blue-500/20' : 'text-slate-600 hover:bg-slate-100/80 hover:text-blue-600'}`}
+              >
+                <ListOrdered size={18} className={tabHienTai === 'danhsach' ? 'text-white' : 'text-slate-400 group-hover:text-blue-600 transition-colors'} />
+                <span className="flex-1">Quản Lý Vận Đơn</span>
+                <span className={`rounded-full px-2 py-0.5 text-[10px] font-black ${tabHienTai === 'danhsach' ? 'bg-white/20 text-white' : 'bg-slate-100 text-slate-700'}`}>{tongDon}</span>
+              </button>
+
+              <button
+                onClick={() => setTabHienTai('profile')}
+                className={`shrink-0 whitespace-nowrap rounded-xl px-4 py-3 text-left text-xs font-bold transition-all duration-200 flex items-center gap-3 group lg:w-full lg:px-4 lg:py-3.5 ${tabHienTai === 'profile' ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-md shadow-blue-500/20' : 'text-slate-600 hover:bg-slate-100/80 hover:text-blue-600'}`}
+              >
+                <User size={18} className={tabHienTai === 'profile' ? 'text-white' : 'text-slate-400 group-hover:text-blue-600 transition-colors'} />
+                <span className="flex-1">Thông Tin Shop</span>
+              </button>
+
+              <button
+                onClick={() => setTabHienTai('import')}
+                className={`shrink-0 whitespace-nowrap rounded-xl px-4 py-3 text-left text-xs font-bold transition-all duration-200 flex items-center gap-3 group lg:w-full lg:px-4 lg:py-3.5 ${tabHienTai === 'import' ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-md shadow-blue-500/20' : 'text-slate-600 hover:bg-slate-100/80 hover:text-blue-600'}`}
+              >
+                <FileSpreadsheet size={18} className={tabHienTai === 'import' ? 'text-white' : 'text-slate-400 group-hover:text-blue-600 transition-colors'} />
+                <span className="flex-1">Import Excel Đơn</span>
+              </button>
+
+              <button
+                onClick={() => setTabHienTai('rma')}
+                className={`shrink-0 whitespace-nowrap rounded-xl px-4 py-3 text-left text-xs font-bold transition-all duration-200 flex items-center gap-3 group lg:w-full lg:px-4 lg:py-3.5 ${tabHienTai === 'rma' ? 'bg-gradient-to-r from-amber-500 to-orange-500 text-white shadow-md shadow-orange-500/20' : 'text-slate-600 hover:bg-amber-50 hover:text-amber-700'}`}
+              >
+                <RotateCw size={18} className={tabHienTai === 'rma' ? 'text-white' : 'text-slate-400 group-hover:text-amber-600 transition-colors'} />
+                <span className="flex-1">Hàng hoàn / RMA</span>
+                {rmaOrders.length > 0 && <span className={`rounded-full px-2 py-0.5 text-[10px] font-black ${tabHienTai === 'rma' ? 'bg-white/20 text-white' : 'bg-orange-100 text-orange-700'}`}>{rmaOrders.length}</span>}
+              </button>
+
+              <button
+                onClick={() => setTabHienTai('integrations')}
+                className={`shrink-0 whitespace-nowrap rounded-xl px-4 py-3 text-left text-xs font-bold transition-all duration-200 flex items-center gap-3 group lg:w-full lg:px-4 lg:py-3.5 ${tabHienTai === 'integrations' ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-md shadow-blue-500/20' : 'text-slate-600 hover:bg-slate-100/80 hover:text-blue-600'}`}
+              >
+                <KeyRound size={18} className={tabHienTai === 'integrations' ? 'text-white' : 'text-slate-400 group-hover:text-blue-600 transition-colors'} />
+                <span className="flex-1">API & Webhook</span>
+              </button>
+
+              <button
+                onClick={() => setTabHienTai('thongbao')}
+                className={`shrink-0 whitespace-nowrap rounded-xl px-4 py-3 text-left text-xs font-bold transition-all duration-200 flex items-center gap-3 group lg:w-full lg:px-4 lg:py-3.5 ${tabHienTai === 'thongbao' ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-md shadow-blue-500/20' : 'text-slate-600 hover:bg-slate-100/80 hover:text-blue-600'}`}
+              >
+                <Bell size={18} />
+                <span className="flex-1">Thông Báo</span>
+                {thongBaoShop.some((item) => !item.is_read) && <span className="rounded-full bg-rose-500 px-2 py-0.5 text-[10px] font-black text-white">{thongBaoShop.filter((item) => !item.is_read).length}</span>}
+              </button>
+            </div>
+          </div>
+
+          <div className="shrink-0 border-t border-slate-100 p-4">
+            <button 
+              onClick={dangXuat}
+              className="w-full px-4 py-3 rounded-xl font-bold text-xs text-left transition-all duration-200 flex items-center gap-3 group text-rose-600 hover:bg-rose-50"
+            >
+              <LogOut size={18} className="text-rose-400 group-hover:text-rose-600 transition-colors" />
+              Đăng Xuất Tài Khoản
+            </button>
+          </div>
+        </div>
+
+        {/* MAIN CONTENT */}
+        <div className="min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden p-4 sm:p-6 lg:p-8">
+          <div className="mb-6 flex flex-wrap items-center justify-between gap-4 border-b border-slate-200/60 pb-5">
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="h-2 w-2 rounded-full bg-blue-600"></span>
+                <span className="text-xs font-bold uppercase tracking-wider text-blue-600">Smart Logistics Cloud ERP</span>
+              </div>
+              <h1 className="text-2xl lg:text-3xl font-black text-slate-800 tracking-tight mt-1">
+                {tabHienTai === 'taodon' ? 'Khởi Tạo Vận Đơn Mới' : tabHienTai === 'thongbao' ? 'Thông Báo Vận Đơn' : tabHienTai === 'import' ? 'Import Đơn Hàng Hàng Loạt' : tabHienTai === 'integrations' ? 'API & Webhook Tích Hợp' : tabHienTai === 'profile' ? 'Thông Tin Cửa Hàng' : tabHienTai === 'rma' ? 'Quản Lý Hàng Hoàn · RMA' : 'Danh Sách Vận Đơn'}
+              </h1>
+              <p className="text-slate-500 text-xs sm:text-sm mt-1">
+                {tabHienTai === 'taodon' ? 'Lựa chọn gói dịch vụ và nhập thông tin để tính cước tự động chuẩn xác.' : tabHienTai === 'thongbao' ? 'Cập nhật tức thời về tình trạng các đơn hàng của bạn.' : tabHienTai === 'import' ? 'Tải Excel/CSV, xem trước lỗi từng dòng và chỉ gửi đơn hợp lệ.' : tabHienTai === 'integrations' ? 'Quản lý khóa tích hợp riêng của Shop và webhook cập nhật đơn.' : tabHienTai === 'profile' ? 'Cập nhật thông tin Shop và lưu vị trí lấy hàng mặc định cho các đơn tiếp theo.' : tabHienTai === 'rma' ? 'Theo dõi lý do giao thất bại, bằng chứng tài xế và gửi yêu cầu giao lại.' : 'Theo dõi tiến độ giao hàng, tra cứu nhanh và in mã vạch vận chuyển.'}
+              </p>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => { void taiDuLieu(); void taiThongBao(); }}
+                className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-xs font-bold text-slate-700 shadow-soft-sm hover:bg-slate-50 hover:text-blue-600 transition-all"
+                title="Làm mới dữ liệu"
+              >
+                <RotateCw size={14} /> Làm mới
+              </button>
+              {tabHienTai !== 'taodon' && (
+                <button
+                  type="button"
+                  onClick={() => setTabHienTai('taodon')}
+                  className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 px-4 py-2.5 text-xs font-bold text-white shadow-md shadow-blue-500/20 hover:from-blue-700 hover:to-indigo-700 transition-all"
+                >
+                  <PackagePlus size={15} /> Tạo đơn mới
+                </button>
+              )}
+            </div>
+          </div>
+
+          {tabHienTai === 'profile' && (
+            <section className="max-w-4xl rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+              <div className="mb-5">
+                <h2 className="text-xl font-black text-slate-800">Hồ sơ cửa hàng</h2>
+                <p className="mt-1 text-sm text-slate-500">Địa chỉ và tọa độ lấy hàng được dùng mặc định cho đơn mới. Phạm vi phục vụ là 6 phường thuộc Gò Vấp.</p>
+              </div>
+              {(shopProfileError || shopProfileMessage) && (
+                <p role={shopProfileError ? 'alert' : 'status'} className={`mb-4 rounded-lg p-3 text-sm font-semibold ${shopProfileError ? 'bg-rose-50 text-rose-700' : 'bg-emerald-50 text-emerald-700'}`}>
+                  {shopProfileError || shopProfileMessage}
+                </p>
+              )}
+              {shopProfileLoading ? (
+                <p role="status" className="py-8 text-center font-semibold text-slate-500">Đang tải hồ sơ Shop...</p>
+              ) : (
+                <form onSubmit={luuHoSoShop} className="space-y-5">
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <label className="block text-sm font-bold text-slate-700">Tên Shop
+                      <input required maxLength={255} value={shopProfile.full_name || ''} onChange={(event) => setShopProfile((current) => ({ ...current, full_name: event.target.value }))} className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2.5 font-normal" />
+                    </label>
+                    <label className="block text-sm font-bold text-slate-700">Số điện thoại Shop
+                      <input type="tel" maxLength={50} value={shopProfile.phone || ''} onChange={(event) => setShopProfile((current) => ({ ...current, phone: event.target.value }))} placeholder="0901234567" className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2.5 font-normal" />
+                    </label>
+                    <label className="block text-sm font-bold text-slate-700 md:col-span-2">Email đăng nhập
+                      <input type="email" readOnly value={shopProfile.email || ''} className="mt-1 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 font-normal text-slate-500" />
+                      <span className="mt-1 block text-xs font-normal text-slate-500">Email được giữ cố định để bảo vệ tài khoản đăng nhập.</span>
+                    </label>
+                  </div>
+
+                  <div className="rounded-xl border border-blue-100 bg-blue-50/50 p-4">
+                    <label className="block text-sm font-bold text-slate-700">Địa chỉ Shop tại Gò Vấp
+                      <div className="mt-1">
+                        <input
+                          type="text"
+                          value={profileMapSearch}
+                          onChange={(event) => {
+                            setProfileMapSearch(event.target.value);
+                            setShopProfile((current) => ({
+                              ...current,
+                              shop_address: event.target.value
+                            }));
+                          }}
+                          placeholder="Nhập địa chỉ Shop bằng chữ..."
+                          className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 font-normal"
+                        />
+                      </div>
+                    </label>
+                    {profileSearchMessage && <p role="status" className="mt-2 text-xs font-semibold text-blue-800">{profileSearchMessage}</p>}
+                    <p className="mt-3 text-sm text-slate-600"><strong>Địa chỉ đã chọn:</strong> {shopProfile.shop_address || 'Chưa chọn địa chỉ.'}</p>
+                    <details className="mt-4 rounded-lg border border-slate-200 bg-white p-3">
+                      <summary className="cursor-pointer text-sm font-bold text-slate-700">Không tải được bản đồ/tìm kiếm? Nhập tọa độ thủ công</summary>
+                      <p className="mt-2 text-xs text-slate-600">
+                        Nhập vĩ độ và kinh độ nếu cần chọn thủ công. Ví dụ gần đường Nguyễn Văn Bảo, Gò Vấp: 10.8231, 106.6881.
+                      </p>
+                      <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                        <label className="text-xs font-bold text-slate-600">Vĩ độ (latitude)
+                          <input
+                            type="number"
+                            step="any"
+                            value={shopProfile.shop_lat ?? ''}
+                            onChange={(event) => setShopProfile((current) => ({
+                              ...current,
+                              shop_lat: event.target.value === '' ? null : Number(event.target.value)
+                            }))}
+                            placeholder="10.8231"
+                            className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm font-normal"
+                          />
+                        </label>
+                        <label className="text-xs font-bold text-slate-600">Kinh độ (longitude)
+                          <input
+                            type="number"
+                            step="any"
+                            value={shopProfile.shop_lng ?? ''}
+                            onChange={(event) => setShopProfile((current) => ({
+                              ...current,
+                              shop_lng: event.target.value === '' ? null : Number(event.target.value)
+                            }))}
+                            placeholder="106.6881"
+                            className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm font-normal"
+                          />
+                        </label>
+                      </div>
+                      <button type="button" onClick={confirmManualProfileLocation} className="mt-3 rounded-lg bg-slate-700 px-4 py-2 text-sm font-bold text-white hover:bg-slate-800">
+                        Xác nhận địa chỉ và tọa độ
+                      </button>
+                    </details>
+                    <button type="button" onClick={() => setShowProfileMap((visible) => !visible)} className="mt-3 text-sm font-bold text-blue-700 hover:underline">
+                      {showProfileMap ? 'Ẩn bản đồ' : 'Chọn vị trí trực tiếp trên bản đồ'}
+                    </button>
+                    {showProfileMap && (
+                      <div className="mt-3 overflow-hidden rounded-xl">
+                        <MapContainer
+                          center={[
+                            profileLocationValid ? Number(shopProfile.shop_lat) : GOVAP_MAP_CENTER[0],
+                            profileLocationValid ? Number(shopProfile.shop_lng) : GOVAP_MAP_CENTER[1]
+                          ]}
+                          zoom={13}
+                          maxBounds={GOVAP_MAP_BOUNDS}
+                          maxBoundsViscosity={1}
+                          scrollWheelZoom
+                          className="h-64 w-full rounded-xl border border-slate-200"
+                        >
+                          <LocationMapTiles />
+                          <GovapBoundaryOverlay />
+                          <RecenterMap value={{
+                            lat: profileLocationValid ? Number(shopProfile.shop_lat) : GOVAP_MAP_CENTER[0],
+                            lng: profileLocationValid ? Number(shopProfile.shop_lng) : GOVAP_MAP_CENTER[1]
+                          }} />
+                          <MapClickHandler onSelect={updateProfileLocationFromMap} onOutside={() => window.alert('Vui lòng chọn vị trí trong 6 phường thuộc Gò Vấp.')} />
+                          {profileLocationValid && <Marker position={[Number(shopProfile.shop_lat), Number(shopProfile.shop_lng)]} icon={shopMarkerIcon} />}
+                        </MapContainer>
+                      </div>
+                    )}
+                    {profileLocationValid && (
+                      <p className="mt-2 text-xs text-emerald-700">Tọa độ đã chọn: {Number(shopProfile.shop_lat).toFixed(5)}, {Number(shopProfile.shop_lng).toFixed(5)}</p>
+                    )}
+                  </div>
+
+                  <button type="submit" disabled={shopProfileSaving} className="rounded-xl bg-blue-700 px-5 py-3 font-black text-white hover:bg-blue-800 disabled:cursor-not-allowed disabled:opacity-50">
+                    {shopProfileSaving ? 'Đang lưu...' : 'Lưu thông tin Shop'}
+                  </button>
+                </form>
+              )}
+            </section>
+          )}
+
+          {tabHienTai === 'integrations' && (
+            <section className="max-w-6xl space-y-5">
+              {(integrationError || integrationMessage) && (
+                <p role={integrationError ? 'alert' : 'status'} className={`rounded-lg p-3 text-sm font-semibold ${integrationError ? 'bg-rose-50 text-rose-700' : 'bg-emerald-50 text-emerald-700'}`}>
+                  {integrationError || integrationMessage}
+                </p>
+              )}
+              {revealedCredential && (
+                <div className="rounded-xl border border-amber-300 bg-amber-50 p-5">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <h2 className="font-black text-amber-900">{revealedCredential.label}</h2>
+                      <p className="mt-1 text-sm text-amber-800">Thông tin này chỉ hiển thị một lần. Hãy lưu ở kho bí mật an toàn.</p>
+                    </div>
+                    <button type="button" onClick={copyCredential} className="inline-flex items-center gap-2 rounded-lg border border-amber-400 px-3 py-2 text-sm font-black text-amber-900 hover:bg-amber-100">
+                      <Copy size={16} /> Sao chép
+                    </button>
+                  </div>
+                  <code className="mt-3 block select-all break-all rounded-lg bg-white p-3 text-sm text-slate-800">{revealedCredential.value}</code>
+                </div>
+              )}
+
+              <div className="grid gap-5 lg:grid-cols-2">
+                <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+                  <div className="flex items-start gap-3">
+                    <KeyRound className="mt-1 text-blue-700" />
+                    <div>
+                      <h2 className="text-lg font-black">API key riêng của Shop</h2>
+                      <p className="mt-1 text-sm text-slate-500">Dùng để đẩy đơn từ website hoặc nền tảng bán hàng. Mỗi Shop tối đa 10 khóa đang hoạt động.</p>
+                    </div>
+                  </div>
+                  <form onSubmit={createShopApiKey} className="mt-5 flex flex-wrap gap-2">
+                    <input required maxLength={100} value={apiKeyName} onChange={(event) => setApiKeyName(event.target.value)} placeholder="Tên tích hợp, ví dụ WooCommerce" className="min-w-0 flex-1 rounded-lg border border-slate-300 px-3 py-2.5 text-sm" />
+                    <button disabled={integrationBusy} className="rounded-lg bg-blue-700 px-4 py-2.5 text-sm font-black text-white hover:bg-blue-800 disabled:opacity-50">Tạo API key</button>
+                  </form>
+                  <div className="mt-5 overflow-x-auto">
+                    <table className="w-full min-w-[430px] text-left text-sm">
+                      <thead className="border-b text-xs uppercase text-slate-400"><tr><th className="py-2">Tên / Prefix</th><th className="py-2">Sử dụng gần nhất</th><th className="py-2">Thao tác</th></tr></thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {shopApiKeys.map((key) => (
+                          <tr key={key.id}>
+                            <td className="py-3"><span className="block font-bold">{key.name}</span><code className="text-xs text-slate-500">{key.key_prefix}...</code></td>
+                            <td className="py-3 text-xs text-slate-500">{key.last_used_at ? new Date(key.last_used_at).toLocaleString('vi-VN') : 'Chưa sử dụng'}</td>
+                            <td className="py-3"><button type="button" disabled={integrationBusy} onClick={() => revokeShopApiKey(key)} className="font-bold text-rose-700 hover:underline disabled:opacity-50">Thu hồi</button></td>
+                          </tr>
+                        ))}
+                        {!integrationBusy && !shopApiKeys.length && <tr><td colSpan="3" className="py-6 text-center text-slate-400">Chưa có API key.</td></tr>}
+                      </tbody>
+                    </table>
+                    {integrationBusy && <p role="status" className="mt-3 text-xs text-slate-500">Đang xử lý...</p>}
+                  </div>
+                </section>
+
+                <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+                  <div className="flex items-start gap-3">
+                    <Webhook className="mt-1 text-emerald-700" />
+                    <div>
+                      <h2 className="text-lg font-black">Webhook trạng thái đơn</h2>
+                      <p className="mt-1 text-sm text-slate-500">Hệ thống gửi sự kiện `order.delivered` qua HTTPS khi đơn được giao thành công.</p>
+                    </div>
+                  </div>
+                  <form onSubmit={saveShopWebhook} className="mt-5 space-y-3">
+                    <label className="block text-sm font-bold text-slate-700">Endpoint HTTPS công khai
+                      <input type="url" value={shopWebhook.target_url} onChange={(event) => setShopWebhook((current) => ({ ...current, target_url: event.target.value }))} placeholder="https://shop.example.com/webhooks/logistics" className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2.5 font-normal" />
+                    </label>
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <span className={`text-sm font-bold ${shopWebhook.enabled ? 'text-emerald-700' : 'text-slate-500'}`}>{shopWebhook.enabled ? 'Webhook đang bật' : 'Webhook đang tắt'}</span>
+                      <button type="submit" disabled={integrationBusy} className="rounded-lg border border-slate-300 px-4 py-2.5 text-sm font-black hover:bg-slate-50 disabled:opacity-50">Lưu endpoint</button>
+                    </div>
+                  </form>
+                  <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 pt-4">
+                    <p className="text-xs text-slate-500">{shopWebhook.secret_configured ? 'Đã có signing secret; tạo lại sẽ vô hiệu secret cũ.' : 'Chưa có signing secret.'}</p>
+                    <button type="button" disabled={integrationBusy || !shopWebhook.target_url} onClick={createWebhookSecret} className="inline-flex items-center gap-2 rounded-lg bg-emerald-700 px-4 py-2.5 text-sm font-black text-white hover:bg-emerald-800 disabled:opacity-50">
+                      <RotateCw size={15} /> {shopWebhook.secret_configured ? 'Tạo lại secret' : 'Tạo secret'}
+                    </button>
+                  </div>
+                </section>
+              </div>
+
+              <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+                <h2 className="text-lg font-black">Tích hợp API tạo đơn</h2>
+                <p className="mt-1 text-sm text-slate-500">Gửi `POST {API_URL}/api/v1/orders`, header `x-api-key`. Chủ Shop được xác định từ API key; không cần gửi shop_id.</p>
+                <pre className="mt-4 overflow-x-auto rounded-xl bg-slate-950 p-4 text-xs leading-relaxed text-emerald-100">{`{
+  "shop_address": "12 Nguyễn Huệ, Quận 1",
+  "shop_lat": 10.7731,
+  "shop_lng": 106.703,
+  "receiver_name": "Nguyễn Văn A",
+  "receiver_phone": "0901234567",
+  "receiver_address": "1 Lê Duẩn, Quận 1",
+  "receiver_lat": 10.7798,
+  "receiver_lng": 106.699,
+  "weight_kg": 1,
+  "length": 10,
+  "width": 10,
+  "height": 10,
+  "service_type": "standard",
+  "fee_payer": "sender"
+}`}</pre>
+                <p className="mt-3 text-xs text-slate-500">
+                  Webhook ký HMAC-SHA256 trên raw request body, gửi trong header <code>X-SmartLogistics-Signature: sha256=&lt;hex&gt;</code>.
+                  Dùng HTTPS và xác minh chữ ký ở hệ thống nhận trước khi xử lý.
+                </p>
+                {integrationBusy && <p role="status" className="mt-3 text-xs text-slate-500">Đang tải cấu hình...</p>}
+              </section>
+            </section>
+          )}
+
+          {tabHienTai === 'rma' && (
+            <section className="max-w-6xl space-y-5">
+              {(rmaError || rmaMessage) && (
+                <p role={rmaError ? 'alert' : 'status'} className={`rounded-lg p-3 text-sm font-semibold ${rmaError ? 'bg-rose-50 text-rose-700' : 'bg-emerald-50 text-emerald-700'}`}>
+                  {rmaError || rmaMessage}
+                </p>
+              )}
+              <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+                <div className="rounded-2xl border border-orange-100 bg-white p-5 shadow-sm">
+                  <p className="text-xs font-black uppercase tracking-wide text-slate-500">Đơn đang hoàn</p>
+                  <p className="mt-2 text-3xl font-black text-orange-600">{rmaOrders.length}</p>
+                </div>
+                <div className="rounded-2xl border border-rose-100 bg-white p-5 shadow-sm">
+                  <p className="text-xs font-black uppercase tracking-wide text-slate-500">Tỷ lệ đơn đang hoàn</p>
+                  <p className="mt-2 text-3xl font-black text-rose-600">{donHang.length ? `${((rmaOrders.length / donHang.length) * 100).toFixed(1)}%` : '0%'}</p>
+                </div>
+                <div className="rounded-2xl border border-amber-100 bg-white p-5 shadow-sm">
+                  <p className="text-xs font-black uppercase tracking-wide text-slate-500">Chờ duyệt giao lại</p>
+                  <p className="mt-2 text-3xl font-black text-amber-600">{rmaOrders.filter((order) => order.redelivery_status === 'pending').length}</p>
+                </div>
+                <div className="rounded-2xl border border-emerald-100 bg-white p-5 shadow-sm">
+                  <p className="text-xs font-black uppercase tracking-wide text-slate-500">Đã yêu cầu giao lại</p>
+                  <p className="mt-2 text-3xl font-black text-emerald-600">{rmaOrders.filter((order) => ['pending', 'approved'].includes(order.redelivery_status)).length}</p>
+                </div>
+              </div>
+              {rmaLoading ? (
+                <div role="status" className="rounded-2xl border border-slate-200 bg-white p-10 text-center font-semibold text-slate-500">Đang tải hồ sơ hàng hoàn...</div>
+              ) : rmaOrders.length === 0 ? (
+                <div className="rounded-2xl border border-dashed border-slate-300 bg-white p-10 text-center">
+                  <CheckCircle className="mx-auto text-emerald-500" size={36} />
+                  <p className="mt-3 font-black text-slate-800">Chưa có đơn hàng hoàn</p>
+                  <p className="mt-1 text-sm text-slate-500">Đơn giao thất bại sẽ xuất hiện tại đây cùng lý do và bằng chứng.</p>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {rmaOrders.map((order) => (
+                    <article key={order.id} className="overflow-hidden rounded-2xl border border-orange-100 bg-white shadow-sm">
+                      <div className="flex flex-wrap items-start justify-between gap-4 border-b border-slate-100 p-5">
+                        <div>
+                          <p className="text-xs font-bold uppercase tracking-wide text-slate-400">Mã vận đơn</p>
+                          <h2 className="mt-1 text-xl font-black text-slate-800">{order.tracking_code}</h2>
+                          <p className="mt-1 text-sm text-slate-500">Cập nhật {new Date(order.updated_at).toLocaleString('vi-VN')}</p>
+                        </div>
+                        <span className={`rounded-full px-3 py-1.5 text-xs font-black ${order.redelivery_status === 'pending' ? 'bg-amber-100 text-amber-800' : order.redelivery_status === 'approved' ? 'bg-emerald-100 text-emerald-800' : order.redelivery_status === 'rejected' ? 'bg-rose-100 text-rose-800' : 'bg-orange-100 text-orange-800'}`}>
+                          {order.awaitingShopReceipt ? 'Kho đã trả hàng · chờ Shop xác nhận' : order.redelivery_status === 'pending' ? 'Yêu cầu chờ duyệt' : order.redelivery_status === 'approved' ? 'Đã duyệt · chờ giao lại' : order.redelivery_status === 'rejected' ? 'Yêu cầu bị từ chối' : 'Đang hoàn hàng'}
+                        </span>
+                      </div>
+                      <div className="grid gap-5 p-5 lg:grid-cols-[1fr_1fr]">
+                        <div className="space-y-4">
+                          <div className="rounded-xl border border-rose-100 bg-rose-50 p-4">
+                            <p className="flex items-center gap-2 text-sm font-black text-rose-800"><AlertCircle size={16} /> Lý do giao thất bại</p>
+                            <p className="mt-2 text-sm text-rose-700">{order.fail_reason || 'Chưa có ghi chú lý do.'}</p>
+                          </div>
+                          <div className="rounded-xl bg-slate-50 p-4 text-sm">
+                            <p><span className="font-bold text-slate-500">Người nhận:</span> {order.receiver_name} · {order.receiver_phone}</p>
+                            <p className="mt-1"><span className="font-bold text-slate-500">Địa chỉ:</span> {order.receiver_address}</p>
+                            <p className="mt-1"><span className="font-bold text-slate-500">COD:</span> {Number(order.cod_amount || 0).toLocaleString('vi-VN')} đ</p>
+                          </div>
+                          {order.redelivery_status === 'rejected' && order.redelivery_review_note && (
+                            <p className="rounded-xl border border-rose-100 bg-rose-50 p-3 text-sm text-rose-700"><strong>Phản hồi điều phối:</strong> {order.redelivery_review_note}</p>
+                          )}
+                          {order.redelivery_status === 'pending' && (
+                            <div className="rounded-xl border border-amber-100 bg-amber-50 p-3 text-sm text-amber-800">
+                              <p className="font-semibold">Yêu cầu đã gửi điều phối. Đơn chỉ được đưa sang lượt giao mới sau khi được duyệt.</p>
+                              {order.redelivery_note && <p className="mt-2"><strong>Ghi chú Shop:</strong> {order.redelivery_note}</p>}
+                            </div>
+                          )}
+                          {order.redelivery_status === 'approved' && (
+                            <p className="rounded-xl border border-emerald-100 bg-emerald-50 p-3 text-sm text-emerald-800">
+                              <strong>Yêu cầu đã được duyệt.</strong> Đơn đang ở {order.order_status === 'at_central_warehouse' ? 'kho tổng, chờ điều phối phân công lượt giao mới' : getOrderStatusLabel(order.order_status)} · lượt giao {Number(order.delivery_attempts || 0)}.
+                              {order.redelivery_review_note && <span className="mt-1 block">Phản hồi điều phối: {order.redelivery_review_note}</span>}
+                              {order.redelivery_note && <span className="mt-1 block">Ghi chú Shop: {order.redelivery_note}</span>}
+                            </p>
+                          )}
+                          {order.awaitingShopReceipt && (
+                            <form onSubmit={(event) => xacNhanNhanHangHoan(event, order)} className="space-y-3 rounded-xl border border-emerald-100 bg-emerald-50 p-4">
+                              <p className="text-sm font-black text-emerald-900">Xác nhận đã nhận hàng hoàn</p>
+                              <label className="block text-xs font-bold text-slate-700">Ảnh hàng hoàn
+                                <input name="proof_image" type="file" accept="image/*" required className="mt-1 block w-full text-xs" />
+                              </label>
+                              <label className="block text-xs font-bold text-slate-700">Chữ ký xác nhận
+                                <input name="signature_image" type="file" accept="image/*" required className="mt-1 block w-full text-xs" />
+                              </label>
+                              <button disabled={rmaBusy} className="rounded-lg bg-emerald-700 px-4 py-2.5 text-sm font-black text-white disabled:opacity-50">
+                                {rmaBusy ? 'Đang lưu...' : 'Xác nhận Shop đã nhận hàng'}
+                              </button>
+                            </form>
+                          )}
+                          {!order.awaitingShopReceipt && (!order.redelivery_status || order.redelivery_status === 'rejected') && (
+                            <form onSubmit={(event) => guiYeuCauGiaoLai(event, order)} className="space-y-3 rounded-xl border border-blue-100 bg-blue-50/60 p-4">
+                              <label className="block text-sm font-black text-slate-700" htmlFor={`rma-note-${order.id}`}>Ghi chú yêu cầu giao lại</label>
+                              <textarea id={`rma-note-${order.id}`} name="note" required minLength={8} maxLength={1000} rows={3} className="w-full rounded-lg border border-slate-300 bg-white p-3 text-sm" placeholder="Ví dụ: Đã liên hệ khách, khách xác nhận nhận hàng sau 18:00..." />
+                              <label className="flex items-start gap-2 text-xs font-semibold text-slate-600">
+                                <input name="customer_confirmed" type="checkbox" required className="mt-0.5 accent-blue-700" />
+                                Tôi xác nhận đã trao đổi và khách đồng ý nhận lại đơn.
+                              </label>
+                              <button disabled={rmaBusy} className="inline-flex items-center gap-2 rounded-lg bg-blue-700 px-4 py-2.5 text-sm font-black text-white hover:bg-blue-800 disabled:opacity-50">
+                                <RotateCw size={16} /> {rmaBusy ? 'Đang gửi...' : 'Yêu cầu giao lại'}
+                              </button>
+                            </form>
+                          )}
+                        </div>
+                        <div className="space-y-4">
+                          <div>
+                            <p className="mb-2 flex items-center gap-2 text-sm font-black text-slate-800"><Camera size={16} className="text-orange-600" /> Bằng chứng và lịch sử xử lý</p>
+                            <div className="space-y-3">
+                              {(order.status_history || []).length === 0 ? (
+                                <p className="rounded-xl bg-slate-50 p-4 text-sm text-slate-500">Chưa có lịch sử bằng chứng.</p>
+                              ) : order.status_history.map((entry) => (
+                                <div key={`${entry.order_id}-${entry.created_at}`} className="rounded-xl border border-slate-100 p-3">
+                                  <div className="flex flex-wrap items-center gap-2">
+                                    <OrderStatusBadge status={entry.to_status} />
+                                    <time className="text-xs font-bold text-slate-500">{new Date(entry.created_at).toLocaleString('vi-VN')}</time>
+                                  </div>
+                                  {entry.note && <p className="mt-1 text-sm text-slate-700">{entry.note}</p>}
+                                  {entry.proof_image && <a href={`${API_URL}${entry.proof_image}`} target="_blank" rel="noreferrer" className="mt-2 block"><img src={`${API_URL}${entry.proof_image}`} alt={`Bằng chứng ${order.tracking_code}`} className="max-h-52 w-full rounded-lg border border-slate-200 object-contain" /></a>}
+                                  {entry.signature_image && <a href={`${API_URL}${entry.signature_image}`} target="_blank" rel="noreferrer" className="mt-2 block"><img src={`${API_URL}${entry.signature_image}`} alt={`Chữ ký người nhận ${order.tracking_code}`} className="max-h-32 w-full rounded-lg border border-slate-200 bg-white object-contain" /><span className="mt-1 block text-xs font-bold text-emerald-700">Chữ ký người nhận</span></a>}
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              )}
+            </section>
+          )}
+
+          {tabHienTai === 'import' && (
+            <section className="max-w-7xl space-y-5">
+              <div className="rounded-2xl border border-blue-100 bg-white p-6 shadow-sm">
+                <div className="flex flex-wrap items-start justify-between gap-4">
+                  <div>
+                    <h2 className="text-lg font-black text-slate-800">Tải file đơn hàng</h2>
+                    <p className="mt-1 max-w-3xl text-sm text-slate-500">
+                      Hỗ trợ Excel/CSV, tối đa {BULK_ORDER_LIMIT} đơn và 10 MB mỗi file. Mỗi dòng được kiểm tra số điện thoại,
+                      địa chỉ, tọa độ trong TP.HCM, khối lượng, kích thước và thông tin cước trước khi tạo.
+                    </p>
+                    <p className="mt-2 text-xs font-semibold text-blue-700">Có thể để trống cả ba cột điểm lấy hàng (`shop_address`, `shop_lat`, `shop_lng`) để dùng hồ sơ Shop đã lưu; nếu nhập điểm lấy riêng, hãy điền đủ địa chỉ và tọa độ.</p>
+                  </div>
+                  <button type="button" onClick={downloadBulkTemplate} className="inline-flex items-center gap-2 rounded-xl border border-blue-200 px-4 py-2.5 text-sm font-black text-blue-700 hover:bg-blue-50">
+                    <Download size={17} /> Tải file mẫu
+                  </button>
+                </div>
+                <label className="mt-5 flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed border-slate-300 bg-slate-50 px-5 py-8 text-center hover:border-blue-400 hover:bg-blue-50/50">
+                  <Upload size={26} className="text-blue-600" />
+                  <span className="mt-2 font-bold text-slate-700">{bulkFileName || 'Chọn file Excel hoặc CSV'}</span>
+                  <span className="mt-1 text-xs text-slate-500">Không đổi tên các cột trong file mẫu</span>
+                  <input
+                    type="file"
+                    accept=".xlsx,.xls,.csv"
+                    disabled={bulkBusy}
+                    onChange={(event) => {
+                      parseBulkFile(event.target.files?.[0]);
+                      event.target.value = '';
+                    }}
+                    className="sr-only"
+                  />
+                </label>
+                {bulkError && <p role="alert" className="mt-4 rounded-lg bg-rose-50 p-3 text-sm font-semibold text-rose-700">{bulkError}</p>}
+              </div>
+
+              {bulkRows.length > 0 && (
+                <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+                  <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 p-5">
+                    <div>
+                      <h3 className="font-black text-slate-800">Kiểm tra {bulkRows.length} dòng dữ liệu</h3>
+                      <p className="mt-1 text-sm text-slate-500">
+                        {bulkRows.filter((row) => row.status === 'ready').length} hợp lệ · {bulkRows.filter((row) => row.status === 'invalid').length} lỗi cần sửa · {bulkRows.filter((row) => row.status === 'success').length} đã tạo
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={bulkBusy || !bulkRows.some((row) => row.status === 'ready')}
+                      onClick={importBulkOrders}
+                      className="inline-flex items-center gap-2 rounded-xl bg-blue-700 px-5 py-3 font-black text-white hover:bg-blue-800 disabled:cursor-not-allowed disabled:bg-slate-300"
+                    >
+                      <Upload size={17} /> {bulkBusy ? 'Đang tạo đơn...' : `Tạo ${bulkRows.filter((row) => row.status === 'ready').length} đơn hợp lệ`}
+                    </button>
+                  </div>
+                  <div className="max-h-[65vh] overflow-auto">
+                    <table className="w-full min-w-[850px] text-left text-sm">
+                      <thead className="sticky top-0 bg-slate-50 text-xs uppercase text-slate-500">
+                        <tr>
+                          <th className="px-4 py-3">Dòng</th>
+                          <th className="px-4 py-3">Người nhận</th>
+                          <th className="px-4 py-3">Số điện thoại</th>
+                          <th className="px-4 py-3">Địa chỉ</th>
+                          <th className="px-4 py-3">Kết quả kiểm tra</th>
+                          <th className="px-4 py-3">Trạng thái</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {bulkRows.map((row) => (
+                          <tr key={row.rowNumber} className={row.errors.length || row.status === 'failed' ? 'bg-rose-50' : row.status === 'success' ? 'bg-emerald-50/60' : ''}>
+                            <td className="px-4 py-3 font-bold">{row.rowNumber}</td>
+                            <td className="px-4 py-3">{row.order.receiver_name || '—'}</td>
+                            <td className="px-4 py-3">{row.order.receiver_phone || '—'}</td>
+                            <td className="max-w-xs truncate px-4 py-3" title={row.order.receiver_address}>{row.order.receiver_address || '—'}</td>
+                            <td className="max-w-md px-4 py-3 text-xs">
+                              {row.errors.length ? <span className="font-semibold text-rose-700">{row.errors.join(' · ')}</span> : row.result || <span className="text-emerald-700">Dữ liệu hợp lệ</span>}
+                            </td>
+                            <td className="px-4 py-3 font-bold">
+                              {row.status === 'invalid' ? <span className="text-rose-700">Lỗi dữ liệu</span>
+                                : row.status === 'creating' ? <span className="text-blue-700">Đang tạo...</span>
+                                  : row.status === 'success' ? <span className="text-emerald-700">Đã tạo</span>
+                                    : row.status === 'failed' ? <span className="text-rose-700">Tạo thất bại</span>
+                                      : <span className="text-slate-600">Sẵn sàng</span>}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </section>
+          )}
+
+          {tabHienTai === 'thongbao' && (
+            <div className="max-w-4xl divide-y divide-slate-100 rounded-2xl border border-slate-200 bg-white">
+              {thongBaoShop.length === 0 ? (
+                <p className="p-8 text-center text-sm font-medium text-slate-500">Chưa có thông báo vận đơn.</p>
+              ) : thongBaoShop.map((notification) => (
+                <button key={notification.id} onClick={() => danhDauDaDoc(notification)} className={`flex w-full items-start gap-4 p-5 text-left hover:bg-blue-50/60 ${notification.is_read ? 'bg-white' : 'bg-blue-50/50'}`}>
+                  <span className={`mt-1 h-2.5 w-2.5 shrink-0 rounded-full ${notification.is_read ? 'bg-slate-300' : 'bg-blue-600'}`} />
+                  <span className="min-w-0 flex-1">
+                    <span className="block font-bold text-slate-800">{notification.title}</span>
+                    <span className="mt-1 block text-sm text-slate-600">{notification.message}</span>
+                    <span className="mt-2 block text-xs text-slate-400">{new Date(notification.created_at).toLocaleString('vi-VN')}</span>
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+
+          {tabHienTai === 'taodon' && (
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 max-w-6xl">
+              <div className="lg:col-span-2 space-y-6">
+                
+                {/* BLOCK 1: CHỌN GÓI DỊCH VỤ */}
+                <div className="bg-white p-8 rounded-[24px] shadow-[0_8px_30px_rgb(0,0,0,0.04)] border border-blue-50">
+                  <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2 mb-6">
+                    <Zap className="text-amber-500" /> Gói Dịch Vụ Vận Chuyển
+                  </h3>
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+                    <label className={`cursor-pointer p-4 rounded-xl border-2 transition-all ${form.service_type === 'economy' ? 'border-blue-500 bg-blue-50' : 'border-slate-100 hover:border-blue-200'}`}>
+                      <input type="radio" name="service" className="hidden" checked={form.service_type === 'economy'} onChange={() => setForm({...form, service_type: 'economy'})}/>
+                      <p className="font-black text-slate-800 mb-1">Giao Tiết Kiệm</p>
+                      <p className="text-xs text-slate-500">3 - 5 ngày làm việc</p>
+                    </label>
+                    <label className={`cursor-pointer p-4 rounded-xl border-2 transition-all ${form.service_type === 'standard' ? 'border-blue-500 bg-blue-50' : 'border-slate-100 hover:border-blue-200'}`}>
+                      <input type="radio" name="service" className="hidden" checked={form.service_type === 'standard'} onChange={() => setForm({...form, service_type: 'standard'})}/>
+                      <p className="font-black text-slate-800 mb-1">Chuyển Phát Nhanh</p>
+                      <p className="text-xs text-slate-500">1 - 2 ngày làm việc</p>
+                    </label>
+                    <label className={`cursor-pointer p-4 rounded-xl border-2 transition-all ${form.service_type === 'express' ? 'border-red-500 bg-red-50' : 'border-slate-100 hover:border-red-200'}`}>
+                      <input type="radio" name="service" className="hidden" checked={form.service_type === 'express'} onChange={() => setForm({...form, service_type: 'express'})}/>
+                      <p className="font-black text-red-600 mb-1 flex items-center gap-1">Hỏa Tốc <Zap size={14}/></p>
+                      <p className="text-xs text-slate-500">Trong vòng 24h</p>
+                    </label>
+                  </div>
+                  <label className="mb-6 block max-w-md text-sm font-bold text-slate-700">
+                    Giờ hẹn lấy hàng (không bắt buộc)
+                    <input
+                      type="datetime-local"
+                      value={form.pickup_appointment_at || ''}
+                      onChange={(event) => setForm({ ...form, pickup_appointment_at: event.target.value })}
+                      className="mt-2 w-full rounded-xl border border-slate-200 p-3 font-medium"
+                    />
+                    <span className="mt-1 block text-xs font-normal text-slate-600">Đơn có giờ hẹn sẽ được ưu tiên sắp xếp trên tuyến lấy hàng.</span>
+                  </label>
+
+                  <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2 mb-4">
+                    <Truck className="text-blue-500" /> Phương Tiện Giao Hàng
+                  </h3>
+                  <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-blue-100 bg-blue-50 px-3 py-2 text-xs font-semibold text-blue-700">
+                    <span>
+                      {vehicleSelectionMode === 'automatic'
+                        ? 'Gợi ý hệ thống: tự chọn theo hàng hóa và tuyến vận chuyển.'
+                        : 'Bạn đang tự chọn phương tiện cho đơn hàng.'}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setVehicleSelectionMode(vehicleSelectionMode === 'automatic' ? 'manual' : 'automatic')}
+                      className="font-black underline underline-offset-2"
+                    >
+                      {vehicleSelectionMode === 'automatic' ? 'Tự chọn xe' : 'Dùng gợi ý hệ thống'}
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                    {[
+                      { value: 'motorbike', label: 'Xe máy', note: 'Giao nhanh trong thành phố' },
+                      { value: 'van', label: 'Xe van', note: 'Phù hợp hàng vừa' },
+                      { value: 'truck', label: 'Xe tải', note: 'Giao hàng nặng / xa' },
+                    ].map((vehicle) => (
+                      <button
+                        key={vehicle.value}
+                        type="button"
+                        aria-pressed={form.vehicle_type === vehicle.value}
+                        disabled={requiresTruck && vehicle.value !== 'truck'}
+                        onClick={() => {
+                          setVehicleSelectionMode('manual');
+                          setForm((currentForm) => ({ ...currentForm, vehicle_type: vehicle.value }));
+                        }}
+                        className={`w-full rounded-xl border-2 p-3 text-left transition-all focus:outline-none focus:ring-2 focus:ring-blue-400 disabled:cursor-not-allowed disabled:opacity-40 ${form.vehicle_type === vehicle.value ? 'border-blue-500 bg-blue-50' : 'border-slate-100 bg-slate-50 hover:border-blue-200'}`}
+                      >
+                        <p className="font-black text-slate-800 mb-1">{vehicle.label}</p>
+                        <p className="text-[11px] text-slate-500">{vehicle.note}</p>
+                      </button>
+                    ))}
+                  </div>
+                  {requiresTruck && <p role="status" className="mt-3 rounded-lg bg-amber-50 p-3 text-sm font-bold text-amber-800">Hàng vượt 100 kg hoặc 1 m³: hệ thống bắt buộc chọn xe tải.</p>}
+                </div>
+
+                {/* BLOCK 2: FORM THÔNG TIN */}
+                <form id="form-tao-don" onSubmit={taoDonMoi} className="min-w-0 space-y-6 rounded-[24px] border border-blue-50 bg-white p-4 shadow-[0_8px_30px_rgb(0,0,0,0.04)] sm:p-8">
+                  {shopProfileLoading ? (
+                    <p role="status" className="rounded-xl bg-slate-50 p-4 text-sm font-semibold text-slate-600">Đang tải thông tin và vị trí lấy hàng mặc định...</p>
+                  ) : shopProfile.shop_address ? (
+                    <p className="rounded-xl border border-emerald-100 bg-emerald-50 p-4 text-sm font-semibold text-emerald-800">
+                      Điểm lấy hàng mặc định: {shopProfile.shop_address}
+                      <button type="button" onClick={() => setTabHienTai('profile')} className="ml-2 font-black underline">Cập nhật hồ sơ</button>
+                    </p>
+                  ) : (
+                    <p className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm font-semibold text-amber-900">
+                      Cần lưu tên Shop và vị trí lấy hàng một lần trong hồ sơ trước khi tạo đơn.
+                      <button type="button" onClick={() => setTabHienTai('profile')} className="ml-2 font-black underline">Mở Thông Tin Shop</button>
+                    </p>
+                  )}
+                  <div className="flex items-center gap-3 mb-6">
+                    <div className="bg-blue-50 p-3 rounded-xl text-blue-500"><PackagePlus size={24} /></div>
+                    <h3 className="text-xl font-bold text-slate-800">Thông Tin Khách Nhận</h3>
+                  </div>
+                  
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div>
+                      <label className="block text-sm font-bold text-slate-600 mb-2">Tên người nhận</label>
+                      <div className="relative">
+                        <User className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
+                        <input type="text" required
+                          className="w-full pl-11 pr-4 py-3.5 bg-slate-50 border-2 border-transparent rounded-xl outline-none focus:bg-white focus:border-blue-400 transition-all font-medium"
+                          placeholder="VD: Nguyễn Văn A"
+                          value={form.receiver_name} onChange={e => setForm({...form, receiver_name: e.target.value})} 
+                        />
+                      </div>
+                    </div>
+                    <div>
+                      <label className="block text-sm font-bold text-slate-600 mb-2">Số điện thoại</label>
+                      <div className="relative">
+                        <Phone className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
+                        <input type="tel" required
+                          className="w-full pl-11 pr-4 py-3.5 bg-slate-50 border-2 border-transparent rounded-xl outline-none focus:bg-white focus:border-blue-400 transition-all font-medium"
+                          placeholder="VD: 0901234567"
+                          value={form.receiver_phone} onChange={e => setForm({...form, receiver_phone: e.target.value})} 
+                        />
+                      </div>
+                    </div>
+                    <div className="md:col-span-2">
+                      <label className="block text-sm font-bold text-slate-600 mb-2">Email người nhận để nhận cập nhật</label>
+                      <input type="email" className="w-full px-4 py-3.5 bg-slate-50 border-2 border-transparent rounded-xl outline-none focus:bg-white focus:border-blue-400 transition-all font-medium" placeholder="ten@example.com" value={form.customer_email} onChange={(e) => setForm({ ...form, customer_email: e.target.value })} />
+                    </div>
+                  </div>
+
+                  <div className="space-y-4">
+                    <div>
+                      <label className="block text-sm font-bold text-slate-600 mb-2">Địa chỉ cửa hàng / điểm lấy hàng</label>
+                      <div className="relative">
+                        <MapPin className="absolute left-4 top-4 text-slate-400" size={18} />
+                        <textarea rows="2" required
+                          className="w-full pl-11 pr-4 py-3.5 bg-slate-50 border-2 border-transparent rounded-xl outline-none focus:bg-white focus:border-blue-400 transition-all font-medium resize-none"
+                          placeholder="Số nhà, tên đường, quận/huyện..."
+                          value={form.shop_address} onChange={e => setForm((current) => ({ ...current, shop_address: e.target.value }))}
+                        ></textarea>
+                      </div>
+                      <div className="mt-3 flex items-center justify-between gap-3 flex-wrap">
+                        <button
+                          type="button"
+                          onClick={() => setShowShopMap((prev) => !prev)}
+                          className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-4 py-2 text-sm font-bold text-white shadow-sm hover:bg-blue-700"
+                        >
+                          <MapPinned size={16} /> {showShopMap ? 'Ẩn bản đồ' : 'Chọn trên bản đồ'}
+                        </button>
+                        <span className="text-xs text-slate-500 font-medium">
+                          {form.shop_location_verified ? 'Đã xác nhận vị trí Shop' : 'Chưa xác nhận vị trí Shop'}
+                        </span>
+                      </div>
+                      {locationLookup.shop && <p role="status" className="mt-2 text-xs font-semibold text-indigo-700">{locationLookup.shop}</p>}
+                      <p className="mt-1 text-xs text-slate-500">Chọn điểm để tự điền tên đường/hẻm và phường. Có thể thêm số nhà cụ thể để tài xế tìm đúng điểm.</p>
+
+                      {showShopMap && (
+                        <div className="mt-4 rounded-2xl border border-slate-200 overflow-hidden bg-slate-50 p-2">
+                          <ShopMapPicker value={{ lat: form.shop_lat, lng: form.shop_lng }} onSelect={updateShopLocationFromMap} />
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3.5">
+                      <p className="text-xs font-bold uppercase tracking-wide text-slate-500">Khu vực lấy hàng</p>
+                      <p className="mt-1 font-semibold text-slate-700">6 phường thuộc Gò Vấp</p>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-bold text-slate-600 mb-2">Địa chỉ giao hàng chi tiết</label>
+                    <div className="relative">
+                      <MapPin className="absolute left-4 top-4 text-slate-400" size={18} />
+                      <textarea rows="2" required
+                        className="w-full pl-11 pr-4 py-3.5 bg-slate-50 border-2 border-transparent rounded-xl outline-none focus:bg-white focus:border-blue-400 transition-all font-medium resize-none"
+                        placeholder="Số nhà, tên đường, phường/xã, quận/huyện..."
+                        value={form.receiver_address}
+                        onChange={(event) => {
+                        setForm((current) => ({
+                          ...current,
+                          receiver_address: event.target.value
+                        }));
+                        }}
+                      ></textarea>
+                    </div>
+                    <div className="mt-3 flex flex-wrap items-center gap-3">
+                      <button
+                        type="button"
+                        onClick={() => setShowReceiverMap((prev) => !prev)}
+                        className="inline-flex items-center gap-2 rounded-xl bg-indigo-600 px-4 py-2 text-sm font-bold text-white shadow-sm hover:bg-indigo-700"
+                      >
+                        <MapPinned size={16} /> {showReceiverMap ? 'Ẩn bản đồ' : 'Chọn trên bản đồ'}
+                      </button>
+                      <span role="status" className="text-xs font-medium text-slate-500">
+                        {form.receiver_location_verified
+                          ? 'Đã chọn điểm giao trên bản đồ.'
+                          : 'Bấm lên bản đồ để xác nhận điểm giao.'}
+                      </span>
+                    </div>
+                    {locationLookup.receiver && <p role="status" className="mt-2 text-xs font-semibold text-indigo-700">{locationLookup.receiver}</p>}
+                    <p className="mt-1 text-xs text-slate-500">Chọn điểm để tự điền tên đường/hẻm và phường. Có thể thêm số nhà cụ thể để tài xế tìm đúng điểm.</p>
+
+                    {showReceiverMap && (
+                      <div className="mt-4 rounded-2xl border border-slate-200 overflow-hidden bg-slate-50 p-2">
+                        <p className="px-2 pb-2 text-sm font-semibold text-slate-700">Bấm trực tiếp vào vị trí giao trên bản đồ để chọn điểm.</p>
+                        <MapContainer center={[(form.receiver_lat ?? form.shop_lat ?? GOVAP_MAP_CENTER[0]), (form.receiver_lng ?? form.shop_lng ?? GOVAP_MAP_CENTER[1])]} zoom={13} maxBounds={GOVAP_MAP_BOUNDS} maxBoundsViscosity={1} scrollWheelZoom={true} className="h-64 w-full rounded-xl border border-slate-200">
+                          <LocationMapTiles />
+                          <GovapBoundaryOverlay />
+                          <RecenterMap value={{
+                            lat: Number(form.receiver_lat ?? form.shop_lat ?? GOVAP_MAP_CENTER[0]),
+                            lng: Number(form.receiver_lng ?? form.shop_lng ?? GOVAP_MAP_CENTER[1])
+                          }} />
+                          <Marker position={[(form.receiver_lat ?? form.shop_lat ?? GOVAP_MAP_CENTER[0]), (form.receiver_lng ?? form.shop_lng ?? GOVAP_MAP_CENTER[1])]} icon={shopMarkerIcon} />
+                          <MapClickHandlerReceiver onSelect={updateReceiverLocationFromMap} />
+                        </MapContainer>
+                      </div>
+                    )}
+                  </div>
+
+                  <p className="rounded-xl border border-blue-100 bg-blue-50 p-4 text-sm text-blue-800">
+                    Hệ thống chỉ nhận đơn trong 6 phường thuộc Gò Vấp. Nhập địa chỉ bằng chữ, sau đó ghim điểm lấy/giao trực tiếp trên bản đồ nội bộ.
+                  </p>
+
+                  <hr className="border-slate-100 my-2" />
+                  
+                  {/* PHẦN KÍCH THƯỚC VÀ CÂN NẶNG */}
+                  <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2 mb-4"><Box size={20} className="text-blue-500" /> Kích thước & Trọng lượng</h3>
+                  
+                  <div>
+                    <label className="block text-sm font-bold text-slate-600 mb-2">Kích thước gói hàng (Dài x Rộng x Cao) cm</label>
+                    <div className="mb-2 grid grid-cols-1 gap-4 sm:grid-cols-3">
+                      <div className="relative"><input type="number" required className="w-full pl-4 pr-8 py-3.5 bg-slate-50 border-2 border-transparent rounded-xl outline-none focus:border-blue-400 text-center font-bold" value={form.length} onChange={e => setForm({...form, length: e.target.value})} /><span className="absolute right-3 top-4 text-xs text-slate-400 font-bold">L</span></div>
+                      <div className="relative"><input type="number" required className="w-full pl-4 pr-8 py-3.5 bg-slate-50 border-2 border-transparent rounded-xl outline-none focus:border-blue-400 text-center font-bold" value={form.width} onChange={e => setForm({...form, width: e.target.value})} /><span className="absolute right-3 top-4 text-xs text-slate-400 font-bold">W</span></div>
+                      <div className="relative"><input type="number" required className="w-full pl-4 pr-8 py-3.5 bg-slate-50 border-2 border-transparent rounded-xl outline-none focus:border-blue-400 text-center font-bold" value={form.height} onChange={e => setForm({...form, height: e.target.value})} /><span className="absolute right-3 top-4 text-xs text-slate-400 font-bold">H</span></div>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div>
+                      <label className="block text-sm font-bold text-slate-600 mb-2">Cân nặng thực tế (kg)</label>
+                      <div className="relative">
+                        <Scale className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
+                        <input type="number" step="0.1" min="0.1" required
+                          className="w-full pl-11 pr-4 py-3.5 bg-slate-50 border-2 border-transparent rounded-xl outline-none focus:bg-white focus:border-blue-400 font-medium"
+                          value={form.weight_kg} onChange={e => setForm({...form, weight_kg: e.target.value})} 
+                        />
+                      </div>
+
+                      <fieldset>
+                        <legend className="mb-2 text-sm font-bold text-slate-600">Người trả cước vận chuyển</legend>
+                        <div className="grid gap-3 sm:grid-cols-2">
+                          {[
+                            { value: 'sender', label: 'Người gửi trả cước' },
+                            { value: 'receiver', label: 'Người nhận trả cước' }
+                          ].map((payer) => (
+                            <label key={payer.value} className={`flex cursor-pointer items-center gap-3 rounded-xl border-2 p-4 font-bold ${form.fee_payer === payer.value ? 'border-blue-500 bg-blue-50 text-blue-800' : 'border-slate-100 bg-slate-50 text-slate-600'}`}>
+                              <input
+                                type="radio"
+                                name="fee_payer"
+                                value={payer.value}
+                                checked={form.fee_payer === payer.value}
+                                onChange={() => setForm((current) => ({ ...current, fee_payer: payer.value }))}
+                                className="accent-blue-600"
+                              />
+                              {payer.label}
+                            </label>
+                          ))}
+                        </div>
+                      </fieldset>
+                    </div>
+                    <div>
+                      <label className="block text-sm font-bold text-slate-600 mb-2">Khoảng cách tự tính (km)</label>
+                      <input type="number" min="1" readOnly
+                        className="w-full px-4 py-3.5 bg-blue-50 border-2 border-blue-200 rounded-xl outline-none font-medium text-blue-800"
+                        value={form.distance_km}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div>
+                      <label className="block text-sm font-bold text-slate-600 mb-2">Giá trị hàng hóa (đ) - Tính bảo hiểm</label>
+                      <input type="number" min="0" required
+                        className="w-full px-4 py-3.5 bg-slate-50 border-2 border-transparent rounded-xl outline-none focus:bg-white focus:border-blue-400 font-medium"
+                        placeholder="0"
+                        value={form.item_value} onChange={e => setForm({...form, item_value: e.target.value})} 
+                      />
+                      <p className="mt-1 text-xs font-semibold text-slate-500">Phí bảo hiểm tách riêng: {Math.round(Number(form.item_value) > 1000000 ? Number(form.item_value) * 0.005 : 0).toLocaleString()} đ (0,5%, làm tròn đến VND gần nhất; giá trị hàng trên 1 triệu đồng).</p>
+                    </div>
+                    <div>
+                      <label className="block text-sm font-black text-red-600 mb-2">Tiền thu hộ (COD) đ</label>
+                      <div className="relative">
+                        <DollarSign className="absolute left-4 top-1/2 -translate-y-1/2 text-red-400" size={18} />
+                        <input type="number" min="0" required
+                          className="w-full pl-11 pr-4 py-3.5 bg-red-50 text-red-600 border-2 border-red-200 rounded-xl outline-none focus:bg-white focus:border-red-400 transition-all font-black text-lg"
+                          placeholder="0"
+                          value={form.cod_amount} onChange={e => setForm({...form, cod_amount: e.target.value})} 
+                        />
+                      </div>
+                    </div>
+
+                    <label className="block text-sm font-bold text-slate-600">Phí dịch vụ thu từ COD (đ)
+                      <input type="number" min="0" step="1000" value={form.service_fee} onChange={(event) => setForm((current) => ({ ...current, service_fee: event.target.value }))} className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-3" />
+                      <span className="mt-1 block text-xs font-medium text-slate-500">Phí dịch vụ và bảo hiểm sẽ được khấu trừ minh bạch khi đối soát với Shop.</span>
+                    </label>
+                  </div>
+
+                  {/* THÊM 2 CHECKBOX CẢNH BÁO */}
+                  <div className="flex flex-col md:flex-row gap-4">
+                    <label className={`flex-1 flex items-center gap-3 p-4 rounded-xl border-2 cursor-pointer transition-all ${form.is_fragile ? 'border-orange-500 bg-orange-50' : 'border-slate-100 hover:border-orange-100'}`}>
+                      <input type="checkbox" className="w-5 h-5 accent-orange-500 rounded" checked={form.is_fragile} onChange={e => setForm({...form, is_fragile: e.target.checked})} />
+                      <div>
+                        <p className="font-bold text-orange-700 flex items-center gap-1"><ShieldAlert size={16}/> Hàng Dễ Vỡ / Cẩn Thận</p>
+                        <p className="text-xs text-orange-600/70">Phụ phí bọc chống sốc (+10.000đ)</p>
+                      </div>
+                    </label>
+                    
+                    <label className={`flex-1 flex items-center gap-3 p-4 rounded-xl border-2 cursor-pointer transition-all ${form.is_remote_area ? 'border-blue-500 bg-blue-50' : 'border-slate-100'}`}>
+                      <input type="checkbox" className="w-5 h-5 accent-blue-600 rounded cursor-pointer" checked={Boolean(form.is_remote_area)} onChange={e => setForm({...form, is_remote_area: e.target.checked})}/>
+                      <div>
+                        <p className="font-bold text-slate-700">Khu Vực Vùng Sâu / Xa</p>
+                        <p className="text-xs text-slate-500">Phụ phí giao hàng (+20.000đ)</p>
+                      </div>
+                    </label>
+                  </div>
+                </form>
+              </div>
+
+              {/* BẢNG TÍNH CƯỚC BÊN PHẢI */}
+              <div className="lg:col-span-1">
+                <div className="bg-white p-6 rounded-[24px] shadow-[0_8px_30px_rgb(0,0,0,0.04)] border border-blue-50 sticky top-8">
+                  <div className="flex items-center gap-2 mb-6 text-blue-600">
+                    <Calculator size={22} />
+                    <h4 className="font-black text-lg">Dự Toán Chi Phí</h4>
+                  </div>
+                  
+                  {/* Phân tích khối lượng */}
+                  <div className="bg-slate-50 p-4 rounded-xl border border-slate-100 mb-6 space-y-2">
+                    <p className="text-[10px] font-black tracking-widest text-slate-400 uppercase mb-2">Phân tích khối lượng quy đổi</p>
+                    <div className="flex justify-between text-sm"><span className="text-slate-500 font-medium">Khối lượng thực tế:</span><span className="font-bold text-slate-800">{form.weight_kg || 0} kg</span></div>
+                    <div className="flex justify-between text-sm"><span className="text-slate-500 font-medium">K.Lượng quy đổi (VTP):</span><span className="font-bold text-slate-800">{((form.length * form.width * form.height) / 5000).toFixed(1)} kg</span></div>
+                    <div className="flex justify-between text-sm pt-3 mt-1 border-t border-slate-200">
+                      <span className="font-bold text-blue-600">Mức tính cước:</span>
+                      <span className="font-black text-blue-600 text-base">{chargeableWeight.toFixed(1)} kg</span>
+                    </div>
+                  </div>
+
+                  {/* Chi tiết phụ phí */}
+                  <div className="space-y-4 text-sm font-medium text-slate-600 mb-6">
+                    <div className="flex justify-between pb-2 border-b border-slate-50">
+                      <span>Cước cơ sở ({form.service_type}):</span>
+                      <span className="font-bold text-slate-800">
+                        {(form.service_type === 'express' ? 45000 : form.service_type === 'standard' ? 28000 : 18000).toLocaleString()} đ
+                      </span>
+                    </div>
+                    <div className="flex justify-between pb-2 border-b border-slate-50">
+                      <span>Phụ phí vượt cân:</span>
+                      <span className="font-bold text-slate-800">
+                        {(chargeableWeight > 2 ? Math.ceil((chargeableWeight - 2) / 0.5) * 4500 : 0).toLocaleString()} đ
+                      </span>
+                    </div>
+                    <div className="flex justify-between pb-2 border-b border-slate-50">
+                      <span>Phụ phí khoảng cách:</span>
+                      <span className="font-bold text-slate-800">
+                        {(form.distance_km > 5 ? (form.distance_km - 5) * 1700 : 0).toLocaleString()} đ
+                      </span>
+                    </div>
+                    <div className="flex justify-between pb-2 border-b border-slate-50">
+                      <span>Phí bảo hiểm:</span>
+                      <span className="font-bold text-slate-800">
+                        {(form.item_value > 1000000 ? form.item_value * 0.005 : 0).toLocaleString()} đ
+                      </span>
+                    </div>
+                    <div className="flex justify-between pb-2 border-b border-slate-50">
+                      <span>Phí dịch vụ:</span>
+                      <span className="font-bold text-slate-800">{Number(form.service_fee || 0).toLocaleString()} đ</span>
+                    </div>
+                    {form.is_fragile && (
+                      <div className="flex justify-between pb-2 border-b border-slate-50">
+                        <span className="text-orange-600">Phí bọc hàng dễ vỡ:</span>
+                        <span className="font-bold text-orange-600">+ 12,000 đ</span>
+                      </div>
+                    )}
+                    {form.is_remote_area && (
+                      <div className="flex justify-between pb-2 border-b border-slate-50">
+                        <span>Phụ phí vùng xa:</span>
+                        <span className="font-bold text-slate-800">+ 22,000 đ</span>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="pt-2 flex justify-between items-end mb-6 bg-blue-50 p-4 rounded-xl border border-blue-100">
+                    <span className="font-black text-blue-800 text-sm mb-1">TỔNG CƯỚC:</span>
+                    <span className="font-black text-3xl text-blue-600 leading-none">{shippingFee.toLocaleString()} đ</span>
+                  </div>
+
+                  <button form="form-tao-don" type="submit" className="w-full bg-gradient-to-r from-blue-600 to-blue-500 hover:from-blue-700 hover:to-blue-600 text-white font-black py-4 rounded-xl shadow-lg shadow-blue-200 transition-all flex justify-center items-center gap-2 text-lg">
+                    Tạo Đơn Hàng
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {tabHienTai === 'danhsach' && (
+            <div className="space-y-6">
+              {/* 4 LUXURY KPI STAT CARDS */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                <button
+                  type="button"
+                  onClick={() => setStatusFilter('all')}
+                  className={`text-left rounded-2xl p-5 border transition-all duration-200 ${statusFilter === 'all' ? 'bg-white border-blue-500 shadow-md ring-2 ring-blue-500/20' : 'bg-white border-slate-200/80 hover:border-slate-300 shadow-soft-sm'}`}
+                >
+                  <div className="flex items-center justify-between mb-3">
+                    <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Tổng Vận Đơn</span>
+                    <div className="p-2.5 rounded-xl bg-blue-50 text-blue-600">
+                      <ListOrdered size={20} />
+                    </div>
+                  </div>
+                  <div className="flex items-baseline justify-between">
+                    <p className="text-3xl font-black text-slate-800">{tongDon}</p>
+                    <span className="text-[11px] font-bold text-blue-600 bg-blue-50 px-2 py-0.5 rounded-full">Tất cả</span>
+                  </div>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setStatusFilter('delivering')}
+                  className={`text-left rounded-2xl p-5 border transition-all duration-200 ${statusFilter === 'delivering' ? 'bg-white border-cyan-500 shadow-md ring-2 ring-cyan-500/20' : 'bg-white border-slate-200/80 hover:border-slate-300 shadow-soft-sm'}`}
+                >
+                  <div className="flex items-center justify-between mb-3">
+                    <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Đang Vận Chuyển</span>
+                    <div className="p-2.5 rounded-xl bg-cyan-50 text-cyan-600 relative">
+                      <Truck size={20} />
+                      <span className="absolute top-1.5 right-1.5 h-2 w-2 rounded-full bg-cyan-500 animate-ping"></span>
+                    </div>
+                  </div>
+                  <div className="flex items-baseline justify-between">
+                    <p className="text-3xl font-black text-slate-800">{donDangGiao}</p>
+                    <span className="text-[11px] font-bold text-cyan-600 bg-cyan-50 px-2 py-0.5 rounded-full flex items-center gap-1">
+                      <span className="h-1.5 w-1.5 rounded-full bg-cyan-500"></span> Trực tiếp
+                    </span>
+                  </div>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setStatusFilter('completed')}
+                  className={`text-left rounded-2xl p-5 border transition-all duration-200 ${statusFilter === 'completed' ? 'bg-white border-emerald-500 shadow-md ring-2 ring-emerald-500/20' : 'bg-white border-slate-200/80 hover:border-slate-300 shadow-soft-sm'}`}
+                >
+                  <div className="flex items-center justify-between mb-3">
+                    <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Giao Thành Công</span>
+                    <div className="p-2.5 rounded-xl bg-emerald-50 text-emerald-600">
+                      <CheckCircle size={20} />
+                    </div>
+                  </div>
+                  <div className="flex items-baseline justify-between">
+                    <p className="text-3xl font-black text-emerald-600">{donThanhCong}</p>
+                    <span className="text-[11px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full">
+                      {tongDon > 0 ? `${((donThanhCong / tongDon) * 100).toFixed(0)}%` : '0%'}
+                    </span>
+                  </div>
+                </button>
+
+                <div className="rounded-2xl p-5 border border-slate-200/80 bg-white shadow-soft-sm">
+                  <div className="flex items-center justify-between mb-3">
+                    <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Tổng Tiền Thu Hộ COD</span>
+                    <div className="p-2.5 rounded-xl bg-indigo-50 text-indigo-600">
+                      <Wallet size={20} />
+                    </div>
+                  </div>
+                  <div className="flex items-baseline justify-between">
+                    <p className="text-2xl font-black text-indigo-600 tracking-tight">{tongCOD.toLocaleString()} đ</p>
+                    <span className="text-[10px] font-bold text-slate-400">VND</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* SEARCH & FILTER CONTROLS BAR */}
+              <div className="rounded-2xl border border-slate-200/80 bg-white p-4 shadow-soft-sm space-y-3">
+                <div className="flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3">
+                  <div className="relative flex-1">
+                    <PackageSearch className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
+                    <input
+                      type="text"
+                      value={filterKeyword}
+                      onChange={(e) => setFilterKeyword(e.target.value)}
+                      placeholder="Tìm kiếm theo mã vận đơn, tên người nhận, SĐT, địa chỉ..."
+                      className="w-full pl-10 pr-9 py-2.5 text-xs sm:text-sm bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:border-blue-500 focus:outline-none transition-all font-medium"
+                    />
+                    {filterKeyword && (
+                      <button
+                        type="button"
+                        onClick={() => setFilterKeyword('')}
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                      >
+                        <X size={16} />
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="flex items-center gap-2 shrink-0">
+                    <label className="inline-flex items-center gap-2 text-xs font-bold text-slate-700 bg-slate-50 px-3 py-2.5 rounded-xl border border-slate-200 cursor-pointer hover:bg-slate-100 transition-colors">
+                      <input
+                        type="checkbox"
+                        checked={filteredDonHang.length > 0 && filteredDonHang.every((order) => selectedOrderIds.includes(order.id))}
+                        onChange={(event) => setSelectedOrderIds(event.target.checked ? filteredDonHang.map((order) => order.id) : [])}
+                        className="h-4 w-4 accent-blue-600 rounded"
+                      />
+                      <span>Chọn tất cả ({selectedOrderIds.length})</span>
+                    </label>
+
+                    <button
+                      type="button"
+                      disabled={!selectedOrderIds.length}
+                      onClick={() => setPhieuIn(safeDonHang.filter((order) => selectedOrderIds.includes(order.id)))}
+                      className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 px-4 py-2.5 text-xs font-bold text-white shadow-soft-sm hover:from-blue-700 hover:to-indigo-700 disabled:cursor-not-allowed disabled:opacity-40 transition-all"
+                    >
+                      <Printer size={15} /> In nhãn ({selectedOrderIds.length})
+                    </button>
+                  </div>
+                </div>
+
+                {/* STATUS FILTER PILLS */}
+                <div className="flex flex-wrap items-center gap-1.5 pt-1 border-t border-slate-100">
+                  <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mr-1">Bộ lọc:</span>
+                  {[
+                    { key: 'all', label: 'Tất cả', count: tongDon },
+                    { key: 'pending', label: 'Chờ lấy', count: donChoLay },
+                    { key: 'delivering', label: 'Đang vận chuyển', count: donDangGiao },
+                    { key: 'completed', label: 'Thành công', count: donThanhCong },
+                    { key: 'failed', label: 'Hàng hoàn / Sự cố', count: donHoan }
+                  ].map((tab) => (
+                    <button
+                      key={tab.key}
+                      type="button"
+                      onClick={() => setStatusFilter(tab.key)}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${statusFilter === tab.key ? 'bg-blue-600 text-white shadow-sm' : 'bg-slate-100 text-slate-600 hover:bg-slate-200/70'}`}
+                    >
+                      <span>{tab.label}</span>
+                      <span className={`text-[10px] rounded-full px-1.5 py-0.2 ${statusFilter === tab.key ? 'bg-white/20 text-white' : 'bg-slate-200 text-slate-700'}`}>{tab.count}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* MODERN ORDER TABLE */}
+              <div className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-soft-sm">
+                <div className="overflow-x-auto">
+                  <table className="w-full min-w-[840px] border-collapse text-left">
+                    <thead className="bg-slate-50/80 border-b border-slate-200/80 text-slate-500">
+                      <tr>
+                        <th className="p-4 text-[11px] font-black uppercase tracking-wider w-12 text-center">Chọn</th>
+                        <th className="p-4 text-[11px] font-black uppercase tracking-wider">Mã Vận Đơn</th>
+                        <th className="p-4 text-[11px] font-black uppercase tracking-wider">Người Nhận & Địa Chỉ</th>
+                        <th className="p-4 text-[11px] font-black uppercase tracking-wider">Trọng Lượng</th>
+                        <th className="p-4 text-[11px] font-black uppercase tracking-wider">Cước Phí</th>
+                        <th className="p-4 text-[11px] font-black uppercase tracking-wider">Thu Hộ COD</th>
+                        <th className="p-4 text-[11px] font-black uppercase tracking-wider">Trạng Thái</th>
+                        <th className="p-4 text-[11px] font-black uppercase tracking-wider text-right">Thao Tác</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {filteredDonHang.length === 0 ? (
+                        <tr>
+                          <td colSpan="8" className="p-16 text-center">
+                            <div className="flex flex-col items-center justify-center text-slate-400 max-w-sm mx-auto">
+                              <div className="p-4 rounded-2xl bg-blue-50 text-blue-500 mb-3">
+                                <PackagePlus size={36} />
+                              </div>
+                              <p className="text-base font-bold text-slate-700">Không tìm thấy vận đơn phù hợp</p>
+                              <p className="text-xs text-slate-400 mt-1">
+                                {filterKeyword || statusFilter !== 'all'
+                                  ? 'Hãy thử thay đổi từ khóa tìm kiếm hoặc chọn bộ lọc trạng thái khác.'
+                                  : 'Bạn chưa tạo đơn hàng nào. Hãy bấm "Tạo đơn mới" để bắt đầu.'}
+                              </p>
+                              {(filterKeyword || statusFilter !== 'all') && (
+                                <button
+                                  type="button"
+                                  onClick={() => { setFilterKeyword(''); setStatusFilter('all'); }}
+                                  className="mt-4 rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50 transition-colors"
+                                >
+                                  Đặt lại bộ lọc
+                                </button>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      ) : (
+                        filteredDonHang.map((don) => (
+                          <tr key={don?.id} className="hover:bg-blue-50/30 transition-colors group">
+                            <td className="p-4 text-center">
+                              <input
+                                type="checkbox"
+                                checked={selectedOrderIds.includes(don.id)}
+                                onChange={(event) => setSelectedOrderIds((current) => event.target.checked
+                                  ? [...current, don.id]
+                                  : current.filter((id) => id !== don.id))}
+                                className="h-4 w-4 accent-blue-600 rounded cursor-pointer"
+                                aria-label={`Chọn nhãn ${don.tracking_code}`}
+                              />
+                            </td>
+                            <td className="p-4">
+                              <div className="flex items-center gap-2">
+                                <span className="font-mono text-xs font-black text-blue-700 bg-blue-50 px-2.5 py-1 rounded-lg tracking-wide border border-blue-100">
+                                  {don?.tracking_code}
+                                </span>
+                              </div>
+                              {don?.is_fragile === 1 && (
+                                <div className="mt-1.5 inline-flex items-center gap-1 rounded bg-orange-50 px-1.5 py-0.5 text-[9px] font-black text-orange-600 uppercase border border-orange-200">
+                                  <ShieldAlert size={10} /> Dễ vỡ
+                                </div>
+                              )}
+                              <p className="text-[10px] text-slate-400 mt-1">
+                                {don?.created_at ? new Date(don.created_at).toLocaleDateString('vi-VN') : ''}
+                              </p>
+                            </td>
+                            <td className="p-4 max-w-xs">
+                              <div className="flex items-start gap-2.5">
+                                <div className="h-7 w-7 rounded-full bg-gradient-to-tr from-slate-200 to-slate-100 text-slate-700 font-bold text-xs flex items-center justify-center shrink-0 border border-slate-200">
+                                  {(don?.receiver_name || 'U').charAt(0).toUpperCase()}
+                                </div>
+                                <div className="min-w-0">
+                                  <p className="font-bold text-slate-800 text-xs sm:text-sm truncate">{don?.receiver_name || 'Khách vãng lai'}</p>
+                                  <a href={`tel:${don?.receiver_phone}`} className="text-xs text-blue-600 hover:underline font-semibold block">
+                                    {don?.receiver_phone}
+                                  </a>
+                                  <p className="text-[11px] text-slate-500 truncate max-w-[240px] mt-0.5" title={don?.receiver_address}>
+                                    {don?.receiver_address}
+                                  </p>
+                                </div>
+                              </div>
+                            </td>
+                            <td className="p-4">
+                              <span className="inline-flex items-center gap-1 text-xs font-bold text-slate-700 bg-slate-100 px-2.5 py-1 rounded-lg">
+                                <Scale size={12} className="text-slate-400" /> {don?.weight_kg || 1} kg
+                              </span>
+                            </td>
+                            <td className="p-4 font-bold text-xs sm:text-sm text-slate-700">
+                              {layCuocPhiChuan(don).toLocaleString()} đ
+                            </td>
+                            <td className="p-4">
+                              <span className="font-bold text-xs sm:text-sm text-indigo-700 font-mono">
+                                {Number(don?.cod_amount || 0).toLocaleString()} đ
+                              </span>
+                            </td>
+                            <td className="p-4">
+                              <OrderStatusBadge status={don?.status} />
+                            </td>
+                            <td className="p-4 text-right">
+                              <div className="inline-flex items-center gap-1.5">
+                                <button 
+                                  onClick={() => { setDonHangDangChon(don); setModalMo(true); }}
+                                  className="bg-blue-50 hover:bg-blue-100 text-blue-600 px-3 py-1.5 rounded-lg font-bold text-xs flex items-center gap-1 transition-colors"
+                                  title="Xem chi tiết vận đơn"
+                                >
+                                  <Eye size={14} /> Chi tiết
+                                </button>
+                                <button 
+                                  onClick={() => setPhieuIn([don])}
+                                  className="bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1.5 rounded-lg font-bold text-xs flex items-center gap-1 transition-colors"
+                                  title="In phiếu gửi hàng"
+                                >
+                                  <Printer size={14} /> In
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* MODAL XEM CHI TIẾT */}
+        {modalMo && donHangDangChon && (
+          <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+            <div className="bg-white rounded-[28px] shadow-2xl max-w-lg w-full p-8 relative animate-in fade-in zoom-in-95 duration-200 max-h-[90vh] overflow-y-auto custom-scrollbar">
+              <button 
+                onClick={() => setModalMo(false)}
+                className="absolute top-6 right-6 text-slate-400 hover:text-slate-600 bg-slate-50 p-2 rounded-full transition-colors"
+              >
+                <X size={20} />
+              </button>
+
+              <div className="flex items-center gap-3 mb-6">
+                <div className="bg-blue-50 p-3 rounded-2xl text-blue-600">
+                  <MapPinned size={24} />
+                </div>
+                <div>
+                  <p className="text-xs font-bold text-slate-400 uppercase tracking-wider">Mã Vận Đơn</p>
+                  <h3 className="text-2xl font-black text-blue-600">{donHangDangChon?.tracking_code}</h3>
+                </div>
+              </div>
+
+              {/* Cảnh báo hàng dễ vỡ trong Modal */}
+              {donHangDangChon?.is_fragile === 1 && (
+                 <div className="bg-orange-50 p-4 rounded-2xl mb-6 border border-orange-200 flex items-center gap-3">
+                   <ShieldAlert className="text-orange-500" size={24}/>
+                   <div>
+                     <p className="font-bold text-orange-700 text-sm">Cảnh báo: Hàng Dễ Vỡ!</p>
+                     <p className="text-xs text-orange-600 mt-0.5">Yêu cầu bưu tá nhẹ tay trong quá trình bốc xếp.</p>
+                   </div>
+                 </div>
+              )}
+
+              {/* KHU VỰC HIỂN THỊ LÝ DO BOM HÀNG (RMA) */}
+              {donHangDangChon?.fail_reason && (
+                <div className="bg-red-50 p-4 rounded-2xl mb-6 border border-red-100 animate-in slide-in-from-top-4">
+                  <p className="font-bold text-red-600 flex items-center gap-2 mb-1 text-sm">
+                    <AlertCircle size={16}/> Giao thất bại / Hoàn hàng:
+                  </p>
+                  <p className="text-red-700 text-sm font-medium ml-6">Lý do: {donHangDangChon.fail_reason}</p>
+                </div>
+              )}
+
+              {/* KHU VỰC HIỂN THỊ ẢNH CHỤP MINH CHỨNG (PROOF OF DELIVERY) */}
+              {donHangDangChon?.proof_image && (
+                <div className="mb-6 animate-in zoom-in-95">
+                  <p className="font-bold text-slate-800 text-sm mb-2 flex items-center gap-2">
+                    <Camera size={16} className="text-emerald-500"/> Ảnh chụp minh chứng giao hàng:
+                  </p>
+                  <div className="rounded-2xl overflow-hidden border-2 border-dashed border-slate-200 bg-slate-50 flex justify-center p-2 relative group">
+                    <img 
+                      src={`${API_URL}${donHangDangChon.proof_image}`}
+                      alt="Minh chứng giao hàng" 
+                      className="max-h-56 object-contain rounded-xl w-full"
+                    />
+                  </div>
+                </div>
+              )}
+              {donHangDangChon?.signature_image && (
+                <div className="mb-6">
+                  <p className="mb-2 flex items-center gap-2 text-sm font-bold text-slate-800"><CheckCircle size={16} className="text-emerald-500" /> Chữ ký người nhận:</p>
+                  <a href={`${API_URL}${donHangDangChon.signature_image}`} target="_blank" rel="noreferrer">
+                    <img src={`${API_URL}${donHangDangChon.signature_image}`} alt="Chữ ký xác nhận nhận hàng" className="max-h-40 w-full rounded-xl border border-slate-200 bg-white object-contain" />
+                  </a>
+                </div>
+              )}
+
+              <div className="bg-slate-50 p-4 rounded-2xl mb-6 space-y-2 text-sm">
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Người nhận:</span>
+                  <span className="font-bold text-slate-800">{donHangDangChon?.receiver_name} ({donHangDangChon?.receiver_phone})</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Địa chỉ:</span>
+                  <span className="font-bold text-slate-800 text-right truncate max-w-[280px]">{donHangDangChon?.receiver_address}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Tiền COD:</span>
+                  <span className="font-bold text-red-500">{Number(donHangDangChon?.cod_amount || 0).toLocaleString()} đ</span>
+                </div>
+              </div>
+
+              {['picking', 'in_warehouse', 'delivering'].includes(donHangDangChon?.status) && (
+                <div className="mb-6 overflow-hidden rounded-2xl border border-blue-100 bg-blue-50">
+                  <div className="flex items-center justify-between gap-3 p-4">
+                    <div>
+                      <p className="flex items-center gap-2 text-sm font-black text-blue-800"><Navigation size={16} /> Bản đồ theo dõi trực tiếp</p>
+                      <p className="mt-1 text-xs font-medium text-blue-700">
+                        {viTriTaiXe ? 'Vị trí tài xế đang được cập nhật theo thời gian thực.' : 'Đang chờ tài xế bật GPS, tuyến đường vẫn được hiển thị.'}
+                      </p>
+                    </div>
+                    <span className={`rounded-full px-2.5 py-1 text-[10px] font-black uppercase ${viTriTaiXe ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
+                      {viTriTaiXe ? 'Trực tuyến' : 'Chờ GPS'}
+                    </span>
+                  </div>
+                  {routeTheoDoi ? (
+                    <LiveTrackingMap route={routeTheoDoi} driverLocation={viTriTaiXe} />
+                  ) : (
+                    <div className="flex h-72 items-center justify-center bg-slate-100 text-sm font-semibold text-slate-500">Đang tải bản đồ...</div>
+                  )}
+                  <div className="grid grid-cols-1 gap-2 p-4 text-xs sm:grid-cols-2">
+                    <div className="rounded-xl bg-white p-3">
+                      <p className="font-bold text-slate-400">KHO ĐÍCH</p>
+                      <p className="mt-1 font-black text-slate-800">{routeTheoDoi?.warehouse?.label || 'Kho trung tâm Smart Logistics'}</p>
+                      <p className="mt-0.5 text-slate-500">{routeTheoDoi?.warehouse?.address || 'Kho trung tâm, TP. Hồ Chí Minh'}</p>
+                    </div>
+                    <div className="rounded-xl bg-white p-3">
+                      <p className="font-bold text-slate-400">ĐIỂM ĐANG THEO DÕI</p>
+                      <p className="mt-1 font-black text-slate-800">{donHangDangChon?.status === 'picking' ? 'Tài xế đang đến lấy hàng' : 'Đang luân chuyển về điểm tiếp theo'}</p>
+                      <p className="mt-0.5 text-slate-500">{routeTheoDoi?.pickup?.label || 'Điểm lấy hàng'} → {routeTheoDoi?.warehouse?.label || 'Kho đích'}</p>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              <h4 className="font-bold text-slate-800 text-base mb-2">Tiến độ vận chuyển</h4>
+              {renderChiTietTienDo(donHangDangChon?.status)}
+
+              <button 
+                onClick={() => setModalMo(false)}
+                className="w-full bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold py-3.5 rounded-xl transition-colors mt-4"
+              >
+                Đóng Cửa Sổ
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* =================================================================
+          GIAO DIỆN PREVIEW IN (MÀU XANH PASTEL THANH LỊCH)
+          ================================================================= */}
+      {phieuIn && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[50] flex items-center justify-center p-4 print:hidden">
+          <div className="bg-white rounded-[28px] shadow-2xl max-w-lg w-full p-8 relative animate-in zoom-in-95 duration-200">
+            <button onClick={() => setPhieuIn(null)} className="absolute top-6 right-6 text-slate-400 hover:text-slate-600 bg-slate-50 p-2 rounded-full transition-colors"><X size={20} /></button>
+            
+            <h3 className="text-2xl font-black text-slate-800 mb-6 flex items-center gap-2"><Printer className="text-blue-500"/> Xem trước bản in</h3>
+            
+            <div className="border-2 border-dashed border-blue-200 bg-blue-50/30 p-6 rounded-2xl flex flex-col items-center justify-center text-center">
+              <h1 className="text-3xl font-black tracking-tight text-slate-800 mb-2">SmartLogistics</h1>
+              <div className="bg-white px-6 py-4 rounded-xl border border-blue-100 shadow-sm w-full relative overflow-hidden">
+                
+                {/* Nhãn dán hàng dễ vỡ trên bill in */}
+                {phieuIn.is_fragile === 1 && (
+                  <div className="absolute top-0 right-0 bg-orange-500 text-white text-[10px] font-black px-3 py-1 rounded-bl-xl uppercase tracking-wider">
+                    Dễ vỡ
+                  </div>
+                )}
+
+                <div className="flex justify-center mb-2 mt-4 scale-90">
+                  <Barcode value={phieuIn.tracking_code} format="CODE128" width={2.5} height={60} displayValue={true} />
+                </div>
+                <div className="grid grid-cols-2 text-left gap-4 text-sm mt-4 pt-4 border-t border-slate-100">
+                  <div>
+                    <p className="text-slate-500 font-bold text-xs mb-1">NGƯỜI GỬI:</p>
+                    <p className="font-bold text-slate-800">{shopName}</p>
+                  </div>
+                  <div>
+                    <p className="text-slate-500 font-bold text-xs mb-1">NGƯỜI NHẬN:</p>
+                    <p className="font-bold text-slate-800">{phieuIn.receiver_name}</p>
+                    <p className="text-slate-600">{phieuIn.receiver_phone}</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <button onClick={xacNhanInPhieu} className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3.5 rounded-xl shadow-lg shadow-blue-200 transition-all flex items-center justify-center gap-2 mt-6">
+              <Printer size={18} /> Xác nhận In (PDF / Máy in)
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* =================================================================
+          GIAO DIỆN DÀNH RIÊNG CHO MÁY IN (Chỉ hiển thị lên mặt giấy)
+          ================================================================= */}
+      {phieuIn && (
+      <div className="thermal-print-root hidden print:block fixed inset-0 bg-white z-[99999] overflow-auto p-4 text-black">
+        {phieuIn.map((labelOrder) => (
+        <div key={labelOrder.id} className="thermal-label mx-auto mb-4 break-after-page border-2 border-black p-3 flex flex-col justify-between relative">
+          <div className="flex justify-between items-start border-b-2 border-black pb-4 mb-4">
+            <h1 className="text-2xl font-black uppercase">SmartLogistics</h1>
+            <div className="text-right">
+              <p className="font-bold text-lg">{new Date().toLocaleDateString('vi-VN')}</p>
+              <p className="text-sm font-bold border border-black px-2 mt-1 rounded">{labelOrder.weight_kg || 1} KG</p>
+            </div>
+          </div>
+
+          <div className="flex justify-center mb-6 py-4">
+            <Barcode value={labelOrder.tracking_code} format="CODE128" width={3} height={80} displayValue={true} fontSize={20} />
+          </div>
+
+          {/* Chữ HÀNG DỄ VỠ in to trên máy in nhiệt */}
+          {labelOrder.is_fragile === 1 && (
+              <div className="absolute top-[35%] left-1/2 -translate-x-1/2 border-4 border-black p-2 bg-white -rotate-12 opacity-80">
+                <h2 className="text-2xl font-black uppercase tracking-widest">Hàng Dễ Vỡ</h2>
+              </div>
+            )}
+
+            <div className="flex flex-col gap-4 mb-6 relative z-10">
+              <div className="border border-black p-3 rounded">
+                <p className="font-bold text-xs mb-1">TỪ:</p>
+                <p className="font-black text-lg">{shopName}</p>
+                <p className="text-sm">Hotline: 1900 1234</p>
+              </div>
+              <div className="border border-black p-3 rounded bg-gray-100">
+                <p className="font-bold text-xs mb-1">ĐẾN:</p>
+                <p className="font-black text-xl">{labelOrder.receiver_name}</p>
+                <p className="font-bold text-lg">{labelOrder.receiver_phone}</p>
+                <p className="text-base font-medium leading-tight mt-1">{labelOrder.receiver_address}</p>
+              </div>
+            </div>
+
+            <div className="mt-auto border-t-2 border-black pt-4">
+              <p className="text-center font-bold text-lg uppercase tracking-widest mb-1">Tiền Thu Hộ (COD)</p>
+              <p className="text-center font-black text-4xl">
+                {Number(labelOrder.cod_amount).toLocaleString()} VNĐ
+              </p>
+            </div>
+            
+            <p className="text-center text-xs mt-4 italic font-medium">Lưu ý: Chỉ giao hàng giờ hành chính.</p>
+          </div>
+          ))}
+        </div>
+      )}
+    </>
+  );
+}

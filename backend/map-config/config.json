@@ -1,0 +1,26 @@
+{
+  "options": {
+    "maxScaleFactor": 1,
+    "minRendererPoolSizes": [1],
+    "maxRendererPoolSizes": [1],
+    "serveAllFonts": true,
+    "serveAllStyles": true,
+    "paths": {
+      "root": "/data",
+      "fonts": "/config/fonts",
+      "styles": "/config/styles",
+      "mbtiles": "/data"
+    }
+  },
+  "styles": {
+    "govap": {
+      "style": "govap/style.json",
+      "serve_rendered": true
+    }
+  },
+  "data": {
+    "vietnam": {
+      "mbtiles": "vietnam-shortbread-1.0.mbtiles"
+    }
+  }
+}

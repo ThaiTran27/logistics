@@ -1,0 +1,35 @@
+{
+  "name": "backend",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "node --env-file-if-exists=.env server.js",
+    "migrate": "node migrations/run.js up",
+    "migrate:down": "node migrations/run.js down",
+    "warehouse:preview": "node --env-file-if-exists=.env scripts/preview-warehouse-retirement.js",
+    "orders:normalize-preview": "node --env-file-if-exists=.env scripts/normalize-legacy-order-statuses.js",
+    "orders:normalize": "node --env-file-if-exists=.env scripts/normalize-legacy-order-statuses.js --apply",
+    "orders:return-preview": "node --env-file-if-exists=.env scripts/normalize-legacy-returned-orders.js",
+    "orders:return-normalize": "node --env-file-if-exists=.env scripts/normalize-legacy-returned-orders.js --apply",
+    "seed:cskh-demo": "node --env-file-if-exists=.env scripts/seed-demo-customer-service.js",
+    "test": "vitest run"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@fontsource/noto-sans": "^5.3.0",
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
+    "jsonwebtoken": "^9.0.3",
+    "multer": "^2.3.0",
+    "mysql": "^2.18.1",
+    "nodemailer": "^10.0.1",
+    "pdfkit": "^0.20.2",
+    "socket.io": "^4.8.3"
+  },
+  "devDependencies": {
+    "vitest": "^3.2.7"
+  }
+}
