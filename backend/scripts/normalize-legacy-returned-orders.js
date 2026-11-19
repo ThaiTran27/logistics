@@ -1,12 +1,8 @@
 const mysql = require('mysql');
 const { query, withTransaction } = require('../utils/db');
+const { createMysqlConfig } = require('../utils/mysqlConfig');
 
-const pool = mysql.createPool({
-  host: process.env.DB_HOST || 'localhost',
-  user: process.env.DB_USER || 'root',
-  password: process.env.DB_PASSWORD || '',
-  database: process.env.DB_NAME || 'smart_logistics_v2'
-});
+const pool = mysql.createPool(createMysqlConfig());
 const appliesChanges = process.argv.includes('--apply');
 
 async function loadCandidates(conn) {

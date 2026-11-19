@@ -174,6 +174,8 @@ node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 
 Đặt kết quả vào `JWT_SECRET`. Máy chủ từ chối khởi động nếu biến này thiếu hoặc để trống; giữ giá trị ổn định giữa các lần chạy để phiên đăng nhập và QR hiện tại không mất hiệu lực. `backend/.env.example` liệt kê các biến môi trường backend, bao gồm DB, cổng, SMTP, giới hạn API công khai, chat AI và OSRM; chỉ cần điền các cấu hình bạn sử dụng. `OSRM_URL` mặc định là `http://localhost:5001`.
 
+MySQL local mặc định dùng `DB_PORT=3306` và `DB_SSL=false`. Với TiDB Cloud Starter/Essential, cấu hình trên Render `DB_PORT=4000` và `DB_SSL=true`; backend xác minh chứng chỉ TLS của máy chủ. Dùng host, username có tiền tố, password và database đúng như phần kết nối trong TiDB Cloud, không đưa các giá trị bí mật vào Git.
+
 Chat theo mã vận đơn lưu token phiên trong trình duyệt và gửi lại token khi khôi phục chat sau khi tải lại trang. Máy chủ chỉ lưu hash token, hết hạn theo `CHAT_SESSION_TOKEN_TTL_HOURS`; migration `010_chat_token_expiry.sql` đặt thời hạn cho các phiên chat cũ. Tra cứu công khai che SĐT/tên và không trả địa chỉ chi tiết. Các giới hạn rate limit hiện lưu trong bộ nhớ từng tiến trình; nếu chạy nhiều instance, cần đặt rate limiter dùng chung (ví dụ Redis) ở lớp triển khai.
 
 Không đưa khóa bí mật, mật khẩu thật hoặc thông tin SMTP vào Git. `backend/.env` đã được `.gitignore` loại trừ. Giữ `WEBHOOK_ENCRYPTION_KEY` ổn định nếu cần giải mã bí mật webhook đã lưu; nếu bỏ trống, backend dùng `JWT_SECRET`.

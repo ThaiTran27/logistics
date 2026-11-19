@@ -1,5 +1,6 @@
 const mysql = require('mysql');
 const { promisify } = require('util');
+const { createMysqlConfig } = require('../utils/mysqlConfig');
 
 const environment = String(process.env.NODE_ENV || '').toLowerCase();
 const databaseName = process.env.DB_NAME || 'smart_logistics_v2';
@@ -10,12 +11,7 @@ if (/(^|[_-])prod(uction)?([_-]|$)/i.test(databaseName)) {
   throw new Error('Từ chối chạy CSKH demo seed trên database production.');
 }
 
-const connection = mysql.createConnection({
-  host: process.env.DB_HOST || 'localhost',
-  user: process.env.DB_USER || 'root',
-  password: process.env.DB_PASSWORD || '',
-  database: databaseName
-});
+const connection = mysql.createConnection(createMysqlConfig());
 const query = promisify(connection.query).bind(connection);
 
 async function seedDemoCustomerService() {

@@ -1,11 +1,7 @@
 const mysql = require('mysql');
+const { createMysqlConfig } = require('../utils/mysqlConfig');
 
-const connection = mysql.createConnection({
-  host: process.env.DB_HOST || 'localhost',
-  user: process.env.DB_USER || 'root',
-  password: process.env.DB_PASSWORD || '',
-  database: process.env.DB_NAME || 'smart_logistics_v2'
-});
+const connection = mysql.createConnection(createMysqlConfig());
 
 function query(sql, parameters = []) {
   return new Promise((resolve, reject) => {

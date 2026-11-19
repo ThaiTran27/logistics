@@ -15,6 +15,7 @@ const fs = require('fs');
 const path = require('path');
 const jwt = require('jsonwebtoken');
 const { query: queryAsync, withTransaction } = require('./utils/db');
+const { createMysqlConfig } = require('./utils/mysqlConfig');
 const {
   OrderTransitionError,
   isDeliveryStartAlreadyApplied,
@@ -917,12 +918,7 @@ io.on('connection', (socket) => {
 });
 
 // KẾT NỐI DATABASE MYSQL
-const dbConfig = {
-  host: process.env.DB_HOST || 'localhost',
-  user: process.env.DB_USER || 'root',
-  password: process.env.DB_PASSWORD || '',
-  database: process.env.DB_NAME || 'smart_logistics_v2'
-};
+const dbConfig = createMysqlConfig();
 const db = mysql.createPool(dbConfig);
 const transactionPool = db;
 

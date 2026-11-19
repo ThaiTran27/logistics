@@ -1,6 +1,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const mysql = require('mysql');
+const { createMysqlConfig } = require('../utils/mysqlConfig');
 
 const migrationsDirectory = __dirname;
 const migrationPattern = /^\d{3,}_[a-z0-9_]+\.sql$/i;
@@ -107,10 +108,7 @@ async function main() {
     .filter((filename) => migrationPattern.test(filename))
     .sort((first, second) => first.localeCompare(second));
   const pool = mysql.createPool({
-    host: process.env.DB_HOST || 'localhost',
-    user: process.env.DB_USER || 'root',
-    password: process.env.DB_PASSWORD || '',
-    database: process.env.DB_NAME || 'smart_logistics_v2',
+    ...createMysqlConfig(),
     connectionLimit: 1
   });
 
