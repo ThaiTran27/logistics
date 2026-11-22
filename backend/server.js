@@ -3494,7 +3494,7 @@ const openApiSpecification = {
     version: '1.0.0',
     description: 'Tích hợp tạo đơn giao nhận. Shop dùng API key riêng do cổng Shop cấp; gửi qua header x-api-key. shop_id được xác định từ khóa.'
   },
-  servers: [{ url: 'http://localhost:5000' }],
+  servers: [{ url: String(process.env.PUBLIC_API_URL || `http://localhost:${process.env.PORT || 5000}`).replace(/\/+$/, '') }],
   paths: {
     '/api/v1/orders': {
       post: {

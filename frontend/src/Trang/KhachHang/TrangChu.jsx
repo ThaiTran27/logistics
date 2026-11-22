@@ -38,9 +38,9 @@ function FollowDriver({ location }) {
 }
 
 const SAMPLE_TRACKING_CODES = [
-  { code: 'SLTEST0001', note: 'Đơn đang giao' },
-  { code: 'SLTEST0002', note: 'Tại kho tổng' },
-  { code: 'SLTEST0003', note: 'Chờ lấy hàng' }
+  { code: 'SLTEST260901VN', note: 'Đơn đang giao' },
+  { code: 'SLTEST260902VN', note: 'Tại kho tổng' },
+  { code: 'SLTEST260903VN', note: 'Chờ lấy hàng' }
 ];
 
 export default function TraCuuHanhTrinh() {
@@ -309,7 +309,7 @@ export default function TraCuuHanhTrinh() {
                     <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 group-focus-within:text-blue-600 transition-colors" size={22} />
                     <input
                       type="text"
-                      placeholder="Nhập mã vận đơn (VD: SLTEST0001, SLTEST0002...)"
+                      placeholder="Nhập mã vận đơn (VD: SLTEST260901VN...)"
                       value={maVanDon}
                       onChange={(e) => setMaVanDon(e.target.value.toUpperCase())}
                       className="w-full pl-13 pr-11 py-4 bg-slate-50/80 border-2 border-slate-200/80 rounded-2xl outline-none focus:bg-white focus:border-blue-500 focus:shadow-[0_0_0_4px_rgba(37,99,235,0.12)] transition-all font-bold text-slate-900 text-base placeholder:text-slate-400 placeholder:font-normal uppercase"

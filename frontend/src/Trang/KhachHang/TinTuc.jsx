@@ -126,7 +126,7 @@ export default function TinTuc() {
               <div>
                 <div className="relative h-52 w-full overflow-hidden bg-slate-100">
                   <img
-                    src={resolveApiAssetUrl(article.image_url) || 'https://images.unsplash.com/photo-1586528116311-ad8ed7c663be?auto=format&fit=crop&w=800&q=80'}
+                    src={resolveApiAssetUrl(article.image_url) || '/icons.svg'}
                     alt={article.title}
                     className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105"
                   />

@@ -357,7 +357,7 @@ export default function QuanLyTinTuc() {
 
             <div className="mt-5 overflow-hidden rounded-2xl border border-slate-200 bg-slate-50">
               <img
-                src={selectedImage?.previewUrl || resolveApiAssetUrl(form.image_url) || 'https://images.unsplash.com/photo-1586528116311-ad8ed7c663be?auto=format&fit=crop&w=800&q=80'}
+                src={selectedImage?.previewUrl || resolveApiAssetUrl(form.image_url) || '/icons.svg'}
                 alt={form.title || 'Preview'}
                 className="h-40 w-full object-cover"
               />
@@ -393,7 +393,7 @@ export default function QuanLyTinTuc() {
               {articles.map((item) => (
                 <div key={item.id} className="flex flex-col gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-4 md:flex-row md:items-center md:justify-between">
                   <div className="flex gap-3">
-                    <img src={resolveApiAssetUrl(item.image_url) || 'https://images.unsplash.com/photo-1586528116311-ad8ed7c663be?auto=format&fit=crop&w=800&q=80'} alt={item.title} className="h-16 w-24 rounded-xl object-cover" />
+                    <img src={resolveApiAssetUrl(item.image_url) || '/icons.svg'} alt={item.title} className="h-16 w-24 rounded-xl object-cover" />
                     <div>
                       <span className="inline-flex rounded-full bg-blue-50 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide text-blue-600">
                         {item.category || 'Tin tức'}

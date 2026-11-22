@@ -72,7 +72,15 @@ async function runUp(connection, files) {
     }
     const migration = readMigrationSections(path.join(migrationsDirectory, filename));
     console.log(`Applying ${filename}`);
-    for (const statement of migration.up) await query(connection, statement);
+    for (const statement of migration.up) {
+      try {
+        await query(connection, statement);
+      } catch (error) {
+        const duplicateSchemaDrift = ['ER_DUP_FIELDNAME', 'ER_TABLE_EXISTS_ERROR', 'ER_DUP_KEYNAME', 'ER_DUP_ENTRY'];
+        if (!duplicateSchemaDrift.includes(error.code)) throw error;
+        console.warn(`Schema drift skipped in ${filename}: ${error.sqlMessage || error.message}`);
+      }
+    }
     await query(connection, 'INSERT INTO schema_migrations (filename) VALUES (?)', [filename]);
   }
 }
