@@ -46,4 +46,18 @@ describe('migration SQL parsing', () => {
     expect(migration.up.join('\n')).toContain('ADD COLUMN image_url');
     expect(migration.down.join('\n')).toContain('DROP COLUMN image_url');
   });
+
+  it('repairs known incomplete deployment schema without duplicating existing columns or seed rows', () => {
+    const migration = readMigrationSections(
+      new URL('../migrations/014_repair_render_schema_drift.sql', import.meta.url)
+    );
+
+    const up = migration.up.join('\n');
+    expect(up).toContain('CREATE TABLE IF NOT EXISTS order_items');
+    expect(up).toContain('CREATE TABLE IF NOT EXISTS employee_salary_history');
+    expect(up).toContain('CREATE TABLE IF NOT EXISTS pay_rules');
+    expect(up).toContain('information_schema.columns');
+    expect(up).toContain('UPDATE driver_route_stops SET stop_sequence = stop_order');
+    expect(migration.down.join('\n')).toContain('DROP TABLE IF EXISTS order_items');
+  });
 });
