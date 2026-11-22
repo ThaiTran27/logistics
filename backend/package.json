@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "start": "node --env-file-if-exists=.env server.js",
+    "start": "node --env-file-if-exists=.env migrations/run.js up && node --env-file-if-exists=.env server.js",
     "migrate": "node migrations/run.js up",
     "migrate:down": "node migrations/run.js down",
     "warehouse:preview": "node --env-file-if-exists=.env scripts/preview-warehouse-retirement.js",

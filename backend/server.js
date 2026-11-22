@@ -716,7 +716,17 @@ function createSettlementPdf(summary, orders) {
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: 'http://localhost:5173', 
+    origin: (origin, callback) => {
+      const allowedOrigins = String(process.env.FRONTEND_ORIGINS || process.env.FRONTEND_URL || '')
+        .split(',')
+        .map((value) => value.trim())
+        .filter(Boolean);
+      if (!origin || allowedOrigins.includes(origin) || /^(https:\/\/[^.]+\.vercel\.app|http:\/\/localhost:(?:5173|3000))$/.test(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error('Origin không được phép'));
+      }
+    },
     methods: ['GET', 'POST']
   }
 });
