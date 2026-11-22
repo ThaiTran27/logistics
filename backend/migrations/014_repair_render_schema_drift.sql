@@ -23,7 +23,21 @@ SET @repair_columns = CONCAT_WS(', ',
   IF((SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'orders' AND column_name = 'is_exchange') = 0, 'ADD COLUMN is_exchange TINYINT(1) NOT NULL DEFAULT 0', NULL),
   IF((SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'orders' AND column_name = 'pickup_appointment_at') = 0, 'ADD COLUMN pickup_appointment_at DATETIME NULL', NULL),
   IF((SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'orders' AND column_name = 'pickup_deadline_at') = 0, 'ADD COLUMN pickup_deadline_at DATETIME NULL', NULL),
-  IF((SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'orders' AND column_name = 'promised_delivery_at') = 0, 'ADD COLUMN promised_delivery_at DATETIME NULL', NULL)
+  IF((SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'orders' AND column_name = 'promised_delivery_at') = 0, 'ADD COLUMN promised_delivery_at DATETIME NULL', NULL),
+  IF((SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'orders' AND column_name = 'receiver_lat') = 0, 'ADD COLUMN receiver_lat DOUBLE NULL', NULL),
+  IF((SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'orders' AND column_name = 'receiver_lng') = 0, 'ADD COLUMN receiver_lng DOUBLE NULL', NULL),
+  IF((SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'orders' AND column_name = 'pickup_shipper_id') = 0, 'ADD COLUMN pickup_shipper_id INT NULL', NULL),
+  IF((SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'orders' AND column_name = 'delivery_shipper_id') = 0, 'ADD COLUMN delivery_shipper_id INT NULL', NULL),
+  IF((SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'orders' AND column_name = 'central_transfer_shipper_id') = 0, 'ADD COLUMN central_transfer_shipper_id INT NULL', NULL),
+  IF((SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'orders' AND column_name = 'destination_transfer_shipper_id') = 0, 'ADD COLUMN destination_transfer_shipper_id INT NULL', NULL),
+  IF((SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'orders' AND column_name = 'origin_warehouse_id') = 0, 'ADD COLUMN origin_warehouse_id INT NULL', NULL),
+  IF((SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'orders' AND column_name = 'destination_warehouse_id') = 0, 'ADD COLUMN destination_warehouse_id INT NULL', NULL),
+  IF((SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'orders' AND column_name = 'current_warehouse_id') = 0, 'ADD COLUMN current_warehouse_id INT NULL', NULL),
+  IF((SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'orders' AND column_name = 'storage_bin_id') = 0, 'ADD COLUMN storage_bin_id BIGINT NULL', NULL),
+  IF((SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'orders' AND column_name = 'cross_docked') = 0, 'ADD COLUMN cross_docked TINYINT(1) NOT NULL DEFAULT 0', NULL),
+  IF((SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'orders' AND column_name = 'cod_payment_method') = 0, 'ADD COLUMN cod_payment_method ENUM(''cash'',''bank_transfer'') NULL', NULL),
+  IF((SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'orders' AND column_name = 'cod_collected_amount') = 0, 'ADD COLUMN cod_collected_amount DECIMAL(15,0) NOT NULL DEFAULT 0', NULL),
+  IF((SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'orders' AND column_name = 'signature_image') = 0, 'ADD COLUMN signature_image VARCHAR(255) NULL', NULL)
 );
 SET @repair_ddl = IF(@repair_columns = '', 'SELECT 1', CONCAT('ALTER TABLE orders ', @repair_columns));
 PREPARE repair_statement FROM @repair_ddl;
@@ -162,6 +176,27 @@ ALTER TABLE driver_route_stops
   DROP COLUMN actual_arrival,
   DROP COLUMN planned_eta,
   DROP COLUMN stop_sequence;
+ALTER TABLE orders
+  DROP COLUMN signature_image,
+  DROP COLUMN cod_collected_amount,
+  DROP COLUMN cod_payment_method,
+  DROP COLUMN cross_docked,
+  DROP COLUMN storage_bin_id,
+  DROP COLUMN current_warehouse_id,
+  DROP COLUMN destination_warehouse_id,
+  DROP COLUMN origin_warehouse_id,
+  DROP COLUMN destination_transfer_shipper_id,
+  DROP COLUMN central_transfer_shipper_id,
+  DROP COLUMN delivery_shipper_id,
+  DROP COLUMN pickup_shipper_id,
+  DROP COLUMN receiver_lng,
+  DROP COLUMN receiver_lat,
+  DROP COLUMN promised_delivery_at,
+  DROP COLUMN pickup_deadline_at,
+  DROP COLUMN pickup_appointment_at,
+  DROP COLUMN is_exchange,
+  DROP COLUMN partial_delivery_completed,
+  DROP COLUMN partial_delivery_allowed;
 DROP TABLE IF EXISTS pay_rules;
 DROP TABLE IF EXISTS employee_salary_history;
 DROP TABLE IF EXISTS order_items;

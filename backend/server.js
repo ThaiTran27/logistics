@@ -16,6 +16,7 @@ const path = require('path');
 const jwt = require('jsonwebtoken');
 const { query: queryAsync, withTransaction } = require('./utils/db');
 const { createMysqlConfig } = require('./utils/mysqlConfig');
+const { serializeDdlQueries } = require('./utils/serializedDdl');
 const {
   OrderTransitionError,
   isDeliveryStartAlreadyApplied,
@@ -930,6 +931,7 @@ io.on('connection', (socket) => {
 // KẾT NỐI DATABASE MYSQL
 const dbConfig = createMysqlConfig();
 const db = mysql.createPool(dbConfig);
+serializeDdlQueries(db);
 const transactionPool = db;
 
 async function getCentralWarehouseId(connection, lockRow = false) {
