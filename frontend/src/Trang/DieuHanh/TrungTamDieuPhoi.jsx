@@ -1,8 +1,8 @@
 import { API_URL, apiFetch as fetch } from '../../utils/apiFetch.js';
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { io } from 'socket.io-client';
-import { MapContainer, TileLayer, Marker, Popup, useMap } from 'react-leaflet';
-import { GOVAP_MAP_CENTER, MAP_ATTRIBUTION, MAP_TILE_URL } from '../../utils/govapMap.js';
+import { MapContainer, Marker, Popup, useMap } from 'react-leaflet';
+import { GOVAP_MAP_CENTER, MapTileLayer } from '../../utils/govapMap.js';
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
 import { Truck, MapPin, Navigation, Search, CheckCircle, Clock, Map, FileText, Send, Zap, Users, Package, ShieldCheck, RotateCw, AlertCircle } from 'lucide-react';
@@ -938,7 +938,7 @@ export default function TrungTamDieuPhoi() {
                 <div className="flex items-center justify-between"><h2 className="font-black">GPS xe tải đang chạy</h2><button type="button" onClick={taiDuLieuFleet} className="rounded-lg bg-slate-100 p-2" aria-label="Làm mới vị trí"><RotateCw size={16} /></button></div>
                 <div className="relative z-0 isolate h-64 overflow-hidden rounded-xl">
                   <MapContainer center={GOVAP_MAP_CENTER} zoom={13} style={{ width: '100%', height: '100%' }} className="relative z-0 isolate">
-                    <UpdateMapSize /><TileLayer url={MAP_TILE_URL} attribution={MAP_ATTRIBUTION} />
+                    <UpdateMapSize /><MapTileLayer />
                     {linehaulPositions.map((position) => <Marker key={position.trip_id} position={[Number(position.lat), Number(position.lng)]} icon={shipperIcon}><Popup><strong>{position.trip_code} · {position.vehicle_plate}</strong><br />{position.driver_name}<br />{position.source_warehouse_name} → {position.destination_warehouse_name}</Popup></Marker>)}
                   </MapContainer>
                 </div>
@@ -1339,7 +1339,7 @@ export default function TrungTamDieuPhoi() {
               <MapContainer center={GOVAP_MAP_CENTER} zoom={13} style={{ width: '100%', height: '100%' }} className="relative z-0 isolate">
                 {/* Thành phần bắt buộc để fix lỗi xám khung hình */}
                 <UpdateMapSize /> 
-                <TileLayer url={MAP_TILE_URL} attribution={MAP_ATTRIBUTION} />
+                <MapTileLayer />
                 {Object.entries(viTriTaiXeMap || {}).map(([orderId, pos]) => (
                   <Marker key={orderId} position={[pos.lat, pos.lng]} icon={shipperIcon}>
                     <Popup>

@@ -4,10 +4,10 @@ import { Html5QrcodeScanner, Html5QrcodeSupportedFormats } from 'html5-qrcode';
 import QRCode from 'react-qr-code';
 import { io } from 'socket.io-client';
 import { MapPin, Package, PackageCheck, CheckCircle, XCircle, LogOut, Navigation, Wallet, UserCircle, Bike, Map as MapIcon, Send, CalendarOff, Camera, AlertTriangle, X, ShieldCheck, House, Banknote, Siren, Wifi, WifiOff, ScanLine, Route, Truck, MessageCircle } from 'lucide-react';
-import { MapContainer, TileLayer, Marker, Popup, Polyline, useMap } from 'react-leaflet';
+import { MapContainer, Marker, Popup, Polyline, useMap } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
-import { GOVAP_MAP_CENTER, MAP_ATTRIBUTION, MAP_TILE_URL } from '../../utils/govapMap.js';
+import { GOVAP_MAP_CENTER, MapTileLayer } from '../../utils/govapMap.js';
 import { OrderStatusBadge } from '../../utils/orderStatus.jsx';
 
 import iconMarkerUrl from 'leaflet/dist/images/marker-icon.png';
@@ -333,7 +333,7 @@ function LinehaulDriverAppContent() {
               {destinationCoordinates && <div className="relative z-0 isolate overflow-hidden rounded-xl border border-slate-200">
                 <MapContainer key={activeTrip.id} center={currentCoordinates || destinationCoordinates} zoom={currentCoordinates ? 11 : 13} scrollWheelZoom={false} className="relative z-0 h-56 w-full rounded-xl sm:h-64">
                   <InvalidateMapSize />
-                  <TileLayer attribution={MAP_ATTRIBUTION} url={MAP_TILE_URL} />
+                  <MapTileLayer />
                   <Marker position={destinationCoordinates} icon={truckIcon}><Popup>{activeTrip.destination_warehouse_name}</Popup></Marker>
                   {currentCoordinates && <><Marker position={currentCoordinates} icon={truckIcon}><Popup>Vị trí xe hiện tại</Popup></Marker><Polyline positions={[currentCoordinates, destinationCoordinates]} pathOptions={{ color: '#4f46e5', weight: 4, dashArray: '8 8' }} /></>}
                 </MapContainer>
@@ -1588,7 +1588,7 @@ function MotorcycleDriverApp() {
                 className="relative z-0 h-full w-full rounded-2xl border border-slate-200"
               >
                 <InvalidateMapSize />
-                <TileLayer attribution={MAP_ATTRIBUTION} url={MAP_TILE_URL} />
+                <MapTileLayer />
                 {driverRouteGeometry?.key === routeGeometryKey && driverRouteGeometry.positions.length > 1
                   && <Polyline positions={driverRouteGeometry.positions} pathOptions={{ color: isPickupDriver ? '#d97706' : '#2563eb', weight: 5 }} />}
                 {routeGeometry.length > 1 && <Polyline positions={routeGeometry} pathOptions={{ color: '#2563eb', weight: 5 }} />}
@@ -1831,7 +1831,7 @@ function MotorcycleDriverApp() {
               <div className="p-3 bg-blue-50 border-b border-blue-100 text-center text-xs font-bold text-blue-700">🛰️ GPS đang đồng bộ liên tục.</div>
               <MapContainer center={[viTriHienTai.lat, viTriHienTai.lng]} zoom={15} style={{ flex: 1, width: '100%' }}>
                 <InvalidateMapSize />
-                <TileLayer attribution={MAP_ATTRIBUTION} url={MAP_TILE_URL}/>
+                <MapTileLayer />
                 <Marker position={[viTriHienTai.lat, viTriHienTai.lng]} icon={truckIcon}><Popup><div className="font-bold">Bạn đang ở đây</div></Popup></Marker>
               </MapContainer>
             </div>

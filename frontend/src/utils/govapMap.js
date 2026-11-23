@@ -1,5 +1,7 @@
 import govapWardsRaw from '../../../shared/govap-wards.geojson?raw';
 import L from 'leaflet';
+import { createElement } from 'react';
+import { TileLayer } from 'react-leaflet';
 
 export const GOVAP_WARDS = JSON.parse(govapWardsRaw);
 export const GOVAP_MAP_BOUNDS = GOVAP_WARDS.features.reduce((bounds, feature) => {
@@ -13,6 +15,16 @@ export const GOVAP_MAP_CENTER = [10.837, 106.669];
 export const MAP_TILE_URL = import.meta.env.VITE_MAP_TILE_URL
   || 'http://localhost:8080/styles/govap/{z}/{x}/{y}.png';
 export const MAP_ATTRIBUTION = '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap contributors</a>';
+
+export function MapTileLayer({ eventHandlers, ...props }) {
+  return createElement(TileLayer, {
+    ...props,
+    key: 'self-hosted',
+    url: MAP_TILE_URL,
+    attribution: MAP_ATTRIBUTION,
+    eventHandlers
+  });
+}
 
 const isPointInRing = (longitude, latitude, ring) => {
   let isInside = false;

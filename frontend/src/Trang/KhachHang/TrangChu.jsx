@@ -1,8 +1,8 @@
 import { API_URL, apiFetch as fetch, resolveApiAssetUrl } from '../../utils/apiFetch.js';
 import { useEffect, useState } from 'react';
 import { io } from 'socket.io-client';
-import { MapContainer, Marker, Popup, TileLayer, useMap } from 'react-leaflet';
-import { GOVAP_MAP_CENTER, MAP_ATTRIBUTION, MAP_TILE_URL } from '../../utils/govapMap.js';
+import { MapContainer, Marker, Popup, useMap } from 'react-leaflet';
+import { GOVAP_MAP_CENTER, MapTileLayer } from '../../utils/govapMap.js';
 import { OrderStatusBadge, getOrderStatusLabel } from '../../utils/orderStatus.jsx';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
@@ -534,7 +534,7 @@ export default function TraCuuHanhTrinh() {
 
               <div className="h-80 rounded-2xl overflow-hidden border border-slate-200 shadow-inner relative">
                 <MapContainer center={mapCenter} zoom={mapTarget ? 14 : 12} className="h-full w-full">
-                  <TileLayer url={MAP_TILE_URL} attribution={MAP_ATTRIBUTION} />
+                  <MapTileLayer />
                   <FollowDriver location={mapTarget} />
                   {mapTarget && (
                     <Marker position={mapCenter} icon={movingTruckIcon}>

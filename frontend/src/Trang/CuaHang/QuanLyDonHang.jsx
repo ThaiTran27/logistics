@@ -1,6 +1,6 @@
 import { API_URL, apiFetch as fetch } from '../../utils/apiFetch.js';
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { MapContainer, TileLayer, Marker, Popup, Polyline, GeoJSON, useMap, useMapEvents } from 'react-leaflet';
+import { MapContainer, Marker, Popup, Polyline, GeoJSON, useMap, useMapEvents } from 'react-leaflet';
 import { io } from 'socket.io-client';
 import * as XLSX from 'xlsx';
 import 'leaflet/dist/leaflet.css';
@@ -15,8 +15,7 @@ import {
   GOVAP_MAP_CENTER,
   GOVAP_WARDS,
   isWithinGovapServiceArea,
-  MAP_ATTRIBUTION,
-  MAP_TILE_URL
+  MapTileLayer
 } from '../../utils/govapMap.js';
 import { OrderStatusBadge, getOrderStatusLabel } from '../../utils/orderStatus.jsx';
 const BULK_ORDER_LIMIT = 500;
@@ -73,7 +72,7 @@ function LiveTrackingMap({ route, driverLocation }) {
 
   return (
     <MapContainer center={mapCenter} zoom={13} scrollWheelZoom className="h-72 w-full rounded-2xl">
-      <TileLayer attribution={MAP_ATTRIBUTION} url={MAP_TILE_URL} />
+      <MapTileLayer />
       <FitTrackingMap route={route} driverLocation={driverLocation} />
       {routePoints.length > 1 && <Polyline positions={routePoints} pathOptions={{ color: '#2563eb', weight: 5, opacity: 0.75, dashArray: '8 8' }} />}
       {route?.pickup && <Marker position={[Number(route.pickup.lat), Number(route.pickup.lng)]} icon={shopMarkerIcon}><Popup><strong>Điểm lấy hàng</strong></Popup></Marker>}
@@ -126,10 +125,8 @@ function LocationMapTiles() {
   const [tilesUnavailable, setTilesUnavailable] = useState(false);
   return (
     <>
-      <TileLayer
+      <MapTileLayer
         key={retryAttempt}
-        attribution={MAP_ATTRIBUTION}
-        url={MAP_TILE_URL}
         eventHandlers={{
           tileload: () => setTilesUnavailable(false),
           tileerror: () => setTilesUnavailable(true)

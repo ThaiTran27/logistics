@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import { MapContainer, TileLayer, CircleMarker, Popup } from 'react-leaflet';
-import { GOVAP_MAP_CENTER, MAP_ATTRIBUTION, MAP_TILE_URL } from '../../utils/govapMap.js';
+import { MapContainer, CircleMarker, Popup } from 'react-leaflet';
+import { GOVAP_MAP_CENTER, MapTileLayer } from '../../utils/govapMap.js';
 import { API_URL, apiFetch as fetch } from '../../utils/apiFetch.js';
 import { 
   BarChart3, TrendingUp, Package, Truck, Wallet, 
@@ -453,7 +453,7 @@ export default function DashboardGiamDoc() {
               </div>
               {heatmapPoints.length > 0 ? (
                 <MapContainer center={GOVAP_MAP_CENTER} zoom={13} scrollWheelZoom={false} className="h-[420px] w-full rounded-2xl">
-                  <TileLayer attribution={MAP_ATTRIBUTION} url={MAP_TILE_URL} />
+                  <MapTileLayer />
                   {heatmapPoints.map((item) => {
                     const intensity = Math.min(Number(item.order_count) / maxHeatmapOrders, 1);
                     return (

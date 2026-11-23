@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useState } from 'react';
-import { MapContainer, Marker, Popup, Polyline, TileLayer, useMap } from 'react-leaflet';
+import { MapContainer, Marker, Popup, Polyline, useMap } from 'react-leaflet';
 import L from 'leaflet';
 import {
   AlertTriangle, CheckCircle, Clock, MapPin, Package, RefreshCw, Search,
   Settings2, Truck, Users, X, Zap
 } from 'lucide-react';
 import {
-  GOVAP_MAP_CENTER, GOVAP_WARDS, MAP_ATTRIBUTION, MAP_TILE_URL, findGovapWard
+  GOVAP_MAP_CENTER, GOVAP_WARDS, MapTileLayer, findGovapWard
 } from '../../utils/govapMap.js';
 import { isOrderWaitOverdue, OrderStatusBadge } from '../../utils/orderStatus.jsx';
 import { apiFetch as fetch } from '../../utils/apiFetch.js';
@@ -673,7 +673,7 @@ export default function DispatcherRouteBoard({
             <div className="relative z-0 isolate h-64 w-full overflow-hidden rounded-xl">
               <MapContainer center={GOVAP_MAP_CENTER} zoom={12} style={{ width: '100%', height: '100%' }} className="relative z-0 isolate">
                 <InvalidateMapSize />
-                <TileLayer url={MAP_TILE_URL} attribution={MAP_ATTRIBUTION} />
+                <MapTileLayer />
                 {dispatcherRouteGeometry?.key === `${selectedRouteDriver}:${selectedDriverRoute?.mode}:${(selectedDriverRoute?.stops || []).map((stop) => stop.stop_ids?.[0]).join(',')}`
                   && dispatcherRouteGeometry.positions.length > 1
                   && <Polyline positions={dispatcherRouteGeometry.positions} pathOptions={{ color: selectedDriverRoute?.mode === 'pickup' ? '#d97706' : '#2563eb', weight: 5 }} />}
